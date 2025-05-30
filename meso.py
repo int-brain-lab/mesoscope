@@ -1,0 +1,208 @@
+from one.api import ONE
+from iblutil.util import Bunch
+from iblatlas.atlas import AllenAtlas
+import numpy as np
+import matplotlib.pyplot as plt
+from collections  import Counter
+from rastermap import Rastermap
+from pathlib import Path
+import matplotlib.patches as mpatches
+from matplotlib.colors import to_rgba, hsv_to_rgb, to_hex
+import gc
+
+
+one = ONE()
+
+pth_meso = Path(one.cache_dir, 'meso')
+pth_meso.mkdir(parents=True, exist_ok=True)
+
+
+atlas = AllenAtlas()
+
+adf = atlas.regions.to_df()
+region_colors_dict = {
+    row['acronym']: f"{row['hexcolor']}"  
+    for _, row in adf.iterrows()}
+
+
+def load_distinct_bright_colors(n=20, saturation=0.9, brightness=0.95):
+    hues = np.linspace(0, 1, n, endpoint=False)
+    hsv = np.stack([hues, np.full(n, saturation), np.full(n, brightness)], axis=1)
+    rgb = hsv_to_rgb(hsv)
+    hex_colors = [to_hex(c) for c in rgb]
+    return hex_colors
+
+
+def embed_meso(eid):
+
+    '''
+    Load and embed mesoscope data via rastermap for a given experiment ID (eid).
+    Parameters:
+    - eid: str, experiment ID
+    eid = '71e53fd1-38f2-49bb-93a1-3c826fbe7c13', Sam's example
+
+    query = 'field_of_view__imaging_type__name,mesoscope'
+    eids = one.search(procedures='Imaging', django=query, query_type='remote')
+    '''
+    print('Loading mesoscope data for experiment ID:', eid)
+
+    objects = ['mpci', 'mpciROIs', 'mpciROITypes', 'mpciStack']  
+
+    fov_folders = one.list_collections(eid, collection='alf/FOV_*')
+    fovs = sorted(map(lambda x: int(x[-2:]), fov_folders))
+    nFOV = len(fovs)
+
+    all_ROI_data = Bunch()
+    for fov in fov_folders:
+        all_ROI_data[fov.split('/')[-1]] = one.load_collection(eid, fov, object=objects)
+
+    roi_signals = []
+    roi_timess = []
+    region_labelss = []
+    region_colorss = []
+
+    for fov in all_ROI_data:
+        print(fov)
+        ROI_data_00 = all_ROI_data[fov]
+
+        # Determine region alignment key
+        key = 'brainLocationsIds_ccf_2017' if 'brainLocationsIds_ccf_2017' in ROI_data_00['mpciROIs'] \
+            else 'brainLocationIds_ccf_2017_estimate'
+        
+        region_ids = ROI_data_00['mpciROIs'][key]
+        region_labels = atlas.regions.id2acronym(region_ids)
+
+
+        region_colors = np.array([adf.loc[adf['id'] == i, 
+                            'hexcolor'].values[0] for i in region_ids])
+
+        # Data: times and ROI signals
+        frame_times = ROI_data_00['mpci']['times']
+        roi_xyz = ROI_data_00['mpciROIs']['stackPos']
+        timeshift = ROI_data_00['mpciStack']['timeshift']
+        roi_offsets = timeshift[roi_xyz[:, len(timeshift.shape)]]
+        
+        roi_times = np.tile(frame_times, 
+                            (roi_offsets.size, 1)) + roi_offsets[np.newaxis, :].T
+
+        roi_signal = ROI_data_00['mpci']['ROIActivityF'].T  
+
+        
+        print(roi_times.shape[1], 'time bins', 'from ', roi_times[0].min(), 
+            'to', roi_times[0].max(), 
+            f'bin size: {np.diff(roi_times[0])[0]:.4f} s')
+
+        # filter out neurons only
+        mask = ROI_data_00['mpciROIs']['mpciROITypes']
+        mask = mask.astype(bool)
+
+        print(fov, sum(mask), 'of', len(mask), 'channels are neurons')
+
+        roi_signals.append(roi_signal[mask])
+        roi_timess.append(roi_times)
+        region_labelss.append(region_labels[mask])
+        region_colorss.append(region_colors[mask])
+        
+    # stack across fovs    
+    roi_signal = np.vstack(roi_signals)
+    roi_times = roi_timess[0]  # all fovs have the same time bins
+    region_labels = np.hstack(region_labelss)
+    region_colors = np.hstack(region_colorss)
+
+    print(roi_signal.shape, 'ROI signal shape')
+    print(Counter(region_labels))
+
+
+    print('Running rastermap...')
+    model = Rastermap(n_PCs=100, n_clusters=30,
+                    locality=0.75, time_lag_window=5, 
+                    bin_size=1).fit(roi_signal)
+
+    isort = model.isort
+    roi_signal_sorted = roi_signal[isort]
+    region_colors_sorted = region_colors[isort]
+
+    rr = {
+        'roi_signal': roi_signal_sorted,
+        'roi_times': roi_times,
+        'region_labels': region_labels[isort],
+        'region_colors': region_colors_sorted,
+        'isort': isort}
+
+    dpth = Path(pth_meso, 'data')
+    dpth.mkdir(parents=True, exist_ok=True)
+    np.save(Path(dpth, f"{eid}.npy"), rr, allow_pickle=True)
+
+
+
+def plot_meso(eid, bg=True, bg_bright=0.3, interp='none'):
+
+
+    rr = np.load(Path(pth_meso, 'data', f"{eid}.npy"), 
+                      allow_pickle=True).item()
+
+    # Allen colors are too similar for these visual areas, remap to distinct colors
+    regs = np.unique(rr['region_labels'])   
+    region_colors_d = dict(zip(regs,load_distinct_bright_colors(n=len(regs))))
+    region_colors = np.array([region_colors_d[reg] for reg in rr['region_labels']])
+
+
+
+    n_rows, n_cols = rr['roi_signal'].shape
+    fig, ax = plt.subplots(figsize=(8, 10))
+        
+    ax.imshow(rr['roi_signal'], cmap='gray_r', aspect='auto', interpolation=interp,
+                    extent=[rr['roi_times'][0].min(), rr['roi_times'][0].max(), 0, n_rows],
+                    zorder=1)
+
+    if bg:
+        alpha=0.2
+        for i, color in enumerate(region_colors):
+            ax.fill_between(
+                [rr['roi_times'][0].min(), rr['roi_times'][0].max()],
+                i, i + 1, facecolor=color, alpha=alpha, linewidth=0
+            )
+
+    ax.set_xlabel('Time [s]')
+    ax.set_ylabel('rastermap sorted ROIs')
+
+    region_counter = Counter(rr['region_labels'])
+
+    patches = [
+        mpatches.Patch(color=region_colors_d[region], label=f"{region} ({count})")
+        for region, count in region_counter.items()
+    ]
+
+    n_cols = len(patches)  # one column per region
+    legend = ax.legend(
+        handles=patches,
+        loc='lower center',
+        bbox_to_anchor=(0.5, 1.02),
+        ncol=n_cols//2 if n_cols > 3 else n_cols,
+        frameon=False,
+        fontsize='small'
+    )
+
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    # plt.colorbar(im, ax=ax, label='Activity (dF/F)')
+    plt.tight_layout()
+    fig.savefig(Path(pth_meso, 
+        f"{eid}_{'_'.join(np.unique(rr['region_labels']))}_{'_'.join([str(x) for x in rr['roi_signal'].shape])}.png"), dpi=300)
+    plt.close()
+
+
+if __name__ == "__main__":
+    # Query for all mesoscope experiments
+    query = 'field_of_view__imaging_type__name,mesoscope'
+    eids = one.search(procedures='Imaging', django=query, query_type='remote')
+
+    print(f"Found {len(eids)} mesoscope experiment IDs.")
+
+    for eid in eids:
+        try:
+            print(f"\nProcessing {eid}")
+            embed_meso(eid)
+            plot_meso(eid)
+        except Exception as e:
+            print(f"Failed to process {eid}: {e}")
