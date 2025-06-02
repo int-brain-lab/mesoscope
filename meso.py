@@ -9,6 +9,8 @@ from pathlib import Path
 import matplotlib.patches as mpatches
 from matplotlib.colors import to_rgba, hsv_to_rgb, to_hex
 import gc
+from matplotlib import cm
+from matplotlib.ticker import MaxNLocator
 
 
 one = ONE()
@@ -60,6 +62,7 @@ def embed_meso(eid):
     roi_timess = []
     region_labelss = []
     region_colorss = []
+    xyzs = []
 
     for fov in all_ROI_data:
         print(fov)
@@ -102,12 +105,15 @@ def embed_meso(eid):
         roi_timess.append(roi_times)
         region_labelss.append(region_labels[mask])
         region_colorss.append(region_colors[mask])
+        xyzs.append(roi_xyz[mask])
+
         
     # stack across fovs    
     roi_signal = np.vstack(roi_signals)
     roi_times = roi_timess[0]  # all fovs have the same time bins
     region_labels = np.hstack(region_labelss)
     region_colors = np.hstack(region_colorss)
+    xyz = np.vstack(xyzs)
 
     print(roi_signal.shape, 'ROI signal shape')
     print(Counter(region_labels))
@@ -127,7 +133,8 @@ def embed_meso(eid):
         'roi_times': roi_times,
         'region_labels': region_labels[isort],
         'region_colors': region_colors_sorted,
-        'isort': isort}
+        'isort': isort,
+        'xyz': xyz[isort]}
 
     dpth = Path(pth_meso, 'data')
     dpth.mkdir(parents=True, exist_ok=True)
@@ -178,7 +185,7 @@ def plot_meso(eid, bg=True, bg_bright=0.3, interp='none'):
         handles=patches,
         loc='lower center',
         bbox_to_anchor=(0.5, 1.02),
-        ncol=n_cols//2 if n_cols > 3 else n_cols,
+        ncol=min(6, n_cols if n_cols <= 3 else n_cols // 2),
         frameon=False,
         fontsize='small'
     )
@@ -192,17 +199,83 @@ def plot_meso(eid, bg=True, bg_bright=0.3, interp='none'):
     plt.close()
 
 
-if __name__ == "__main__":
-    # Query for all mesoscope experiments
-    query = 'field_of_view__imaging_type__name,mesoscope'
-    eids = one.search(procedures='Imaging', django=query, query_type='remote')
+# if __name__ == "__main__":
+#     # Query for all mesoscope experiments
+#     query = 'field_of_view__imaging_type__name,mesoscope'
+#     eids = one.search(procedures='Imaging', django=query, query_type='remote')
 
-    print(f"Found {len(eids)} mesoscope experiment IDs.")
+#     print(f"Found {len(eids)} mesoscope experiment IDs.")
 
-    for eid in eids:
-        try:
-            print(f"\nProcessing {eid}")
-            embed_meso(eid)
-            plot_meso(eid)
-        except Exception as e:
-            print(f"Failed to process {eid}: {e}")
+#     for eid in eids:
+#         try:
+#             print(f"\nProcessing {eid}")
+#             embed_meso(eid)
+#             plot_meso(eid)
+#         except Exception as e:
+#             print(f"Failed to process {eid}: {e}")
+
+
+
+def plot_xyz(eid, mapping='isort', axoff=False, ax=None):
+
+    '''
+    3d plot of cell locations
+    '''
+
+    r = np.load(Path(pth_meso, 'data', f"{eid}.npy"), 
+                      allow_pickle=True).item()
+   
+    
+    if mapping == 'isort':
+        color_values = r['isort'] / r['isort'].max()
+        cmap = cm.get_cmap('Spectral')
+        cols = cmap(color_values)
+
+    elif mapping == 'regions':
+        # cols = r['region_colors']  # too simlar colors
+        regs = np.unique(r['region_labels'])   
+        region_colors_d = dict(zip(regs,load_distinct_bright_colors(n=len(regs))))
+        cols = np.array([region_colors_d[reg] 
+            for reg in r['region_labels']])
+
+
+
+    xyz = r['xyz']  # isorted xyz coordinates
+    
+    alone = False
+    if not ax:
+        alone = True
+        fig = plt.figure(figsize=(8.43,7.26), label=mapping)
+        ax = fig.add_subplot(111,projection='3d')
+
+       
+    ax.scatter(xyz[:,0], xyz[:,1],xyz[:,2], depthshade=False,
+               marker='o', s = 1 if alone else 0.5, c=cols)
+               
+                       
+    scalef = 1.2                  
+    ax.view_init(elev=45.78, azim=-33.4)
+    ax.set_xlim(min(xyz[:,0])/scalef, max(xyz[:,0])/scalef)
+    ax.set_ylim(min(xyz[:,1])/scalef, max(xyz[:,1])/scalef)
+    ax.set_zlim(min(xyz[:,2])/scalef, max(xyz[:,2])/scalef)
+    ax.xaxis.pane.fill = False
+    ax.yaxis.pane.fill = False
+    ax.zaxis.pane.fill = False
+
+    fontsize = 14
+    ax.set_xlabel('x [mm]', fontsize = fontsize)
+    ax.set_ylabel('y [mm]', fontsize = fontsize)
+    ax.set_zlabel('z [mm]', fontsize = fontsize)
+    ax.tick_params(axis='both', labelsize=12)
+    #ax.set_title(f'Mapping: {mapping}')
+    ax.grid(False)
+    nbins = 3
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=nbins))
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=nbins))
+    ax.zaxis.set_major_locator(MaxNLocator(nbins=nbins))
+
+    if axoff:
+        ax.axis('off')
+
+    ax.set_title(f'{mapping}')
+
