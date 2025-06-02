@@ -88,8 +88,8 @@ def embed_meso(eid):
         roi_times = np.tile(frame_times, 
                             (roi_offsets.size, 1)) + roi_offsets[np.newaxis, :].T
 
-        roi_signal = ROI_data_00['mpci']['ROIActivityF'].T  
-
+        # roi_signal = ROI_data_00['mpci']['ROIActivityF'].T  
+        roi_signal = ROI_data_00['mpci']['ROIActivityDeconvolved'].T 
         
         print(roi_times.shape[1], 'time bins', 'from ', roi_times[0].min(), 
             'to', roi_times[0].max(), 
