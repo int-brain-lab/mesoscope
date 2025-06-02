@@ -105,7 +105,7 @@ def embed_meso(eid):
         roi_timess.append(roi_times)
         region_labelss.append(region_labels[mask])
         region_colorss.append(region_colors[mask])
-        xyzs.append(roi_xyz[mask])
+        xyzs.append(ROI_data_00['mpciROIs']['mlapdv_estimate'][mask])
 
         
     # stack across fovs    
@@ -240,7 +240,7 @@ def plot_xyz(eid, mapping='isort', axoff=False, ax=None):
 
 
 
-    xyz = r['xyz']  # isorted xyz coordinates
+    xyz = r['xyz'] / 1000  # isorted xyz coordinates; in mm
     
     alone = False
     if not ax:
@@ -253,7 +253,7 @@ def plot_xyz(eid, mapping='isort', axoff=False, ax=None):
                marker='o', s = 1 if alone else 0.5, c=cols)
                
                        
-    scalef = 1.2                  
+    scalef = 1                 
     ax.view_init(elev=45.78, azim=-33.4)
     ax.set_xlim(min(xyz[:,0])/scalef, max(xyz[:,0])/scalef)
     ax.set_ylim(min(xyz[:,1])/scalef, max(xyz[:,1])/scalef)
@@ -277,5 +277,21 @@ def plot_xyz(eid, mapping='isort', axoff=False, ax=None):
     if axoff:
         ax.axis('off')
 
-    ax.set_title(f'{mapping}')
+    ax.set_title(f'color: {mapping} \n eid = {eid}')
 
+    # Add legend with region label names and colors
+    if mapping == 'regions':
+        handles = [
+            mpatches.Patch(color=region_colors_d[reg], label=reg)
+            for reg in sorted(regs)
+        ]
+        if alone:
+            # Create a separate legend outside the 3D plot if standalone
+            fig.subplots_adjust(right=0.75)
+            ax.legend(handles=handles, loc='center left',
+                      bbox_to_anchor=(1.05, 0.5),
+                      fontsize='small', frameon=False)
+        else:
+            # Add legend inside current axes if ax was passed
+            ax.legend(handles=handles, loc='upper right',
+                      fontsize='small', frameon=False)
