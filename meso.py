@@ -11,7 +11,7 @@ from matplotlib.colors import to_rgba, hsv_to_rgb, to_hex
 import gc
 from matplotlib import cm
 from matplotlib.ticker import MaxNLocator
-
+from scipy.stats import zscore
 
 one = ONE()
 
@@ -35,7 +35,7 @@ def load_distinct_bright_colors(n=20, saturation=0.9, brightness=0.95):
     return hex_colors
 
 
-def embed_meso(eid):
+def embed_meso(eid, scaling=True):
 
     '''
     Load and embed mesoscope data via rastermap for a given experiment ID (eid).
@@ -45,6 +45,9 @@ def embed_meso(eid):
 
     query = 'field_of_view__imaging_type__name,mesoscope'
     eids = one.search(procedures='Imaging', django=query, query_type='remote')
+
+
+    scaling: bool, whether to scale the data by percentile
     '''
     print('Loading mesoscope data for experiment ID:', eid)
 
@@ -118,6 +121,13 @@ def embed_meso(eid):
     print(roi_signal.shape, 'ROI signal shape')
     print(Counter(region_labels))
 
+    if scaling:
+        # scaling every trace between its 20th and 99th percentile
+        print('Scaling ROI signals...')
+        p20 = np.percentile(roi_signal, 20, axis=1, keepdims=True)
+        p99 = np.percentile(roi_signal, 99, axis=1, keepdims=True)
+        roi_signal = (roi_signal - p20) / (p99 - p20)
+
 
     print('Running rastermap...')
     model = Rastermap(n_PCs=100, n_clusters=30,
@@ -142,8 +152,12 @@ def embed_meso(eid):
 
 
 
-def plot_meso(eid, bg=True, bg_bright=0.3, interp='none'):
+def plot_raster(eid, bg=True, alpha=0.3, interp='none', restr=True):
 
+
+    '''
+    restr: restrict to 1 min starting at end of first third of recording
+    '''
 
     rr = np.load(Path(pth_meso, 'data', f"{eid}.npy"), 
                       allow_pickle=True).item()
@@ -154,16 +168,28 @@ def plot_meso(eid, bg=True, bg_bright=0.3, interp='none'):
     region_colors = np.array([region_colors_d[reg] for reg in rr['region_labels']])
 
 
-
-    n_rows, n_cols = rr['roi_signal'].shape
+    n_rows, n_time = rr['roi_signal'].shape
     fig, ax = plt.subplots(figsize=(8, 10))
-        
+
+    if restr:
+        # Time resolution (samples per second)
+        sampling_rate = rr['roi_times'][0].shape[0] / (rr['roi_times'][0].max() - rr['roi_times'][0].min())
+
+        # Number of time bins in 1 minute
+        n_1min = int(sampling_rate * 60)
+
+        # Start of second third
+        start = n_time // 3
+
+        rr['roi_signal'] = rr['roi_signal'][:, start:start + n_1min]
+        rr['roi_times'] = rr['roi_times'][:, start:start + n_1min]
+
+    vmin, vmax = 0, 0.5
     ax.imshow(rr['roi_signal'], cmap='gray_r', aspect='auto', interpolation=interp,
-                    extent=[rr['roi_times'][0].min(), rr['roi_times'][0].max(), 0, n_rows],
+                    extent=[rr['roi_times'][0].min(), rr['roi_times'][0].max(), 0, n_rows], vmin=vmin, vmax=vmax,
                     zorder=1)
 
     if bg:
-        alpha=0.2
         for i, color in enumerate(region_colors):
             ax.fill_between(
                 [rr['roi_times'][0].min(), rr['roi_times'][0].max()],
@@ -196,7 +222,7 @@ def plot_meso(eid, bg=True, bg_bright=0.3, interp='none'):
     plt.tight_layout()
     fig.savefig(Path(pth_meso, 
         f"{eid}_{'_'.join(np.unique(rr['region_labels']))}_{'_'.join([str(x) for x in rr['roi_signal'].shape])}.png"), dpi=300)
-    plt.close()
+    #plt.close()
 
 
 # if __name__ == "__main__":
@@ -224,7 +250,12 @@ def plot_xyz(eid, mapping='isort', axoff=False, ax=None):
 
     r = np.load(Path(pth_meso, 'data', f"{eid}.npy"), 
                       allow_pickle=True).item()
-   
+                      
+    alone = False
+    if not ax:
+        alone = True
+        fig = plt.figure(figsize=(8.43,7.26), label=mapping)
+        ax = fig.add_subplot(111,projection='3d')   
     
     if mapping == 'isort':
         color_values = r['isort'] / r['isort'].max()
@@ -242,11 +273,7 @@ def plot_xyz(eid, mapping='isort', axoff=False, ax=None):
 
     xyz = r['xyz'] / 1000  # isorted xyz coordinates; in mm
     
-    alone = False
-    if not ax:
-        alone = True
-        fig = plt.figure(figsize=(8.43,7.26), label=mapping)
-        ax = fig.add_subplot(111,projection='3d')
+
 
        
     ax.scatter(xyz[:,0], xyz[:,1],xyz[:,2], depthshade=False,
