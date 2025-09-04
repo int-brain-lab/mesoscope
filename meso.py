@@ -12,6 +12,10 @@ import gc
 from matplotlib import cm
 from matplotlib.ticker import MaxNLocator
 from scipy.stats import zscore
+from matplotlib import gridspec
+from brainbox.io.one import SessionLoader
+from brainbox.behavior.wheel import interpolate_position
+from brainbox.behavior.wheel import velocity_filtered
 
 one = ONE()
 
@@ -35,7 +39,7 @@ def load_distinct_bright_colors(n=20, saturation=0.9, brightness=0.95):
     return hex_colors
 
 
-def embed_meso(eid, scaling=True):
+def embed_meso(eid):
 
     '''
     Load and embed mesoscope data via rastermap for a given experiment ID (eid).
@@ -121,13 +125,6 @@ def embed_meso(eid, scaling=True):
     print(roi_signal.shape, 'ROI signal shape')
     print(Counter(region_labels))
 
-    if scaling:
-        # scaling every trace between its 20th and 99th percentile
-        print('Scaling ROI signals...')
-        p20 = np.percentile(roi_signal, 20, axis=1, keepdims=True)
-        p99 = np.percentile(roi_signal, 99, axis=1, keepdims=True)
-        roi_signal = (roi_signal - p20) / (p99 - p20)
-
 
     print('Running rastermap...')
     model = Rastermap(n_PCs=100, n_clusters=30,
@@ -139,37 +136,62 @@ def embed_meso(eid, scaling=True):
     region_colors_sorted = region_colors[isort]
 
     rr = {
-        'roi_signal': roi_signal_sorted,
+        'roi_signal': roi_signal,
         'roi_times': roi_times,
-        'region_labels': region_labels[isort],
-        'region_colors': region_colors_sorted,
+        'region_labels': region_labels,
+        'region_colors': region_colors,
         'isort': isort,
-        'xyz': xyz[isort]}
+        'xyz': xyz}
 
     dpth = Path(pth_meso, 'data')
     dpth.mkdir(parents=True, exist_ok=True)
     np.save(Path(dpth, f"{eid}.npy"), rr, allow_pickle=True)
 
 
+def load_or_embed(eid):
+    fpath = Path(pth_meso, 'data', f"{eid}.npy")
+    if fpath.exists():
+        rr = np.load(fpath, allow_pickle=True).item()
+    else:
+        rr = embed_meso(eid)   # run your embedding function
+    return rr
 
-def plot_raster(eid, bg=True, alpha=0.3, interp='none', restr=True):
 
-
+def plot_raster(eid, bg='regions', alpha_bg=0.3, alpha_data=0.5, interp='none', 
+                restr=True, rsort=True, scaling=True):
     '''
     restr: restrict to 1 min starting at end of first third of recording
+
+    put wheel speed trace on top of rastermap
     '''
 
-    rr = np.load(Path(pth_meso, 'data', f"{eid}.npy"), 
-                      allow_pickle=True).item()
+    rr = load_or_embed(eid)
+
+    if rsort:
+        # Sort the data by isort
+        rr['roi_signal'] = rr['roi_signal'][rr['isort']]
+        rr['region_labels'] = rr['region_labels'][rr['isort']]
+        rr['region_colors'] = rr['region_colors'][rr['isort']]
+
 
     # Allen colors are too similar for these visual areas, remap to distinct colors
     regs = np.unique(rr['region_labels'])   
     region_colors_d = dict(zip(regs,load_distinct_bright_colors(n=len(regs))))
     region_colors = np.array([region_colors_d[reg] for reg in rr['region_labels']])
 
+    if scaling:
+        # scaling every trace between its 20th and 99th percentile
+        print('Scaling ROI signals...')
+        p20 = np.percentile(rr['roi_signal'], 20, axis=1, keepdims=True)
+        p99 = np.percentile(rr['roi_signal'], 99, axis=1, keepdims=True)
+        rr['roi_signal'] = (rr['roi_signal'] - p20) / (p99 - p20)
+
 
     n_rows, n_time = rr['roi_signal'].shape
-    fig, ax = plt.subplots(figsize=(8, 10))
+    fig = plt.figure(figsize=(8, 10))
+    gs = gridspec.GridSpec(10, 1, height_ratios=[1] + [1]*9, hspace=0.05)
+    ax_wheel = fig.add_subplot(gs[0])
+    ax = fig.add_subplot(gs[1:], sharex=ax_wheel)
 
     if restr:
         # Time resolution (samples per second)
@@ -184,37 +206,90 @@ def plot_raster(eid, bg=True, alpha=0.3, interp='none', restr=True):
         rr['roi_signal'] = rr['roi_signal'][:, start:start + n_1min]
         rr['roi_times'] = rr['roi_times'][:, start:start + n_1min]
 
-    vmin, vmax = 0, 0.5
+
+    # get wheel speed
+    # sess_loader = SessionLoader(one, eid)
+    # sess_loader.load_wheel()
+    # wheel = sess_loader.wheel
+
+
+    wheel = one.load_object(eid, 'wheel')
+    wh_pos_lin, w_times = interpolate_position(wheel['timestamps'], wheel['position'],freq=250)
+    w_velo, _ = velocity_filtered(wh_pos_lin, 250)
+
+
+    # Restrict to same time range
+    t_min, t_max = rr['roi_times'][0].min(), rr['roi_times'][0].max()
+    mask = (w_times >= t_min) & (w_times <= t_max)
+    w_times = w_times[mask]
+    w_velo = w_velo[mask]
+
+    # Plot wheel velocity
+    ax_wheel.plot(w_times, w_velo, color='black', linewidth=0.8)
+    ax_wheel.set_ylabel('Wheel\nvelocity', fontsize=8)
+    ax_wheel.spines['top'].set_visible(False)
+    ax_wheel.spines['right'].set_visible(False)
+    ax_wheel.tick_params(labelbottom=False, length=2, pad=2)   
+
+
+    print(np.min(rr['roi_signal']), np.max(rr['roi_signal']), 
+          'min and max of roi_signal')
+
+    vmin, vmax = np.min(rr['roi_signal']), 0.1  # np.max(rr['roi_signal'])
     ax.imshow(rr['roi_signal'], cmap='gray_r', aspect='auto', interpolation=interp,
                     extent=[rr['roi_times'][0].min(), rr['roi_times'][0].max(), 0, n_rows], vmin=vmin, vmax=vmax,
-                    zorder=1)
+                    zorder=1,alpha=alpha_data)
 
-    if bg:
+    if bg == 'regions':
         for i, color in enumerate(region_colors):
             ax.fill_between(
                 [rr['roi_times'][0].min(), rr['roi_times'][0].max()],
-                i, i + 1, facecolor=color, alpha=alpha, linewidth=0
+                i, i + 1, facecolor=color, alpha=alpha_bg, linewidth=0, zorder=0
             )
 
+
+        region_counter = Counter(rr['region_labels'])
+
+        patches = [
+            mpatches.Patch(color=region_colors_d[region], label=f"{region} ({count})")
+            for region, count in region_counter.items()
+        ]
+
+        n_cols = len(patches)  # one column per region
+        legend = ax.legend(
+            handles=patches,
+            loc='lower center',
+            bbox_to_anchor=(0.5, 1.12),
+            ncol=min(6, n_cols if n_cols <= 3 else n_cols // 2),
+            frameon=False,
+            fontsize='small'
+        )
+
+
+    if bg == 'firing_rate':
+        # 1. Compute firing rate per ROI (row)
+        firing_rate_per_row = np.mean(rr['roi_signal'], axis=1)  # (n_rows,)
+
+        # 2. Normalize to [0, 1]
+        fr_norm = (firing_rate_per_row - firing_rate_per_row.min()) / (firing_rate_per_row.max() - firing_rate_per_row.min())
+
+        # 3. Create 2D background image: repeat firing rates across time axis
+        firing_rate_img = np.tile(fr_norm[:, np.newaxis], (1, rr['roi_signal'].shape[1]))
+
+        # 4. Plot with imshow as background (under main signal)
+        cmap_bg = plt.cm.inferno  # or any colormap you like
+
+        im_bg = ax.imshow(firing_rate_img, cmap=cmap_bg, aspect='auto', interpolation='none',
+                        extent=[rr['roi_times'][0].min(), rr['roi_times'][0].max(), 0, n_rows],
+                        zorder=0)
+
+        # 5. Add colorbar
+        cbar = plt.colorbar(im_bg, ax=ax, fraction=0.03, pad=0.02)
+        cbar.set_label('Mean firing rate per ROI', fontsize=10)
+
+
     ax.set_xlabel('Time [s]')
-    ax.set_ylabel('rastermap sorted ROIs')
-
-    region_counter = Counter(rr['region_labels'])
-
-    patches = [
-        mpatches.Patch(color=region_colors_d[region], label=f"{region} ({count})")
-        for region, count in region_counter.items()
-    ]
-
-    n_cols = len(patches)  # one column per region
-    legend = ax.legend(
-        handles=patches,
-        loc='lower center',
-        bbox_to_anchor=(0.5, 1.02),
-        ncol=min(6, n_cols if n_cols <= 3 else n_cols // 2),
-        frameon=False,
-        fontsize='small'
-    )
+    ax.set_ylabel('rastermap sorted ROIs' if rsort else 'ROIs')
 
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
@@ -223,22 +298,6 @@ def plot_raster(eid, bg=True, alpha=0.3, interp='none', restr=True):
     fig.savefig(Path(pth_meso, 
         f"{eid}_{'_'.join(np.unique(rr['region_labels']))}_{'_'.join([str(x) for x in rr['roi_signal'].shape])}.png"), dpi=300)
     #plt.close()
-
-
-# if __name__ == "__main__":
-#     # Query for all mesoscope experiments
-#     query = 'field_of_view__imaging_type__name,mesoscope'
-#     eids = one.search(procedures='Imaging', django=query, query_type='remote')
-
-#     print(f"Found {len(eids)} mesoscope experiment IDs.")
-
-#     for eid in eids:
-#         try:
-#             print(f"\nProcessing {eid}")
-#             embed_meso(eid)
-#             plot_meso(eid)
-#         except Exception as e:
-#             print(f"Failed to process {eid}: {e}")
 
 
 
@@ -250,36 +309,36 @@ def plot_xyz(eid, mapping='isort', axoff=False, ax=None):
 
     r = np.load(Path(pth_meso, 'data', f"{eid}.npy"), 
                       allow_pickle=True).item()
-                      
+
     alone = False
     if not ax:
         alone = True
         fig = plt.figure(figsize=(8.43,7.26), label=mapping)
         ax = fig.add_subplot(111,projection='3d')   
-    
-    if mapping == 'isort':
-        color_values = r['isort'] / r['isort'].max()
-        cmap = cm.get_cmap('Spectral')
-        cols = cmap(color_values)
-
-    elif mapping == 'regions':
-        # cols = r['region_colors']  # too simlar colors
-        regs = np.unique(r['region_labels'])   
-        region_colors_d = dict(zip(regs,load_distinct_bright_colors(n=len(regs))))
-        cols = np.array([region_colors_d[reg] 
-            for reg in r['region_labels']])
-
 
 
     xyz = r['xyz'] / 1000  # isorted xyz coordinates; in mm
-    
+
+    if mapping == 'isort':
+        color_values = r['isort'] / r['isort'].max()
+        cmap = cm.get_cmap('Spectral')
+
+        sc = ax.scatter(xyz[:,0], xyz[:,1], xyz[:,2], depthshade=False,
+                        marker='o', s = 1 if alone else 0.5, c=color_values, cmap=cmap)
+
+        cbar = plt.colorbar(sc, ax=ax, fraction=0.03, pad=0.1)
+        cbar.set_label('isort rank (normalized)', fontsize=10)
+
+    elif mapping == 'regions':
+        regs = np.unique(r['region_labels'])   
+        region_colors_d = dict(zip(regs, load_distinct_bright_colors(n=len(regs))))
+        cols = np.array([region_colors_d[reg] for reg in r['region_labels']])
+
+        ax.scatter(xyz[:,0], xyz[:,1], xyz[:,2], depthshade=False,
+                marker='o', s = 1 if alone else 0.5, c=cols)
 
 
-       
-    ax.scatter(xyz[:,0], xyz[:,1],xyz[:,2], depthshade=False,
-               marker='o', s = 1 if alone else 0.5, c=cols)
-               
-                       
+           
     scalef = 1                 
     ax.view_init(elev=45.78, azim=-33.4)
     ax.set_xlim(min(xyz[:,0])/scalef, max(xyz[:,0])/scalef)
@@ -322,3 +381,42 @@ def plot_xyz(eid, mapping='isort', axoff=False, ax=None):
             # Add legend inside current axes if ax was passed
             ax.legend(handles=handles, loc='upper right',
                       fontsize='small', frameon=False)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# if __name__ == "__main__":
+#     # Query for all mesoscope experiments
+#     query = 'field_of_view__imaging_type__name,mesoscope'
+#     eids = one.search(procedures='Imaging', django=query, query_type='remote')
+
+#     print(f"Found {len(eids)} mesoscope experiment IDs.")
+
+#     for eid in eids:
+#         try:
+#             print(f"\nProcessing {eid}")
+#             embed_meso(eid)
+#             plot_meso(eid)
+#         except Exception as e:
+#             print(f"Failed to process {eid}: {e}")
+
+
+                      
