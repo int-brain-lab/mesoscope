@@ -1,36 +1,11 @@
 # Mesoscope data loading and raster plotting
 
-This README documents the **data-loading pipeline** and the **raster plot** utilities in the accompanying script. It focuses on two key components:
+This README documents the **data-loading pipeline** and the **raster plot** utilities in the accompanying script, `meso.py`. Here are two functions to get you started:
 
 1. `embed_meso(eid)` + `load_or_embed(eid)`: loading, preprocessing, and caching mesoscope ROI activity and metadata from the IBL/ONE backend.
 2. `plot_raster(eid, ...)`: producing a Rastermap-sorted ROI activity raster with optional region-color background and an overlaid wheel-velocity trace.
 
 > The code assumes a working [ONE API](https://int-brain-lab.github.io/ONE/) configuration and access credentials for IBL data.
-
-
----
-
-## Contents
-
-- [Environment and dependencies](#environment-and-dependencies)
-- [Directory layout and cache](#directory-layout-and-cache)
-- [What does `embed_meso` load and compute?](#what-does-embed_meso-load-and-compute)
-- [Cached data structure (`.npy` file)](#cached-data-structure-npy-file)
-- [Fast path: `load_or_embed`](#fast-path-load_or_embed)
-- [Raster plotting: `plot_raster`](#raster-plotting-plot_raster)
-  - [Inputs and options](#inputs-and-options)
-  - [Signal scaling](#signal-scaling)
-  - [Time restriction (`restr=True`)](#time-restriction-restrtrue)
-  - [Background layers](#background-layers)
-  - [Wheel velocity overlay](#wheel-velocity-overlay)
-  - [Output image](#output-image)
-- [Typical usage](#typical-usage)
-- [Performance notes and pitfalls](#performance-notes-and-pitfalls)
-- [Troubleshooting](#troubleshooting)
-- [Acknowledgements](#acknowledgements)
-
-
----
 
 ## Environment and dependencies
 
@@ -211,7 +186,7 @@ If the session lacks wheel data, this call will raise; see **Troubleshooting** f
 ## Typical usage
 
 ```python
-from your_module import plot_raster, load_or_embed
+from meso import plot_raster, load_or_embed
 
 eid = "71e53fd1-38f2-49bb-93a1-3c826fbe7c13"  # example
 
@@ -254,18 +229,7 @@ plot_raster(eid, restr=False)
 
 ---
 
-## Troubleshooting
-
-- **`one` cannot find session or objects:** Verify ONE login and base URL; try `one.search(procedures='Imaging', django='field_of_view__imaging_type__name,mesoscope')` to list available eids.
-- **Missing `wheel` object:** Wrap the wheel block in `try/except` and skip the overlay if unavailable.
-- **Large legends with many regions:** Limit legend columns via `ncol` in the code or filter to a subset of regions for clarity.
-- **Unexpected `roi_times` shape:** Inspect the saved cache: `np.load(f".../{eid}.npy", allow_pickle=True).item()`. Confirm that `roi_times[0]` is a 1D time vector of length equal to `roi_signal.shape[1]`.
-
-
----
 
 ## Acknowledgements
 
-- International Brain Laboratory for data standards and the ONE ecosystem.
-- Allen Institute for Brain Science for the CCF and region taxonomy.
-- `rastermap` authors for the embedding used to sort ROIs for visualization.
+- International Brain Laboratory mesoscope task force members, lead by Samuel Picard.
