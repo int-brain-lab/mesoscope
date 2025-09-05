@@ -307,8 +307,7 @@ def plot_xyz(eid, mapping='isort', axoff=False, ax=None):
     3d plot of cell locations
     '''
 
-    r = np.load(Path(pth_meso, 'data', f"{eid}.npy"), 
-                      allow_pickle=True).item()
+    rr = load_or_embed(eid)
 
     alone = False
     if not ax:
@@ -384,22 +383,255 @@ def plot_xyz(eid, mapping='isort', axoff=False, ax=None):
 
 
 
+def deep_in_block(trials, pleft, depth=10):
+
+    '''
+    get mask for trials object of pleft trials that are 
+    "depth" trials into the block
+    '''
+    
+    # pleft trial indices 
+    ar = np.arange(len(trials['stimOn_times']))[trials['probabilityLeft'] == pleft]
+    
+    # pleft trial indices shifted by depth earlier 
+    ar_shift = ar - depth
+    
+    # trial indices where shifted ones are in block
+    ar_ = ar[trials['probabilityLeft'][ar_shift] == pleft]
+
+    # transform into mask for all trials
+    bool_array = np.full(len(trials['stimOn_times']), False, dtype=bool)
+    bool_array[ar_] = True
+    
+    return bool_array
 
 
 
+def get_win_times(eid):
+
+    trials = one.load_object(eid, 'trials')
+    mask = np.full(len(trials['stimOn_times']), True, dtype=bool)  # replace at some point??
+
+    # For the 'inter_trial' mask trials with too short iti        
+    idcs = [0]+ list(np.where((trials['stimOn_times'][1:]
+                - trials['intervals'][:,-1][:-1])>1.15)[0]+1)
+    mask_iti = [True if i in idcs else False 
+        for i in range(len(trials['stimOn_times']))]
 
 
+    # {window_name: [alignment event, mask, [win_start, win_end]]}
+
+    tts = {
+
+    'inter_trial': ['stimOn_times',
+                np.bitwise_and.reduce([mask, mask_iti]),
+                [1.15, -1]],  
+    'blockL': ['stimOn_times', 
+                np.bitwise_and.reduce([mask, 
+                trials['probabilityLeft'] == 0.8]), 
+                [0.4, -0.1]],
+    'blockR': ['stimOn_times', 
+                np.bitwise_and.reduce([mask, 
+                trials['probabilityLeft'] == 0.2]),
+                [0.4, -0.1]],
+    'block50': ['stimOn_times', 
+                np.bitwise_and.reduce([mask, 
+                trials['probabilityLeft'] == 0.5]),
+                [0.4, -0.1]],                                            
+    'quiescence': ['stimOn_times', mask, 
+                [0.4, -0.1]],                       
+    'stimLbLcL': ['stimOn_times',
+            np.bitwise_and.reduce([mask, 
+            ~np.isnan(trials[f'contrastLeft']),
+            trials['probabilityLeft'] == 0.8,
+            deep_in_block(trials, 0.8),
+            trials['choice'] == 1]), 
+                                [0, 0.2]], 
+    'stimLbRcL': ['stimOn_times',            
+        np.bitwise_and.reduce([mask,
+            ~np.isnan(trials[f'contrastLeft']), 
+            trials['probabilityLeft'] == 0.2,                       
+            deep_in_block(trials, 0.2),
+            trials['choice'] == 1]), [0, 0.2]],
+    'stimLbRcR': ['stimOn_times',
+            np.bitwise_and.reduce([mask, 
+            ~np.isnan(trials[f'contrastLeft']), 
+            trials['probabilityLeft'] == 0.2,
+            deep_in_block(trials, 0.2),
+            trials['choice'] == -1]), 
+                                [0, 0.2]],           
+    'stimLbLcR': ['stimOn_times',
+            np.bitwise_and.reduce([mask,       
+            ~np.isnan(trials[f'contrastLeft']), 
+            trials['probabilityLeft'] == 0.8,
+            deep_in_block(trials, 0.8),
+            trials['choice'] == -1]), 
+                                [0, 0.2]],
+    'stimRbLcL': ['stimOn_times',
+            np.bitwise_and.reduce([mask, 
+            ~np.isnan(trials[f'contrastRight']), 
+            trials['probabilityLeft'] == 0.8,
+            deep_in_block(trials, 0.8),
+            trials['choice'] == 1]), 
+                                [0, 0.2]], 
+    'stimRbRcL': ['stimOn_times',
+            np.bitwise_and.reduce([mask, 
+            ~np.isnan(trials[f'contrastRight']), 
+            trials['probabilityLeft'] == 0.2,
+            deep_in_block(trials, 0.2),
+            trials['choice'] == 1]), 
+                                [0, 0.2]],
+    'stimRbRcR': ['stimOn_times',
+            np.bitwise_and.reduce([mask, 
+            ~np.isnan(trials[f'contrastRight']), 
+            trials['probabilityLeft'] == 0.2,
+            deep_in_block(trials, 0.2),
+            trials['choice'] == -1]), 
+                                [0, 0.2]],        
+    'stimRbLcR': ['stimOn_times',
+            np.bitwise_and.reduce([mask, 
+            ~np.isnan(trials[f'contrastRight']), 
+            trials['probabilityLeft'] == 0.8,
+            deep_in_block(trials, 0.8),
+            trials['choice'] == -1]), 
+                                [0, 0.2]],
+    'motor_init': ['firstMovement_times', mask, 
+                [0.15, 0]],                                        
+    'sLbLchoiceL': ['firstMovement_times',
+            np.bitwise_and.reduce([mask,  
+            ~np.isnan(trials[f'contrastLeft']), 
+            trials['probabilityLeft'] == 0.8,
+            trials['choice'] == 1]), 
+                                [0.15, 0]], 
+    'sLbRchoiceL': ['firstMovement_times',
+        np.bitwise_and.reduce([mask,
+            ~np.isnan(trials[f'contrastLeft']), 
+            trials['probabilityLeft'] == 0.2,
+            trials['choice'] == 1]), 
+                                [0.15, 0]],
+    'sLbRchoiceR': ['firstMovement_times',
+            np.bitwise_and.reduce([mask, 
+            ~np.isnan(trials[f'contrastLeft']), 
+            trials['probabilityLeft'] == 0.2,
+            trials['choice'] == -1]), 
+                                [0.15, 0]],           
+    'sLbLchoiceR': ['firstMovement_times',
+            np.bitwise_and.reduce([mask, 
+            ~np.isnan(trials[f'contrastLeft']), 
+            trials['probabilityLeft'] == 0.8,
+            trials['choice'] == -1]), 
+                                [0.15, 0]],
+    'sRbLchoiceL': ['firstMovement_times',
+            np.bitwise_and.reduce([mask, 
+            ~np.isnan(trials[f'contrastRight']), 
+            trials['probabilityLeft'] == 0.8,
+            trials['choice'] == 1]), 
+                                [0.15, 0]], 
+    'sRbRchoiceL': ['firstMovement_times',
+            np.bitwise_and.reduce([mask, 
+            ~np.isnan(trials[f'contrastRight']), 
+                                trials['probabilityLeft'] == 0.2,
+                                trials['choice'] == 1]), 
+                                [0.15, 0]],
+    'sRbRchoiceR': ['firstMovement_times',
+            np.bitwise_and.reduce([mask, 
+            ~np.isnan(trials[f'contrastRight']), 
+                                trials['probabilityLeft'] == 0.2,
+                                trials['choice'] == -1]), 
+                                [0.15, 0]],        
+    'sRbLchoiceR': ['firstMovement_times',
+            np.bitwise_and.reduce([mask, 
+            ~np.isnan(trials[f'contrastRight']), 
+                                trials['probabilityLeft'] == 0.8,
+                                trials['choice'] == -1]), 
+                                [0.15, 0]],
+    'choiceL': ['firstMovement_times', 
+        np.bitwise_and.reduce([mask,
+            trials['choice'] == 1]), 
+                [0, 0.15]],
+    'choiceR': ['firstMovement_times', 
+        np.bitwise_and.reduce([mask,
+            trials['choice'] == -1]), 
+                [0, 0.15]],            
+    'fback1': ['feedback_times',    
+        np.bitwise_and.reduce([mask,
+            trials['feedbackType'] == 1]), 
+                [0, 0.3]],
+    'fback0': ['feedback_times', 
+        np.bitwise_and.reduce([mask,
+            trials['feedbackType'] == -1]), 
+                [0, 0.3]]}
+
+    return trials, tts
 
 
+def sparseness(rvec):
+    """
+    Treves–Rolls population sparseness for a vector of nonnegative responses r_i.
+    a_p = (mean(r))^2 / mean(r^2), with guards for degenerate cases.
+    """
+    r = np.asarray(rvec, dtype=float)
+    if r.size == 0:
+        return np.nan
+    m1 = r.mean()
+    m2 = np.mean(r * r)
+    if m2 <= 0:
+        return 0.0
+    return (m1 * m1) / m2
 
 
+def compute_sparseness(eid, scaling=True):
+    '''
+    For a given eid comput the sparseness; for the whole recording
+    and all specific trial structure time windows
+    '''
+    rr = load_or_embed(eid)
+
+    if scaling:
+        # scaling every trace between its 20th and 99th percentile
+        print('Scaling ROI signals...')
+        p99 = np.percentile(rr['roi_signal'], 99, axis=1, keepdims=True)
+        if p99 == 0:
+            p99 = 1.0
+        rr['roi_signal'] = rr['roi_signal'] / p99
+    
+
+    times = rr['roi_times'][0]
+    trials, tts = get_win_times(eid)
+    T = times.size
+
+    # iterate through windows
+    for tt in tts:
+        event = trials[tts[tt][0]][tts[tt][1]]
+        start, end = tts[tt][2]  # relative to event
+        win_times = event[:, np.newaxis] - np.array([start, -end])
+        
+        # keep only valid windows (skip NaNs)
+        valid = np.isfinite(win_times).all(axis=1)
+        w = win_times[valid]
+        starts, ends = w[:, 0], w[:, 1]
+
+        # clip windows to the recorded interval
+        starts = np.clip(starts, times[0], times[-1])
+        ends   = np.clip(ends,   times[0], times[-1])
+
+        # indices that include all samples within each window
+        # start is inclusive, end is exclusive (classic slice semantics)
+        idx_start = np.searchsorted(times, starts, side='left')
+        idx_end_excl = np.searchsorted(times, ends,   side='right')   # exclusive
+
+        # ---- build one boolean mask for all windows efficiently ----
+        mask = np.zeros(T + 1, dtype=int)
+        np.add.at(mask, idx_start,  1)
+        np.add.at(mask, idx_end_excl, -1)
+        mask = np.cumsum(mask)[:T] > 0    # shape (T,), True inside any window
+
+        # select data inside windows (inclusive of boundary times)
+        sig_in_windows = rr['roi_signal'][:, mask]    # shape (N_neurons, T_in_windows)        
 
 
-
-
-
-
-
+    # r_overall = rr['roi_signal'].mean(axis=1)  # shape (n_neurons,)
+    # ap = sparseness(r_overall)
 
 
 
