@@ -30,110 +30,136 @@ def _session_components_from_eid(one: ONE, eid: str):
     number = int(meta.get('number', 1))
     return subject, date_str, f'{number:03d}'
 
-def _candidate_fov_dir_paths(one: ONE, eid: str, fov_name: str, server_root: Path | None) -> list[Path]:
+def _candidate_fov_dir_paths(
+    one: ONE,
+    eid: str,
+    fov_name: str,
+    roicat_root: Path | None,
+    server_root: Path | None
+) -> list[Path]:
     """
-    Return candidate directories that may contain the alf/FOV_XX files.
-    Priority 1: server_root/Subjects/<sub>/<date>/<num>/alf/<FOV_XX>
-    Fallback : one.cache_dir/Subjects/<sub>/<date>/<num>/alf/<FOV_XX>
+    Return candidate directories that may contain alf/FOV_XX files.
+
+    Priority order:
+      1) roicat_root/ROICaT/<subject>/<date>/<number>/alf/<FOV_XX>   (your local mirror)
+      2) server_root/Subjects/<subject>/<date>/<number>/alf/<FOV_XX> (e.g., network share)
+      3) one.cache_dir/Subjects/<subject>/<date>/<number>/alf/<FOV_XX> (ONE cache)
     """
     subject, date_str, number = _session_components_from_eid(one, eid)
-    candidates = []
+    cands = []
+    if roicat_root is not None:
+        cands.append(Path(roicat_root) / 'ROICaT' / subject / date_str / number / 'alf' / fov_name)
     if server_root is not None:
-        candidates.append(server_root / 'Subjects' / subject / date_str / number / 'alf' / fov_name)
-    # fallback to the local ONE cache layout (many IBL caches mirror 'Subjects/...'):
-    candidates.append(Path(one.cache_dir) / 'Subjects' / subject / date_str / number / 'alf' / fov_name)
-    return candidates
+        cands.append(Path(server_root) / 'Subjects' / subject / date_str / number / 'alf' / fov_name)
+    cands.append(Path(one.cache_dir) / 'Subjects' / subject / date_str / number / 'alf' / fov_name)
+    return cands
 
 # ----------------------------------------------
 # Load per-session clusterUIDs aligned to neurons
 # ----------------------------------------------
 
-def get_cluster_uids_neuronal(one: ONE, eid: str, server_root: str | Path | None = None) -> np.ndarray:
-    """
-    Concatenate clusterUIDs across all FOVs for a given eid and
-    filter to neuronal ROIs using mpciROITypes (bool mask), so that the
-    resulting array aligns with rows in rr['roi_signal'] built by embed_meso().
-
-    Returns
-    -------
-    uids_neuronal : (N_neurons,) array of dtype=object ('' if missing)
-    """
+def get_cluster_uids_neuronal(
+    one: ONE,
+    eid: str,
+    roicat_root: str | Path | None = None,
+    server_root: str | Path | None = None
+) -> np.ndarray:
+    roicat_root = Path(roicat_root) if roicat_root is not None else None
     server_root = Path(server_root) if server_root is not None else None
 
-    # Discover per-FOV collections exactly as in your embed_meso
-    fov_cols = ONE().list_collections(eid, collection='alf/FOV_*')  # keep same order as your code
+    # 1) Try listing FOV collections via ONE
+    try:
+        fov_cols = one.list_collections(eid, collection='alf/FOV_*')
+    except Exception:
+        fov_cols = []
+
+    # 2) Fallback: enumerate FOV_* dirs locally if ONE didn’t yield anything
+    if (not fov_cols) and (roicat_root is not None):
+        subject, date_str, number = _session_components_from_eid(one, eid)
+        local_alf = roicat_root / 'ROICaT' / subject / date_str / number / 'alf'
+        if local_alf.is_dir():
+            fov_cols = [f'alf/{p.name}' for p in sorted(local_alf.glob('FOV_*')) if p.is_dir()]
 
     out = []
     for fov_col in fov_cols:
-        fov_name = Path(fov_col).name  # e.g., 'FOV_00'
+        fov_name = Path(fov_col).name  # e.g., 'FOV_03'
 
-        # Load mpciROITypes to get the neuron mask (same mask you use in embed_meso)
-        dd = ONE().load_collection(eid, fov_col, object=['mpciROIs', 'mpciROITypes'])
+        # Load ROITypes (from ONE cache), we need this to align and build neuron mask
+        dd = one.load_collection(eid, fov_col, object=['mpciROIs', 'mpciROITypes'])
         roitypes = dd['mpciROIs']['mpciROITypes'] if 'mpciROIs' in dd else dd['mpciROITypes']
         mask_neuron = roitypes.astype(bool)
+        n_rois = int(roitypes.shape[0])
 
-        # Find the clusterUIDs.csv file across candidates
         uid_vec = None
-        for cand_dir in _candidate_fov_dir_paths(one, eid, fov_name, server_root):
+        for cand_dir in _candidate_fov_dir_paths(one, eid, fov_name, roicat_root, server_root):
             csv_path = cand_dir / 'mpciROIs.clusterUIDs.csv'
             if csv_path.exists():
-                try:
-                    uid_vec = _read_uid_csv(csv_path)
-                    break
-                except Exception:
-                    pass
+                uid_vec = _read_uid_csv(csv_path)
+                break
 
         if uid_vec is None:
-            # No CSV found for this FOV: fill with empty strings, length = total ROIs in this FOV
-            uid_vec = np.full(roitypes.shape[0], '', dtype=object)
+            uid_vec = np.full(n_rois, '', dtype=object)
+        else:
+            # Defensive alignment
+            if uid_vec.shape[0] < n_rois:
+                pad = np.full(n_rois - uid_vec.shape[0], '', dtype=object)
+                uid_vec = np.concatenate([uid_vec, pad], axis=0)
+            elif uid_vec.shape[0] > n_rois:
+                uid_vec = uid_vec[:n_rois]
 
-        # Filter to neuronal rows so indexing matches roi_signal stacking
         out.append(uid_vec[mask_neuron])
 
     if not out:
         return np.array([], dtype=object)
 
     return np.concatenate(out, axis=0).astype(object)
-
 # --------------------------------------------------------
 # Match tracked neurons between two or many sessions (eids)
 # --------------------------------------------------------
 
-def match_tracked_between_two(one: ONE, eid0: str, eid1: str, server_root: str | Path | None = None):
+def match_tracked_between_two(
+    one: ONE,
+    eid0: str,
+    eid1: str,
+    roicat_root: str | Path | None = None,
+    server_root: str | Path | None = None
+):
     """
-    Identify same neurons between two sessions via clusterUIDs intersection.
-
-    Returns a dict with:
-        shared_uids : (K,) array of UIDs present in both
-        idx0       : (K,) array of row indices in eid0's rr['roi_signal']
-        idx1       : (K,) array of row indices in eid1's rr['roi_signal']
-        mask0      : (N0,) boolean mask True for tracked in eid0
-        mask1      : (N1,) boolean mask True for tracked in eid1
+    Strict 1-1 mapping between sessions:
+      - deduplicate per-session UID->index maps (first occurrence kept),
+      - intersect UIDs,
+      - return aligned indices sorted by UID.
     """
-    u0 = get_cluster_uids_neuronal(one, eid0, server_root=server_root)
-    u1 = get_cluster_uids_neuronal(one, eid1, server_root=server_root)
+    u0 = get_cluster_uids_neuronal(one, eid0, roicat_root=roicat_root, server_root=server_root)
+    u1 = get_cluster_uids_neuronal(one, eid1, roicat_root=roicat_root, server_root=server_root)
 
     # Keep only non-empty UIDs
-    v0 = (u0 != '')
-    v1 = (u1 != '')
-    shared = np.intersect1d(u0[v0], u1[v1])
+    nz0 = (u0 != '')
+    nz1 = (u1 != '')
 
-    # Build index lists; handle rare duplicates defensively (map all occurrences)
-    idx0_list, idx1_list = [], []
-    for uid in shared:
-        i0s = np.flatnonzero(u0 == uid)
-        i1s = np.flatnonzero(u1 == uid)
-        # In the usual case both are length-1; if not, create all pairs
-        for i0 in i0s:
-            for i1 in i1s:
-                idx0_list.append(i0)
-                idx1_list.append(i1)
+    # Build UID->first_index maps (deduplicate inside each session)
+    # Using return_index ensures first occurrence is kept with stable order
+    u0_unique, idx0_first = np.unique(u0[nz0], return_index=True)
+    u1_unique, idx1_first = np.unique(u1[nz1], return_index=True)
 
-    idx0 = np.array(idx0_list, dtype=int)
-    idx1 = np.array(idx1_list, dtype=int)
+    # Intersect and sort lexicographically (np.intersect1d returns sorted)
+    shared = np.intersect1d(u0_unique, u1_unique)
 
-    mask0 = np.isin(np.arange(u0.size), idx0)
-    mask1 = np.isin(np.arange(u1.size), idx1)
+    # Map back to absolute row indices in the full u0/u1 arrays
+    # (idx*_first are relative to the compressed nz* arrays)
+    # Compute positions of shared in the unique arrays:
+    pos0 = np.searchsorted(u0_unique, shared)
+    pos1 = np.searchsorted(u1_unique, shared)
+
+    # Convert to indices into nz* arrays, then to absolute indices
+    idx0_nz = idx0_first[pos0]
+    idx1_nz = idx1_first[pos1]
+    idx0 = np.flatnonzero(nz0)[idx0_nz]
+    idx1 = np.flatnonzero(nz1)[idx1_nz]
+
+    # Boolean masks over all neurons (True if tracked)
+    mask0 = np.zeros(u0.size, dtype=bool); mask0[idx0] = True
+    mask1 = np.zeros(u1.size, dtype=bool); mask1[idx1] = True
 
     return dict(
         shared_uids=shared,
@@ -142,25 +168,22 @@ def match_tracked_between_two(one: ONE, eid0: str, eid1: str, server_root: str |
         uids0=u0, uids1=u1
     )
 
-def match_tracked_across_many(one: ONE, anchor_eid: str, other_eids: list[str], server_root: str | Path | None = None):
-    """
-    Return UIDs and indices for ROIs in anchor_eid that are present in *all* other_eids.
-    Mirrors MATLAB get_trackedROIs() semantics.
 
-    Returns dict with:
-        shared_uids  : UIDs present in anchor and all others
-        is_tracked   : boolean mask over anchor ROIs
-        iROIs        : indices (sorted by UID) into anchor ROIs
-    """
-    u_anchor = get_cluster_uids_neuronal(one, anchor_eid, server_root=server_root)
+def match_tracked_across_many(
+    one: ONE,
+    anchor_eid: str,
+    other_eids: list[str],
+    roicat_root: str | Path | None = None,
+    server_root: str | Path | None = None
+):
+    u_anchor = get_cluster_uids_neuronal(one, anchor_eid, roicat_root=roicat_root, server_root=server_root)
     shared = u_anchor[u_anchor != ''].copy()
 
     for e in other_eids:
-        u_e = get_cluster_uids_neuronal(one, e, server_root=server_root)
+        u_e = get_cluster_uids_neuronal(one, e, roicat_root=roicat_root, server_root=server_root)
         shared = np.intersect1d(shared, u_e[u_e != ''])
 
     is_tracked = np.isin(u_anchor, shared)
-    # Sort indices by alphabetical order of UID (as in MATLAB)
     order = np.argsort(shared.astype(str))
     iROIs = np.array([np.flatnonzero(u_anchor == uid)[0] for uid in shared[order]], dtype=int)
 
@@ -170,24 +193,18 @@ def match_tracked_across_many(one: ONE, anchor_eid: str, other_eids: list[str], 
 # Example usage (two days)
 # ------------------------
 
-if __name__ == "__main__":
-    one = ONE()
-    # Example animal/session EIDs
-    eid0 = '71e53fd1-38f2-49bb-93a1-3c826fbe7c13'   # day 0
-    eid1 = 'PUT-EID-OF-LATER-SESSION-HERE'         # day 1
+# from one.api import ONE
+# from meso import load_or_embed  # your existing function  :contentReference[oaicite:1]{index=1}
+# from meso_chronic import match_tracked_between_two  # with the patch above  :contentReference[oaicite:2]{index=2}
+#  roicat_root='/home/mic/chronic_csv'
+# one = ONE()
+# eid0 = '0c60b2f3-455f-41d9-ac91-ebb51ec51de5'   # earlier session of SP058
+# eid1 = '4778be48-3f5e-4802-9062-0046aced36df'   # subsequent session of SP058
 
-    # Point this to your server if the CSVs live only on "whiterussian"
-    # On Windows: r"Y:\"
-    # On Linux/macOS (mounted): "/mnt/whiterussian"
-    server_root = r"Y:\\"  # or Path("/mnt/whiterussian")
+# m = match_tracked_between_two(one, eid0, eid1, roicat_root='/home/mic/chronic_csv')  # '.' contains ROICaT/
 
-    m = match_tracked_between_two(one, eid0, eid1, server_root=server_root)
+# rr0 = load_or_embed(eid0)   # do NOT sort rows before indexing
+# rr1 = load_or_embed(eid1)
 
-    # Now align your rr dicts to tracked pairs
-    rr0 = load_or_embed(eid0)  # your function
-    rr1 = load_or_embed(eid1)
-
-    # IMPORTANT: do NOT apply rsort before indexing; we index raw rows.
-    sig0_tracked = rr0['roi_signal'][m['idx0'], :]
-    sig1_tracked = rr1['roi_signal'][m['idx1'], :]
-    # You can then compare longitudinal trajectories of the same neurons.
+# sig0_tracked = rr0['roi_signal'][m['idx0'], :]
+# sig1_tracked = rr1['roi_signal'][m['idx1'], :]
