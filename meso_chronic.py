@@ -69,7 +69,9 @@ def get_cluster_uids_neuronal(
 
     # 1) Try listing FOV collections via ONE
     try:
-        fov_cols = one.list_collections(eid, collection='alf/FOV_*')
+        fov_cols = one.list_collections(eid, collection='alf/FOV_*')       
+        # ensure deterministic order like the local glob path
+        fov_cols = sorted(fov_cols, key=lambda s: Path(s).name)
     except Exception:
         fov_cols = []
 
@@ -107,104 +109,138 @@ def get_cluster_uids_neuronal(
             elif uid_vec.shape[0] > n_rois:
                 uid_vec = uid_vec[:n_rois]
 
+        # normalize UIDs to stable strings (guards against stray spaces/None)
+        uid_vec = np.array(
+            [("" if (x is None) else str(x).strip()) for x in uid_vec],
+            dtype=object
+        )
+
         out.append(uid_vec[mask_neuron])
 
     if not out:
         return np.array([], dtype=object)
 
     return np.concatenate(out, axis=0).astype(object)
+
+
 # --------------------------------------------------------
 # Match tracked neurons between two or many sessions (eids)
 # --------------------------------------------------------
 
-def match_tracked_between_two(
-    one: ONE,
-    eid0: str,
-    eid1: str,
-    roicat_root: str | Path | None = None,
-    server_root: str | Path | None = None
-):
-    """
-    Strict 1-1 mapping between sessions:
-      - deduplicate per-session UID->index maps (first occurrence kept),
-      - intersect UIDs,
-      - return aligned indices sorted by UID.
-    """
-    u0 = get_cluster_uids_neuronal(one, eid0, roicat_root=roicat_root, server_root=server_root)
-    u1 = get_cluster_uids_neuronal(one, eid1, roicat_root=roicat_root, server_root=server_root)
-
-    # Keep only non-empty UIDs
-    nz0 = (u0 != '')
-    nz1 = (u1 != '')
-
-    # Build UID->first_index maps (deduplicate inside each session)
-    # Using return_index ensures first occurrence is kept with stable order
-    u0_unique, idx0_first = np.unique(u0[nz0], return_index=True)
-    u1_unique, idx1_first = np.unique(u1[nz1], return_index=True)
-
-    # Intersect and sort lexicographically (np.intersect1d returns sorted)
-    shared = np.intersect1d(u0_unique, u1_unique)
-
-    # Map back to absolute row indices in the full u0/u1 arrays
-    # (idx*_first are relative to the compressed nz* arrays)
-    # Compute positions of shared in the unique arrays:
-    pos0 = np.searchsorted(u0_unique, shared)
-    pos1 = np.searchsorted(u1_unique, shared)
-
-    # Convert to indices into nz* arrays, then to absolute indices
-    idx0_nz = idx0_first[pos0]
-    idx1_nz = idx1_first[pos1]
-    idx0 = np.flatnonzero(nz0)[idx0_nz]
-    idx1 = np.flatnonzero(nz1)[idx1_nz]
-
-    # Boolean masks over all neurons (True if tracked)
-    mask0 = np.zeros(u0.size, dtype=bool); mask0[idx0] = True
-    mask1 = np.zeros(u1.size, dtype=bool); mask1[idx1] = True
-
-    return dict(
-        shared_uids=shared,
-        idx0=idx0, idx1=idx1,
-        mask0=mask0, mask1=mask1,
-        uids0=u0, uids1=u1
-    )
-
-
-def match_tracked_across_many(
+def match_tracked_indices_across_sessions(
     one: ONE,
     anchor_eid: str,
     other_eids: list[str],
     roicat_root: str | Path | None = None,
-    server_root: str | Path | None = None
-):
-    u_anchor = get_cluster_uids_neuronal(one, anchor_eid, roicat_root=roicat_root, server_root=server_root)
-    shared = u_anchor[u_anchor != ''].copy()
+    server_root: str | Path | None = None,
+) -> dict[str, np.ndarray]:
+    """
+    Return a mapping {eid: indices} such that indexing rr['roi_signal'][indices, :]
+    selects the same tracked neurons (same UIDs) in the same order across all sessions.
 
+    The order is lexicographic by UID. If no common UIDs exist, each array is length 0.
+    """
+
+    def _uid_first_index_map(u: np.ndarray) -> tuple[dict[str, int], np.ndarray, np.ndarray]:
+        """Build UID -> absolute first index map for non-empty UIDs."""
+        nz = (u != '')
+        if not np.any(nz):
+            return {}, np.empty(0, dtype=object), np.empty(0, dtype=int)
+        u_nz = u[nz]
+        # first occurrence among duplicates
+        u_unique, idx_first = np.unique(u_nz, return_index=True)
+        idx_abs = np.flatnonzero(nz)[idx_first]
+        uid2abs = {uid: int(ix) for uid, ix in zip(u_unique, idx_abs)}
+        return uid2abs, u_unique, idx_abs
+
+    # 1) Collect UIDs
+    u_anchor = get_cluster_uids_neuronal(one, anchor_eid, roicat_root=roicat_root, server_root=server_root)
+    anchor_uid2abs, anchor_unique, _ = _uid_first_index_map(u_anchor)
+
+    # Start with all non-empty anchor UIDs
+    shared = anchor_unique.copy()
+
+    # Intersect with each other session's non-empty UIDs
+    per_session_uidmaps: dict[str, dict[str, int]] = {anchor_eid: anchor_uid2abs}
     for e in other_eids:
         u_e = get_cluster_uids_neuronal(one, e, roicat_root=roicat_root, server_root=server_root)
-        shared = np.intersect1d(shared, u_e[u_e != ''])
+        uid2abs_e, u_e_unique, _ = _uid_first_index_map(u_e)
+        shared = np.intersect1d(shared, u_e_unique)  # lexicographic, unique
+        per_session_uidmaps[e] = uid2abs_e
 
-    is_tracked = np.isin(u_anchor, shared)
-    order = np.argsort(shared.astype(str))
-    iROIs = np.array([np.flatnonzero(u_anchor == uid)[0] for uid in shared[order]], dtype=int)
+    # Handle empty intersection early
+    if shared.size == 0:
+        out = {eid: np.empty(0, dtype=int) for eid in [anchor_eid, *other_eids]}
+        return out
 
-    return dict(shared_uids=shared[order], is_tracked=is_tracked, iROIs=iROIs)
+    # 2) Shared UIDs are already sorted lexicographically by np.intersect1d
+    shared_uids = shared
 
-# ------------------------
-# Example usage (two days)
-# ------------------------
+    # 3) Build aligned indices per session (first occurrence per UID)
+    out: dict[str, np.ndarray] = {}
+    for eid, uid2abs in per_session_uidmaps.items():
+        try:
+            idx = np.array([uid2abs[uid] for uid in shared_uids], dtype=int)
+        except KeyError as e:
+            missing = str(e).strip("'")
+            raise ValueError(f"Internal mismatch: shared UID not found in session {eid}: {missing}")
+        out[eid] = idx
 
-# from one.api import ONE
-# from meso import load_or_embed  # your existing function  :contentReference[oaicite:1]{index=1}
-# from meso_chronic import match_tracked_between_two  # with the patch above  :contentReference[oaicite:2]{index=2}
-#  roicat_root='/home/mic/chronic_csv'
+    return out
+
+
+# ------------------------------
+# Example usage (many days; min 2 eids)
+# ------------------------------
+
+# from meso import load_or_embed  # your existing function
+
 # one = ONE()
-# eid0 = '0c60b2f3-455f-41d9-ac91-ebb51ec51de5'   # earlier session of SP058
-# eid1 = '4778be48-3f5e-4802-9062-0046aced36df'   # subsequent session of SP058
+# roicat_root = '/home/mic/chronic_csv'
 
-# m = match_tracked_between_two(one, eid0, eid1, roicat_root='/home/mic/chronic_csv')  # '.' contains ROICaT/
+# anchor = '0c60b2f3-455f-41d9-ac91-ebb51ec51de5'
+# others = ['4778be48-3f5e-4802-9062-0046aced36df']
 
-# rr0 = load_or_embed(eid0)   # do NOT sort rows before indexing
-# rr1 = load_or_embed(eid1)
+# idx_map = match_tracked_indices_across_sessions(
+#     one, anchor, others, roicat_root=roicat_root, server_root=None
+# )
 
-# sig0_tracked = rr0['roi_signal'][m['idx0'], :]
-# sig1_tracked = rr1['roi_signal'][m['idx1'], :]
+# # Direct restriction:
+# rr0 = load_or_embed(anchor, restrict=idx_map[anchor])
+# rr1 = load_or_embed(others[0], restrict=idx_map[others[0]])
+
+
+## get all eids for a subject:
+# subject = 'SP058'
+# eids, details = one.search(subject=subject, details=True)
+## get all eids for which you have a chronic csv file locally
+# 1) Find session dirs that contain at least one FOV_* with mpciROIs.clusterUIDs.csv
+# def find_session_dirs_with_uids(roicat_root: str | Path) -> list[Path]:
+#     root = Path(roicat_root) / 'ROICaT'
+#     found = set()
+#     # Matches: ROICaT/<subject>/<YYYY-MM-DD>/<NNN>/alf/FOV_XX/mpciROIs.clusterUIDs.csv
+#     for csv in root.glob('*/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/*/alf/FOV_*/mpciROIs.clusterUIDs.csv'):
+#         # session dir is .../<subject>/<date>/<number>
+#         sess_dir = csv.parents[2]
+#         found.add(sess_dir)
+#     return sorted(found)
+
+# # 2) Convert a session dir to the relative Alyx path expected by ONE.path2eid
+# def session_dir_to_relpath(sess_dir: Path) -> str:
+#     subject, date, number = sess_dir.parts[-3:]
+#     return f'/{subject}/{date}/{number}/'
+
+# # 3) Map session dirs -> EIDs (skip any that cannot be resolved)
+# def eids_from_session_dirs(paths: Iterable[Path], one: ONE) -> dict[Path, str]:
+#     mapping = {}
+#     for p in paths:
+#         rel = session_dir_to_relpath(Path(p))
+#         try:
+#             eid = str(one.path2eid(rel))
+#             mapping[Path(p)] = eid
+#         except Exception:
+#             # not resolvable in Alyx/ONE; skip
+#             continue
+#     return mapping
+
+# 
