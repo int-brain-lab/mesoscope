@@ -232,4 +232,4 @@ plot_raster(eid, restr=False)
 
 ## Acknowledgements
 
-- International Brain Laboratory mesoscope task force members, lead by Samuel Picard.
+- International Brain Laboratory mesoscope task force members, led by Samuel Picard.
