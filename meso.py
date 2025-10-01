@@ -17,6 +17,7 @@ from brainbox.io.one import SessionLoader
 from brainbox.behavior.wheel import interpolate_position
 from brainbox.behavior.wheel import velocity_filtered
 
+plt.ion()
 one = ONE()
 
 pth_meso = Path(one.cache_dir, 'meso')
@@ -132,8 +133,6 @@ def embed_meso(eid):
                     bin_size=1).fit(roi_signal)
 
     isort = model.isort
-    roi_signal_sorted = roi_signal[isort]
-    region_colors_sorted = region_colors[isort]
 
     rr = {
         'roi_signal': roi_signal,
@@ -146,26 +145,37 @@ def embed_meso(eid):
     dpth = Path(pth_meso, 'data')
     dpth.mkdir(parents=True, exist_ok=True)
     np.save(Path(dpth, f"{eid}.npy"), rr, allow_pickle=True)
+    return rr
 
-
-def load_or_embed(eid):
+def load_or_embed(eid, restrict=None):
     fpath = Path(pth_meso, 'data', f"{eid}.npy")
     if fpath.exists():
         rr = np.load(fpath, allow_pickle=True).item()
     else:
         rr = embed_meso(eid)   # run your embedding function
+
+    if restrict is not None:
+        print('pre restrict shape:', rr['roi_signal'].shape)
+        rr['roi_signal'] = rr['roi_signal'][restrict, :] 
+        rr['region_labels'] = rr['region_labels'][restrict]
+        rr['xyz'] = rr['xyz'][restrict]
+        del rr['isort']  # no longer valid after restriction
+        print('post restrict shape:', rr['roi_signal'].shape)
     return rr
 
 
 def plot_raster(eid, bg='regions', alpha_bg=0.3, alpha_data=0.5, interp='none', 
-                restr=True, rsort=True, scaling=True):
+                restr=True, rsort=True, scaling=True, restrict=None):
     '''
     restr: restrict to 1 min starting at end of first third of recording
 
     put wheel speed trace on top of rastermap
     '''
 
-    rr = load_or_embed(eid)
+    rr = load_or_embed(eid, restrict=restrict)
+    if restrict is not None:
+        rsort = False  # no isort after restriction
+        print('restricted to', len(rr['roi_signal']), 'cells')
 
     if rsort:
         # Sort the data by isort
@@ -295,19 +305,20 @@ def plot_raster(eid, bg='regions', alpha_bg=0.3, alpha_data=0.5, interp='none',
     ax.spines['right'].set_visible(False)
     # plt.colorbar(im, ax=ax, label='Activity (dF/F)')
     plt.tight_layout()
-    fig.savefig(Path(pth_meso, 
+    fig.suptitle(f"{eid} restrict to {len(rr['roi_signal'])}" if restrict is not None else eid)
+    fig.savefig(Path(pth_meso, 'rasters', 
         f"{eid}_{'_'.join(np.unique(rr['region_labels']))}_{'_'.join([str(x) for x in rr['roi_signal'].shape])}.png"), dpi=300)
     #plt.close()
 
 
 
-def plot_xyz(eid, mapping='isort', axoff=False, ax=None):
+def plot_xyz(eid, mapping='isort', axoff=False, ax=None, restrict=None):
 
     '''
     3d plot of cell locations
     '''
 
-    rr = load_or_embed(eid)
+    r = load_or_embed(eid, restrict=restrict)
 
     alone = False
     if not ax:
@@ -317,6 +328,11 @@ def plot_xyz(eid, mapping='isort', axoff=False, ax=None):
 
 
     xyz = r['xyz'] / 1000  # isorted xyz coordinates; in mm
+
+    if restrict is not None:
+        print('restricted to', len(r['roi_signal']), 'cells')
+        print('no isort available after restriction -> mapping to regions')
+        mapping = 'regions'  # no isort after restriction
 
     if mapping == 'isort':
         color_values = r['isort'] / r['isort'].max()
@@ -362,7 +378,11 @@ def plot_xyz(eid, mapping='isort', axoff=False, ax=None):
     if axoff:
         ax.axis('off')
 
-    ax.set_title(f'color: {mapping} \n eid = {eid}')
+    if restrict is not None:
+        ss = f'color: {mapping}, restricted to {len(r["xyz"])} cells, \n eid = {eid}'
+    else:
+        ss = f'color: {mapping}, {len(r["xyz"])} cells \n eid = {eid}'
+    ax.set_title(ss)
 
     # Add legend with region label names and colors
     if mapping == 'regions':
@@ -420,6 +440,7 @@ def get_win_times(eid):
 
 
     # {window_name: [alignment event, mask, [win_start, win_end]]}
+    # win_start is negative relative to event, win_end is positive relative to event
 
     tts = {
 
@@ -567,7 +588,7 @@ def get_win_times(eid):
 
 def sparseness(rvec):
     """
-    Treves–Rolls population sparseness for a vector of nonnegative responses r_i.
+    Treves-Rolls population sparseness for a vector of nonnegative responses r_i.
     a_p = (mean(r))^2 / mean(r^2), with guards for degenerate cases.
     """
     r = np.asarray(rvec, dtype=float)
@@ -580,26 +601,29 @@ def sparseness(rvec):
     return (m1 * m1) / m2
 
 
-def compute_sparseness(eid, scaling=True):
+def compute_sparseness(eid, scaling=True, restrict=None):
     '''
     For a given eid comput the sparseness; for the whole recording
     and all specific trial structure time windows
     '''
-    rr = load_or_embed(eid)
+    rr = load_or_embed(eid, restrict=restrict)
 
     if scaling:
         # scaling every trace between its 20th and 99th percentile
         print('Scaling ROI signals...')
+        p20 = np.percentile(rr['roi_signal'], 20, axis=1, keepdims=True)
         p99 = np.percentile(rr['roi_signal'], 99, axis=1, keepdims=True)
-        if p99 == 0:
-            p99 = 1.0
-        rr['roi_signal'] = rr['roi_signal'] / p99
-    
+        scale = np.clip(p99 - p20, 1e-3, None)
+        rr['roi_signal'] = (rr['roi_signal'] - p20) / scale
+        rr['roi_signal'] = np.nan_to_num(rr['roi_signal'], nan=0.0, posinf=1.0, neginf=0.0)
 
+    # NOTE: This uses the first ROI's time base as the global axis.
+    # If per-ROI offsets matter for analysis, resample onto a shared grid.
     times = rr['roi_times'][0]
     trials, tts = get_win_times(eid)
     T = times.size
 
+    res = {}
     # iterate through windows
     for tt in tts:
         event = trials[tts[tt][0]][tts[tt][1]]
@@ -607,7 +631,7 @@ def compute_sparseness(eid, scaling=True):
         win_times = event[:, np.newaxis] - np.array([start, -end])
         
         # keep only valid windows (skip NaNs)
-        valid = np.isfinite(win_times).all(axis=1)
+        valid = ~(np.isinf(win_times) | np.isnan(win_times)).all(axis=1)
         w = win_times[valid]
         starts, ends = w[:, 0], w[:, 1]
 
@@ -618,20 +642,138 @@ def compute_sparseness(eid, scaling=True):
         # indices that include all samples within each window
         # start is inclusive, end is exclusive (classic slice semantics)
         idx_start = np.searchsorted(times, starts, side='left')
-        idx_end_excl = np.searchsorted(times, ends,   side='right')   # exclusive
+        idx_end_excl = np.searchsorted(times, ends,   side='right')  # exclusive
 
         # ---- build one boolean mask for all windows efficiently ----
         mask = np.zeros(T + 1, dtype=int)
         np.add.at(mask, idx_start,  1)
         np.add.at(mask, idx_end_excl, -1)
-        mask = np.cumsum(mask)[:T] > 0    # shape (T,), True inside any window
+        mask = np.cumsum(mask)[:T] > 0  # shape (T,), True inside any window
 
         # select data inside windows (inclusive of boundary times)
-        sig_in_windows = rr['roi_signal'][:, mask]    # shape (N_neurons, T_in_windows)        
+        sig_in_windows = rr['roi_signal'][:, mask]  # shape (N_neurons, T_in_windows)
+        res[tt] = {}
+        res[tt]['n_trials'] = w.shape[0]
+        res[tt]['n_time_bins'] = mask.sum()
+        res[tt]['firing_rates'] = sig_in_windows.mean(axis=1)
+        res[tt]['sparseness'] = sparseness(res[tt]['firing_rates'])
+
+    res['full_session'] = {}
+    res['full_session']['n_trials'] = trials['stimOn_times'].size
+    res['full_session']['n_time_bins'] = T
+    res['full_session']['firing_rates'] = rr['roi_signal'].mean(axis=1)
+    res['full_session']['sparseness'] = sparseness(
+        res['full_session']['firing_rates'])
+    
+    dpth = Path(pth_meso, 'sparseness')
+    dpth.mkdir(parents=True, exist_ok=True)
+    if restrict is not None:
+        s = f"{eid}_restricted.npy"
+    else:
+        s = f"{eid}.npy"
+    np.save(Path(dpth, s), res, allow_pickle=True)
+    return res
 
 
-    # r_overall = rr['roi_signal'].mean(axis=1)  # shape (n_neurons,)
-    # ap = sparseness(r_overall)
+def load_or_compute_sparseness(eid, restrict=None):
+    if restrict is not None:
+        fpath = Path(pth_meso, 'sparseness', f"{eid}_restricted.npy")
+    else:
+        fpath = Path(pth_meso, 'sparseness', f"{eid}.npy")
+
+    if fpath.exists():
+        res = np.load(fpath, allow_pickle=True).item()
+    else:
+        print('Computing sparseness for eid:', eid)
+        res = compute_sparseness(eid, restrict=restrict)   # run your embedding function
+    return res
+
+
+def plot_sparseness_res(eid, save=True, show=True, restrict=None):
+    """
+    For a given session, plot a 4-panel *vertical* bar summary:
+      1) n_trials
+      2) n_time_bins
+      3) mean firing rate across neurons
+      4) sparseness (Treves–Rolls)
+    Includes all time windows plus 'full_session' (where n_trials is NaN).
+    Bars are black. All panels share the same x (window labels).
+    """
+    res = load_or_compute_sparseness(eid, restrict=restrict)
+
+    # keep insertion order, but put 'full_session' last
+    keys = list(res.keys())
+    if 'full_session' in keys:
+        keys = [k for k in keys if k != 'full_session'] + ['full_session']
+
+    # collect series
+    n_trials, n_bins, fr_mean, spars = [], [], [], []
+    for k in keys:
+        d = res[k]
+        n_trials.append(float(d.get('n_trials', np.nan)))
+        n_bins.append(int(d['n_time_bins']))
+        fr = d.get('firing_rates', None)
+        fr_mean.append(float(np.nanmean(fr)) if fr is not None and np.size(fr) else np.nan)
+        spars.append(float(d.get('sparseness', np.nan)))
+
+    x = np.arange(len(keys))
+
+    # sizing: width scales with number of windows; height fixed for 4 rows
+    fig_w = 8
+    fig_h = 9.0
+    fig, axes = plt.subplots(4, 1, figsize=(fig_w, fig_h), sharex=True)
+
+    bar_kwargs = dict(color='black', width=0.8)
+
+    # Row 1: n_trials
+    axes[0].bar(x, n_trials, **bar_kwargs)
+    axes[0].set_ylabel('n_trials', fontsize=11)
+    axes[0].grid(axis='y', alpha=0.3)
+
+    # Row 2: n_time_bins
+    axes[1].bar(x, np.log(n_bins), **bar_kwargs)
+    axes[1].set_ylabel('log(n_time_bins)', fontsize=11)
+    axes[1].grid(axis='y', alpha=0.3)
+
+    # Row 3: mean firing rate across neurons
+    axes[2].bar(x, fr_mean, **bar_kwargs)
+    axes[2].set_ylabel('mean firing rate', fontsize=11)
+    axes[2].grid(axis='y', alpha=0.3)
+
+    # Row 4: sparseness
+    axes[3].bar(x, spars, **bar_kwargs)
+    axes[3].set_ylabel('sparseness (Treves–Rolls)', fontsize=11)
+    axes[3].grid(axis='y', alpha=0.3)
+
+    # shared x: ticks/labels only on bottom axis
+    for ax in axes:
+        ax.set_xlim(-0.5, len(keys) - 0.5)
+    for ax in axes[:-1]:
+        ax.tick_params(axis='x', labelbottom=False)
+
+    axes[-1].set_xticks(x)
+    axes[-1].set_xticklabels(keys, rotation=55, ha='right')
+
+    if restrict is not None:
+        s = f"eid {eid}, restricted to {len(res['full_session']['firing_rates'])} cells" 
+    else:
+        s = f"eid {eid}, {len(res['full_session']['firing_rates'])}  cells"
+
+    fig.suptitle(s, fontsize=12, y=0.995)
+    fig.tight_layout()
+
+    if save:
+        outdir = Path(pth_meso, 'sparseness')
+        outdir.mkdir(parents=True, exist_ok=True)
+        outfile = outdir / f"{eid}_sparseness_summary_vertical.png"
+        fig.savefig(outfile, dpi=300, bbox_inches='tight')
+        print(f"Saved: {outfile}")
+
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
 
 
 
