@@ -17,6 +17,8 @@ from brainbox.io.one import SessionLoader
 from brainbox.behavior.wheel import interpolate_position
 from brainbox.behavior.wheel import velocity_filtered
 
+
+
 plt.ion()
 one = ONE()
 
@@ -146,6 +148,7 @@ def embed_meso(eid):
     dpth.mkdir(parents=True, exist_ok=True)
     np.save(Path(dpth, f"{eid}.npy"), rr, allow_pickle=True)
     return rr
+
 
 def load_or_embed(eid, restrict=None):
     fpath = Path(pth_meso, 'data', f"{eid}.npy")
@@ -601,11 +604,34 @@ def sparseness(rvec):
     return (m1 * m1) / m2
 
 
-def compute_sparseness(eid, scaling=True, restrict=None):
-    '''
-    For a given eid comput the sparseness; for the whole recording
-    and all specific trial structure time windows
-    '''
+def compute_sparseness(eid, scaling=True, restrict=None, per_trial=False):
+    """
+    Compute population sparseness from mesoscope ROI signals.
+
+    Parameters
+    ----------
+    eid : str
+        Experiment/session id.
+    scaling : bool, default True
+        If True, scale each ROI trace to its [20th, 99th] percentile range.
+    restrict : any, default None
+        Passed through to load_or_embed to subset data.
+    per_trial : bool, default False
+        If False (default): matches legacy behavior — aggregates across all
+        valid windows for each time-window label and computes a single
+        sparseness value per label, plus a single sparseness for the full session.
+        If True: do NOT aggregate windows; instead compute and save a
+        sparseness value *per trial* for each window label. For "full_session",
+        split the whole recording into as many equal chunks as there are trials
+        and compute one sparseness per chunk.
+
+    Returns
+    -------
+    dict
+        Nested dict with window labels as keys and metrics.
+        See code for exact fields in per_trial vs non-per_trial modes.
+    """
+
     rr = load_or_embed(eid, restrict=restrict)
 
     if scaling:
@@ -624,156 +650,318 @@ def compute_sparseness(eid, scaling=True, restrict=None):
     T = times.size
 
     res = {}
-    # iterate through windows
+    # ---------- per-window computations ----------
     for tt in tts:
-        event = trials[tts[tt][0]][tts[tt][1]]
-        start, end = tts[tt][2]  # relative to event
-        win_times = event[:, np.newaxis] - np.array([start, -end])
-        
-        # keep only valid windows (skip NaNs)
-        valid = ~(np.isinf(win_times) | np.isnan(win_times)).all(axis=1)
-        w = win_times[valid]
-        starts, ends = w[:, 0], w[:, 1]
+        # tts[tt] is something like (trials_key, idx_in_trials_key, (start, end))
+        event = trials[tts[tt][0]][tts[tt][1]]  # array of event times, shape (n_trials,)
+        start_rel, end_rel = tts[tt][2]         # relative window bounds (start before, end after)
+        # define trial-specific absolute window [start_abs, end_abs]
+        win_times = np.column_stack([event - start_rel, event + end_rel])
 
-        # clip windows to the recorded interval
-        starts = np.clip(starts, times[0], times[-1])
-        ends   = np.clip(ends,   times[0], times[-1])
+        # keep only valid rows (not all-NaN/inf)
+        valid_rows = ~np.any(~np.isfinite(win_times), axis=1)
+        win_times = win_times[valid_rows]
+        ntr = win_times.shape[0]
 
-        # indices that include all samples within each window
-        # start is inclusive, end is exclusive (classic slice semantics)
-        idx_start = np.searchsorted(times, starts, side='left')
-        idx_end_excl = np.searchsorted(times, ends,   side='right')  # exclusive
+        if not per_trial:
+            # --------- legacy aggregate behavior (inclusive boundaries) ---------
+            starts = np.clip(win_times[:, 0], times[0], times[-1])
+            ends   = np.clip(win_times[:, 1], times[0], times[-1])
 
-        # ---- build one boolean mask for all windows efficiently ----
-        mask = np.zeros(T + 1, dtype=int)
-        np.add.at(mask, idx_start,  1)
-        np.add.at(mask, idx_end_excl, -1)
-        mask = np.cumsum(mask)[:T] > 0  # shape (T,), True inside any window
+            idx_start = np.searchsorted(times, starts, side='left')
+            idx_end_excl = np.searchsorted(times, ends, side='right')
 
-        # select data inside windows (inclusive of boundary times)
-        sig_in_windows = rr['roi_signal'][:, mask]  # shape (N_neurons, T_in_windows)
-        res[tt] = {}
-        res[tt]['n_trials'] = w.shape[0]
-        res[tt]['n_time_bins'] = mask.sum()
-        res[tt]['firing_rates'] = sig_in_windows.mean(axis=1)
-        res[tt]['sparseness'] = sparseness(res[tt]['firing_rates'])
+            # build coverage mask for union of all windows
+            mask = np.zeros(T + 1, dtype=int)
+            np.add.at(mask, idx_start, 1)
+            np.add.at(mask, idx_end_excl, -1)
+            mask = np.cumsum(mask)[:T] > 0
 
-    res['full_session'] = {}
-    res['full_session']['n_trials'] = trials['stimOn_times'].size
-    res['full_session']['n_time_bins'] = T
-    res['full_session']['firing_rates'] = rr['roi_signal'].mean(axis=1)
-    res['full_session']['sparseness'] = sparseness(
-        res['full_session']['firing_rates'])
-    
+            sig_in = rr['roi_signal'][:, mask]  # (N_neurons, T_in_windows)
+
+            res[tt] = {
+                'n_trials': ntr,
+                'n_time_bins': int(mask.sum()),
+            }
+            if sig_in.size == 0:
+                res[tt]['firing_rates'] = np.zeros(rr['roi_signal'].shape[0], dtype=float)
+                res[tt]['sparseness'] = np.nan
+            else:
+                fr = sig_in.mean(axis=1)  # mean over time, per neuron
+                res[tt]['firing_rates'] = fr
+                res[tt]['sparseness'] = sparseness(fr)
+
+        else:
+            # --------- per-trial sparseness (no across-trial aggregation) ---------
+            s_list = []
+            n_bins_each = []
+            # optional: store per-trial firing-rate vectors if needed later
+            # This could be large; keep only sparseness by default.
+            for i in range(ntr):
+                s_abs = np.clip(win_times[i, 0], times[0], times[-1])
+                e_abs = np.clip(win_times[i, 1], times[0], times[-1])
+
+                i0 = np.searchsorted(times, s_abs, side='left')
+                i1 = np.searchsorted(times, e_abs, side='right')  # exclusive
+
+                # ensure at least one sample if bounds collapse exactly on a sample
+                if i1 <= i0:
+                    # Try to include the nearest index if possible
+                    i1 = min(i0 + 1, T)
+
+                n_bins = max(0, i1 - i0)
+                n_bins_each.append(int(n_bins))
+
+                if n_bins == 0:
+                    s_list.append(np.nan)
+                    continue
+
+                fr_trial = rr['roi_signal'][:, i0:i1].mean(axis=1)  # per-neuron mean in this trial-window
+                s_list.append(sparseness(fr_trial))
+
+            res[tt] = {
+                'n_trials': ntr,
+                'n_time_bins_per_trial': n_bins_each,
+                'sparseness_per_trial': np.asarray(s_list, dtype=float),
+            }
+
+    # ---------- full-session computations ----------
+    if not per_trial:
+        res['full_session'] = {
+            'n_trials': int(trials['stimOn_times'].size),
+            'n_time_bins': int(T),
+        }
+        fr_all = rr['roi_signal'].mean(axis=1)
+        res['full_session']['firing_rates'] = fr_all
+        res['full_session']['sparseness'] = sparseness(fr_all)
+    else:
+        ntr_fs = int(trials['stimOn_times'].size)
+        ntr_fs = max(1, ntr_fs)  # guard
+        # split time axis into equal contiguous chunks
+        edges = np.linspace(0, T, ntr_fs + 1, dtype=int)
+        s_chunks = []
+        chunk_sizes = []
+        for k in range(ntr_fs):
+            i0, i1 = edges[k], edges[k + 1]
+            nb = max(0, i1 - i0)
+            chunk_sizes.append(int(nb))
+            if nb == 0:
+                s_chunks.append(np.nan)
+                continue
+            fr_chunk = rr['roi_signal'][:, i0:i1].mean(axis=1)
+            s_chunks.append(sparseness(fr_chunk))
+
+        res['full_session'] = {
+            'n_trials': ntr_fs,
+            'chunk_bounds_idx': edges.tolist(),          # indices on the global time grid
+            'n_time_bins_per_chunk': chunk_sizes,        # lengths of each chunk
+            'sparseness_per_chunk': np.asarray(s_chunks, dtype=float),
+        }
+
+    # ---------- saving ----------
     dpth = Path(pth_meso, 'sparseness')
     dpth.mkdir(parents=True, exist_ok=True)
-    if restrict is not None:
-        s = f"{eid}_restricted.npy"
+
+    if per_trial:
+        if restrict is not None:
+            fname = f"{eid}_restricted_per_trial.npy"
+        else:
+            fname = f"{eid}_per_trial.npy"
     else:
-        s = f"{eid}.npy"
-    np.save(Path(dpth, s), res, allow_pickle=True)
+        if restrict is not None:
+            fname = f"{eid}_restricted.npy"
+        else:
+            fname = f"{eid}.npy"
+
+    np.save(dpth / fname, res, allow_pickle=True)
     return res
 
 
-def load_or_compute_sparseness(eid, restrict=None):
+def load_or_compute_sparseness(eid, restrict=None, per_trial=False):
+    """
+    Load precomputed sparseness results if present; otherwise compute and save.
+
+    Parameters
+    ----------
+    eid : str
+        Experiment/session id.
+    restrict : any, optional
+        Passed through to compute_sparseness/load_or_embed to subset data.
+    per_trial : bool, default False
+        If True, loads/saves the per-trial variant (…_per_trial.npy).
+        If False, loads/saves the legacy aggregate variant (… .npy / …_restricted.npy).
+
+    Returns
+    -------
+    dict
+        Result structure as produced by compute_sparseness(..., per_trial=per_trial).
+    """
+    # Assemble filename according to the same convention used in compute_sparseness
+    parts = [eid]
     if restrict is not None:
-        fpath = Path(pth_meso, 'sparseness', f"{eid}_restricted.npy")
-    else:
-        fpath = Path(pth_meso, 'sparseness', f"{eid}.npy")
+        parts.append("restricted")
+    if per_trial:
+        parts.append("per_trial")
+    fname = "_".join(parts) + ".npy"
+
+    fpath = Path(pth_meso, 'sparseness', fname)
 
     if fpath.exists():
-        res = np.load(fpath, allow_pickle=True).item()
-    else:
-        print('Computing sparseness for eid:', eid)
-        res = compute_sparseness(eid, restrict=restrict)   # run your embedding function
-    return res
+        return np.load(fpath, allow_pickle=True).item()
+
+    # If requested file is missing, compute with matching flags and save.
+    print(f'Computing sparseness for eid: {eid} (per_trial={per_trial}, restrict={restrict is not None})')
+    return compute_sparseness(eid, restrict=restrict, per_trial=per_trial)
 
 
-def plot_sparseness_res(eid, save=True, show=True, restrict=None):
+def plot_sparseness_res(eid, save=True, show=True, restrict=None, per_trial=False):
     """
-    For a given session, plot a 4-panel *vertical* bar summary:
-      1) n_trials
-      2) n_time_bins
-      3) mean firing rate across neurons
-      4) sparseness (Treves–Rolls)
-    Includes all time windows plus 'full_session' (where n_trials is NaN).
-    Bars are black. All panels share the same x (window labels).
+    Plot sparseness summaries for a given session.
+
+    per_trial = False (default):
+        4 vertically stacked bar charts: n_trials, log(n_time_bins), mean firing rate,
+        and Treves–Rolls sparseness, one bar per window label (+ 'full_session').
+
+    per_trial = True:
+        SINGLE-PANEL plot with one line per window (including 'full_session').
+        - Each series is interpolated to a common x length (shared trial index).
+        - Lines are vertically offset (stacked) so they don't overlap.
+        - Y axis ticks/labels are removed.
+        - A text label at the start of each line shows "<window> (n=<trials/chunks>)".
     """
-    res = load_or_compute_sparseness(eid, restrict=restrict)
+    res = load_or_compute_sparseness(eid, restrict=restrict, per_trial=per_trial)
 
     # keep insertion order, but put 'full_session' last
     keys = list(res.keys())
     if 'full_session' in keys:
         keys = [k for k in keys if k != 'full_session'] + ['full_session']
 
-    # collect series
-    n_trials, n_bins, fr_mean, spars = [], [], [], []
+    if not per_trial:
+        # ---------- legacy multi-panel bar summary ----------
+        n_trials, n_bins, fr_mean, spars = [], [], [], []
+        for k in keys:
+            d = res[k]
+            n_trials.append(float(d.get('n_trials', np.nan)))
+            n_bins.append(int(d['n_time_bins']))
+            fr = d.get('firing_rates', None)
+            fr_mean.append(float(np.nanmean(fr)) if fr is not None and np.size(fr) else np.nan)
+            spars.append(float(d.get('sparseness', np.nan)))
+
+        x = np.arange(len(keys))
+        fig_w, fig_h = 8, 9.0
+        fig, axes = plt.subplots(4, 1, figsize=(fig_w, fig_h), sharex=True)
+        bar_kwargs = dict(color='black', width=0.8)
+
+        axes[0].bar(x, n_trials, **bar_kwargs); axes[0].set_ylabel('n_trials', fontsize=11); axes[0].grid(axis='y', alpha=0.3)
+        axes[1].bar(x, np.log(n_bins), **bar_kwargs); axes[1].set_ylabel('log(n_time_bins)', fontsize=11); axes[1].grid(axis='y', alpha=0.3)
+        axes[2].bar(x, fr_mean, **bar_kwargs); axes[2].set_ylabel('mean firing rate', fontsize=11); axes[2].grid(axis='y', alpha=0.3)
+        axes[3].bar(x, spars, **bar_kwargs); axes[3].set_ylabel('sparseness (Treves–Rolls)', fontsize=11); axes[3].grid(axis='y', alpha=0.3)
+
+        for ax in axes:
+            ax.set_xlim(-0.5, len(keys) - 0.5)
+        for ax in axes[:-1]:
+            ax.tick_params(axis='x', labelbottom=False)
+
+        axes[-1].set_xticks(x)
+        axes[-1].set_xticklabels(keys, rotation=55, ha='right')
+
+        n_cells = len(res['full_session']['firing_rates']) if 'firing_rates' in res['full_session'] else np.nan
+        title = f"eid {eid}, {'restricted to ' if restrict is not None else ''}{n_cells} cells"
+        fig.suptitle(title, fontsize=12, y=0.995)
+        fig.tight_layout()
+
+        if save:
+            outdir = Path(pth_meso, 'sparseness'); outdir.mkdir(parents=True, exist_ok=True)
+            outfile = outdir / f"{eid}_sparseness_summary_vertical.png"
+            fig.savefig(outfile, dpi=300, bbox_inches='tight'); print(f"Saved: {outfile}")
+
+        if show: plt.show()
+        else: plt.close(fig)
+        return
+
+    # ---------- per_trial: single panel, stacked/offset lines ----------
+    # Common x length: prefer full_session n_trials, else max available
+    if 'full_session' in res and 'n_trials' in res['full_session']:
+        N_common = int(max(1, res['full_session']['n_trials']))
+    else:
+        N_common = 1
+        for k in keys:
+            d = res[k]
+            if 'sparseness_per_trial' in d and hasattr(d['sparseness_per_trial'], '__len__'):
+                N_common = max(N_common, len(d['sparseness_per_trial']))
+            if 'sparseness_per_chunk' in d and hasattr(d['sparseness_per_chunk'], '__len__'):
+                N_common = max(N_common, len(d['sparseness_per_chunk']))
+
+    x_common = np.arange(N_common)
+
+    # Prepare series (interpolate to shared x)
+    series = []  # list of dicts with keys: key, y, n, y_max
     for k in keys:
         d = res[k]
-        n_trials.append(float(d.get('n_trials', np.nan)))
-        n_bins.append(int(d['n_time_bins']))
-        fr = d.get('firing_rates', None)
-        fr_mean.append(float(np.nanmean(fr)) if fr is not None and np.size(fr) else np.nan)
-        spars.append(float(d.get('sparseness', np.nan)))
+        y_raw = np.asarray(
+            d.get('sparseness_per_chunk', []) if k == 'full_session'
+            else d.get('sparseness_per_trial', []),
+            dtype=float
+        )
+        n_series = int(y_raw.size)
+        if n_series == 0:
+            continue
 
-    x = np.arange(len(keys))
+        x_orig = np.linspace(0, N_common - 1, num=max(1, n_series))
+        finite = np.isfinite(y_raw)
 
-    # sizing: width scales with number of windows; height fixed for 4 rows
-    fig_w = 8
-    fig_h = 9.0
-    fig, axes = plt.subplots(4, 1, figsize=(fig_w, fig_h), sharex=True)
+        if finite.sum() >= 2:
+            y_interp = np.interp(x_common, x_orig[finite], y_raw[finite], left=np.nan, right=np.nan)
+        elif finite.sum() == 1:
+            y_interp = np.full_like(x_common, np.nan, dtype=float)
+            y_interp[:] = y_raw[finite][0]
+        else:
+            y_interp = np.full_like(x_common, np.nan, dtype=float)
 
-    bar_kwargs = dict(color='black', width=0.8)
+        y_max = np.nanmax(y_interp) if np.any(np.isfinite(y_interp)) else 0.0
+        series.append(dict(key=k, y=y_interp, n=n_series, y_max=float(y_max)))
 
-    # Row 1: n_trials
-    axes[0].bar(x, n_trials, **bar_kwargs)
-    axes[0].set_ylabel('n_trials', fontsize=11)
-    axes[0].grid(axis='y', alpha=0.3)
+    if len(series) == 0:
+        print("No per-trial sparseness series to plot."); return
 
-    # Row 2: n_time_bins
-    axes[1].bar(x, np.log(n_bins), **bar_kwargs)
-    axes[1].set_ylabel('log(n_time_bins)', fontsize=11)
-    axes[1].grid(axis='y', alpha=0.3)
+    # Stack with offsets so lines don't overlap
+    pad = 0.03  # vertical padding between stacked lines (sparseness is in ~[0,1])
+    cumulative = 0.0
+    for s in series:
+        s['offset'] = cumulative
+        cumulative += (s['y_max'] if s['y_max'] > 0 else 0.1) + pad  # ensure progress even if flat/NaN
 
-    # Row 3: mean firing rate across neurons
-    axes[2].bar(x, fr_mean, **bar_kwargs)
-    axes[2].set_ylabel('mean firing rate', fontsize=11)
-    axes[2].grid(axis='y', alpha=0.3)
+    fig, ax = plt.subplots(1, 1, figsize=(10, 5))  # one compact panel
+    for s in series:
+        y = s['y'] + s['offset']
+        ax.plot(x_common, y, linewidth=1.3, alpha=0.95)
 
-    # Row 4: sparseness
-    axes[3].bar(x, spars, **bar_kwargs)
-    axes[3].set_ylabel('sparseness (Treves–Rolls)', fontsize=11)
-    axes[3].grid(axis='y', alpha=0.3)
+        # Label near the start: find first finite point to place text
+        finite = np.isfinite(y)
+        if finite.any():
+            x0 = int(np.argmax(finite))  # first True index
+            y0 = y[x0]
+            label = f"{s['key']} (n={s['n']})"
+            ax.text(x0 + 2, y0, label, va='center', ha='left', fontsize=8)
 
-    # shared x: ticks/labels only on bottom axis
-    for ax in axes:
-        ax.set_xlim(-0.5, len(keys) - 0.5)
-    for ax in axes[:-1]:
-        ax.tick_params(axis='x', labelbottom=False)
+    ax.set_xlim(0, max(0, N_common - 1))
+    ax.set_xlabel('trial index (normalized across session)')
+    # Remove y-axis ticks/labels to minimize clutter/whitespace
+    ax.set_yticks([])
+    ax.set_ylabel('stacked sparseness (offset)', labelpad=6)
+    ax.grid(True, alpha=0.25, which='both', axis='x')
 
-    axes[-1].set_xticks(x)
-    axes[-1].set_xticklabels(keys, rotation=55, ha='right')
-
-    if restrict is not None:
-        s = f"eid {eid}, restricted to {len(res['full_session']['firing_rates'])} cells" 
-    else:
-        s = f"eid {eid}, {len(res['full_session']['firing_rates'])}  cells"
-
-    fig.suptitle(s, fontsize=12, y=0.995)
+    # Tight layout
     fig.tight_layout()
 
     if save:
-        outdir = Path(pth_meso, 'sparseness')
-        outdir.mkdir(parents=True, exist_ok=True)
-        outfile = outdir / f"{eid}_sparseness_summary_vertical.png"
-        fig.savefig(outfile, dpi=300, bbox_inches='tight')
-        print(f"Saved: {outfile}")
+        outdir = Path(pth_meso, 'sparseness'); outdir.mkdir(parents=True, exist_ok=True)
+        suffix = "_restricted_per_trial" if restrict is not None else "_per_trial"
+        outfile = outdir / f"{eid}_sparseness_over_trials_stacked{suffix}.png"
+        fig.savefig(outfile, dpi=300, bbox_inches='tight'); print(f"Saved: {outfile}")
 
-    if show:
-        plt.show()
-    else:
-        plt.close(fig)
-
+    if show: plt.show()
+    else: plt.close(fig)
 
 
 
