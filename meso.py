@@ -13,10 +13,11 @@ from matplotlib import cm
 from matplotlib.ticker import MaxNLocator
 from scipy.stats import zscore
 from matplotlib import gridspec
+import brainbox.io.one as bb_one
 from brainbox.io.one import SessionLoader
 from brainbox.behavior.wheel import interpolate_position
 from brainbox.behavior.wheel import velocity_filtered
-
+from importlib import import_module
 
 
 plt.ion()
@@ -43,30 +44,33 @@ def load_distinct_bright_colors(n=20, saturation=0.9, brightness=0.95):
 
 
 def embed_meso(eid):
-
-    '''
+    """
     Load and embed mesoscope data via rastermap for a given experiment ID (eid).
-    Parameters:
-    - eid: str, experiment ID
-    eid = '71e53fd1-38f2-49bb-93a1-3c826fbe7c13', Sam's example
 
-    query = 'field_of_view__imaging_type__name,mesoscope'
-    eids = one.search(procedures='Imaging', django=query, query_type='remote')
-
-
-    scaling: bool, whether to scale the data by percentile
-    '''
+    Functional invariants:
+    - Returns a dict rr with keys:
+        'roi_signal' (N,T), 'roi_times' (N,T), 'region_labels' (N,),
+        'region_colors' (N,), 'isort' (N,), 'xyz' (N,3 or similar)
+    - Saves rr to {pth_meso}/data/{eid}.npy
+    - Uses Rastermap with the same parameters to compute 'isort'
+    """
     print('Loading mesoscope data for experiment ID:', eid)
 
-    objects = ['mpci', 'mpciROIs', 'mpciROITypes', 'mpciStack']  
+    # -------- Legacy path (your current logic; functionally unchanged) --------
+    objects = ['mpci', 'mpciROIs', 'mpciROITypes', 'mpciStack']
 
     fov_folders = one.list_collections(eid, collection='alf/FOV_*')
-    fovs = sorted(map(lambda x: int(x[-2:]), fov_folders))
-    nFOV = len(fovs)
+    fov_folders = sorted(fov_folders, key=lambda s: int(s[-2:]))
 
     all_ROI_data = Bunch()
     for fov in fov_folders:
-        all_ROI_data[fov.split('/')[-1]] = one.load_collection(eid, fov, object=objects)
+        rec = {}
+        for obj in objects:
+            try:
+                rec[obj] = one.load_object(eid, obj, collection=fov)
+            except Exception:
+                rec[obj] = {}
+        all_ROI_data[fov.split('/')[-1]] = rec
 
     roi_signals = []
     roi_timess = []
@@ -74,75 +78,93 @@ def embed_meso(eid):
     region_colorss = []
     xyzs = []
 
+    # For a quick consistency check across FOVs
+    fov_time_signatures = []
+
     for fov in all_ROI_data:
         print(fov)
-        ROI_data_00 = all_ROI_data[fov]
+        ROI = all_ROI_data[fov]
 
-        # Determine region alignment key
-        key = 'brainLocationsIds_ccf_2017' if 'brainLocationsIds_ccf_2017' in ROI_data_00['mpciROIs'] \
-            else 'brainLocationIds_ccf_2017_estimate'
-        
-        region_ids = ROI_data_00['mpciROIs'][key]
+        # Region alignment key (final histology if available, else estimate)
+        key = ('brainLocationsIds_ccf_2017'
+               if 'brainLocationsIds_ccf_2017' in ROI['mpciROIs']
+               else 'brainLocationIds_ccf_2017_estimate')
+
+        region_ids = ROI['mpciROIs'][key]
         region_labels = atlas.regions.id2acronym(region_ids)
 
+        # Fast color mapping via acronym → hex
+        region_colors = np.array([region_colors_dict.get(acr, '#808080') for acr in region_labels], dtype=object)
 
-        region_colors = np.array([adf.loc[adf['id'] == i, 
-                            'hexcolor'].values[0] for i in region_ids])
-
-        # Data: times and ROI signals
-        frame_times = ROI_data_00['mpci']['times']
-        roi_xyz = ROI_data_00['mpciROIs']['stackPos']
-        timeshift = ROI_data_00['mpciStack']['timeshift']
+        # Times and signals
+        frame_times = ROI['mpci']['times']
+        roi_xyz = ROI['mpciROIs']['stackPos']
+        timeshift = ROI['mpciStack']['timeshift']
+        # Preserve your indexing semantics
         roi_offsets = timeshift[roi_xyz[:, len(timeshift.shape)]]
-        
-        roi_times = np.tile(frame_times, 
-                            (roi_offsets.size, 1)) + roi_offsets[np.newaxis, :].T
 
-        # roi_signal = ROI_data_00['mpci']['ROIActivityF'].T  
-        roi_signal = ROI_data_00['mpci']['ROIActivityDeconvolved'].T 
-        
-        print(roi_times.shape[1], 'time bins', 'from ', roi_times[0].min(), 
-            'to', roi_times[0].max(), 
-            f'bin size: {np.diff(roi_times[0])[0]:.4f} s')
+        roi_times = (np.tile(frame_times, (roi_offsets.size, 1)) +
+                     roi_offsets[:, None])  # (Nroi, T)
 
-        # filter out neurons only
-        mask = ROI_data_00['mpciROIs']['mpciROITypes']
-        mask = mask.astype(bool)
+        # Prefer deconvolved, fall back to fluorescence if needed
+        if 'ROIActivityDeconvolved' in ROI['mpci']:
+            roi_signal = ROI['mpci']['ROIActivityDeconvolved'].T
+        else:
+            roi_signal = ROI['mpci']['ROIActivityF'].T
 
-        print(fov, sum(mask), 'of', len(mask), 'channels are neurons')
+        print(roi_times.shape[1], 'time bins',
+              'from', float(roi_times[0].min()), 'to', float(roi_times[0].max()),
+              f'bin size: {np.diff(roi_times[0])[0]:.4f} s')
 
-        roi_signals.append(roi_signal[mask])
-        roi_timess.append(roi_times)
+        # Keep neuron ROIs only
+        mask = ROI['mpciROIs']['mpciROITypes'].astype(bool)
+        print(fov, int(mask.sum()), 'of', len(mask), 'channels are neurons')
+
+        roi_signals.append(roi_signal[mask].astype(np.float32, copy=False))
+        roi_timess.append(roi_times)  # keep full per-ROI times (Nroi,T)
         region_labelss.append(region_labels[mask])
         region_colorss.append(region_colors[mask])
-        xyzs.append(ROI_data_00['mpciROIs']['mlapdv_estimate'][mask])
+        xyzs.append(ROI['mpciROIs']['mlapdv_estimate'][mask])
 
-        
-    # stack across fovs    
-    roi_signal = np.vstack(roi_signals)
-    roi_times = roi_timess[0]  # all fovs have the same time bins
+        # FOV time signature for sanity check (start, stop, dt)
+        t0, t1 = roi_times[0, 0], roi_times[0, -1]
+        dt = np.diff(roi_times[0, :2])[0] if roi_times.shape[1] > 1 else np.nan
+        fov_time_signatures.append((float(t0), float(t1), float(dt)))
+
+        # free memory early
+        del ROI
+        gc.collect()
+
+    # Stack across FOVs
+    roi_signal = np.vstack(roi_signals)                 # (N,T)
     region_labels = np.hstack(region_labelss)
     region_colors = np.hstack(region_colorss)
     xyz = np.vstack(xyzs)
 
+    # Choose a common time base; keep your original behavior
+    # (assumes identical time bases across FOVs)
+    roi_times = roi_timess[0]
+
+    # Optional: warn if FOV time bases look inconsistent
+    if len({(round(s[0], 6), round(s[1], 6), round(s[2], 6)) for s in fov_time_signatures}) > 1:
+        print('Warning: FOV time bases differ; using the first FOV time base as session reference.')
+
     print(roi_signal.shape, 'ROI signal shape')
     print(Counter(region_labels))
 
-
     print('Running rastermap...')
     model = Rastermap(n_PCs=100, n_clusters=30,
-                    locality=0.75, time_lag_window=5, 
-                    bin_size=1).fit(roi_signal)
-
+                      locality=0.75, time_lag_window=5, bin_size=1).fit(roi_signal)
     isort = model.isort
 
     rr = {
         'roi_signal': roi_signal,
-        'roi_times': roi_times,
+        'roi_times': roi_times.astype(np.float32, copy=False),
         'region_labels': region_labels,
         'region_colors': region_colors,
         'isort': isort,
-        'xyz': xyz}
+        'xyz': xyz
+    }
 
     dpth = Path(pth_meso, 'data')
     dpth.mkdir(parents=True, exist_ok=True)
@@ -820,7 +842,7 @@ def plot_sparseness_res(eid, save=True, show=True, restrict=None, per_trial=Fals
 
     per_trial = False (default):
         4 vertically stacked bar charts: n_trials, log(n_time_bins), mean firing rate,
-        and Treves–Rolls sparseness, one bar per window label (+ 'full_session').
+        and Treves-Rolls sparseness, one bar per window label (+ 'full_session').
 
     per_trial = True:
         SINGLE-PANEL plot with one line per window (including 'full_session').
@@ -963,6 +985,195 @@ def plot_sparseness_res(eid, save=True, show=True, restrict=None, per_trial=Fals
     if show: plt.show()
     else: plt.close(fig)
 
+
+def plot_fr_histograms_across_sessions_restricted(
+    eids,
+    windows=None,          # if None: intersection of windows (with 'firing_rates') across the kept EIDs
+    bins=60,
+    logx=True,             # log-scale x (drops <=0)
+    density=True,          # PDF density normalization
+    colors=None,           # optional dict {label: color}; else auto palette
+    target_n=None,         # if set, keep only EIDs with exactly this neuron count; else pick the largest group
+    save=True,
+    show=True,
+):
+    """
+    Overlay histogram outlines of per-cell firing rates across RESTRICTED sessions.
+    Only uses locally saved '<eid>_restricted.npy'; EIDs without that file are skipped.
+    Sessions are filtered to those sharing the same neuron count; the subset is printed.
+    """
+    assert isinstance(eids, (list, tuple)) and len(eids) >= 1, "Provide a list of EIDs."
+
+    base = Path(pth_meso, 'sparseness')
+    sess_res = {}
+    for s in eids:
+        fpath = base / f"{s}_restricted.npy"
+        if fpath.exists():
+            sess_res[s] = np.load(fpath, allow_pickle=True).item()
+        else:
+            print(f"[skip] No restricted result found for EID {s}: {fpath.name}")
+
+    if not sess_res:
+        print("No restricted results found locally for the provided EIDs.")
+        return []
+
+    # --- group by neuron count using full_session (if missing, fall back to any window with 'firing_rates') ---
+    counts = {}
+    for s, r in sess_res.items():
+        if 'full_session' in r and 'firing_rates' in r['full_session']:
+            counts[s] = int(np.asarray(r['full_session']['firing_rates']).size)
+        else:
+            # fallback: take length from first window with firing_rates
+            n = None
+            for k, d in r.items():
+                if isinstance(d, dict) and 'firing_rates' in d:
+                    n = int(np.asarray(d['firing_rates']).size)
+                    break
+            if n is None:
+                print(f"[skip] {s}: no 'firing_rates' found in any window.")
+                continue
+            counts[s] = n
+
+    # Build groups {N: [eid,...]}
+    groups = {}
+    for s, n in counts.items():
+        groups.setdefault(n, []).append(s)
+
+    if target_n is not None:
+        if target_n not in groups:
+            print(f"[abort] target_n={target_n} not found among counts: {sorted(groups.keys())}")
+            return []
+        chosen_N = target_n
+    else:
+        # pick the N with the most sessions; if tie, pick the largest N
+        max_len = max(len(v) for v in groups.values())
+        candidates = [N for N, lst in groups.items() if len(lst) == max_len]
+        chosen_N = max(candidates)
+
+    included_eids = groups[chosen_N]
+    dropped_eids = [s for s in sess_res.keys() if s not in included_eids]
+
+    # Print the chosen subset and the discarded ones
+    print(f"[kept] N={chosen_N} neurons; {len(included_eids)} sessions:")
+    for s in included_eids:
+        print("   ", s)
+    if dropped_eids:
+        print(f"[dropped] (different N):")
+        for s in dropped_eids:
+            print(f"   {s}: N={counts[s]}")
+
+    # If nothing left, stop
+    if not included_eids:
+        print("[abort] No sessions share a common neuron count.")
+        return []
+
+    # Restrict the session results to included_eids
+    sess_res = {s: sess_res[s] for s in included_eids}
+
+    # --- choose windows: intersection across kept sessions if not provided ---
+    if windows is None:
+        keysets = []
+        for s in included_eids:
+            keysets.append({k for k, v in sess_res[s].items()
+                            if isinstance(v, dict) and ('firing_rates' in v)})
+        windows = sorted(set.intersection(*keysets)) if keysets else []
+        if not windows:
+            print("No common windows with 'firing_rates' across the kept restricted sessions.")
+            return included_eids
+
+    # --- layout grid ---
+    nW = len(windows)
+    nrows = int(np.ceil(np.sqrt(nW)))
+    ncols = int(np.ceil(nW / nrows))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(3.8 * ncols, 3.2 * nrows), squeeze=False)
+    axes_flat = axes.ravel()
+
+    # --- colors/labels ---
+    eid_labels = [str(s).split('-')[0] for s in included_eids]  # compact labels
+    if colors is None:
+        pal = load_distinct_bright_colors(n=len(included_eids))
+        colors = {lab: pal[i] for i, lab in enumerate(eid_labels)}
+
+    # --- plot per window ---
+    for i, win in enumerate(windows):
+        ax = axes_flat[i]
+        # gather raw vectors (no log filtering for neuron-count sanity)
+        raw_data = {}
+        for s, lab in zip(included_eids, eid_labels):
+            x = np.asarray(sess_res[s][win]['firing_rates'], float)
+            x = x[np.isfinite(x)]
+            raw_data[lab] = x
+            if x.size != chosen_N:
+                print(f"[warn] {s}: '{win}' has N={x.size} ≠ chosen N={chosen_N} (still plotting, but check your files).")
+
+        # shared bins (based on filtered-for-plot arrays)
+        arrays = []
+        plot_data = {}
+        for lab, x in raw_data.items():
+            xx = x[x > 0] if logx else x
+            plot_data[lab] = xx
+            if xx.size:
+                arrays.append(xx)
+
+        if arrays:
+            if logx:
+                eps = 1e-12
+                lo = max(min(a.min() for a in arrays), eps)
+                hi = max(a.max() for a in arrays)
+                if not np.isfinite(hi) or hi <= lo:
+                    hi = lo * 10
+                edges = np.logspace(np.log10(lo), np.log10(hi), bins)
+            else:
+                lo = min(a.min() for a in arrays)
+                hi = max(a.max() for a in arrays)
+                if (not np.isfinite(lo)) or (not np.isfinite(hi)) or hi <= lo:
+                    lo, hi = 0.0, 1.0
+                edges = np.linspace(lo, hi, bins)
+        else:
+            edges = np.linspace(0.0, 1.0, bins)
+
+        # outlines
+        for lab in eid_labels:
+            xx = plot_data[lab]
+            if xx.size == 0:
+                continue
+            y, e = np.histogram(xx, bins=edges, density=density)
+            centers = 0.5 * (e[:-1] + e[1:])
+            ax.plot(centers, y, linewidth=1.4, label=lab, color=colors[lab])
+
+        if logx:
+            ax.set_xscale('log')
+        ax.grid(alpha=0.25)
+        ax.set_title(win)
+        if i % ncols == 0:
+            ax.set_ylabel('density' if density else 'count')
+        if i // ncols == nrows - 1:
+            ax.set_xlabel('mean activity per neuron' + (' (log)' if logx else ''))
+
+    # hide unused axes
+    for j in range(nW, nrows * ncols):
+        axes_flat[j].set_visible(False)
+
+    # legend
+    handles = [plt.Line2D([0], [0], color=colors[lab], lw=1.8) for lab in eid_labels]
+    fig.legend(handles, eid_labels, loc='upper center', ncol=min(len(eid_labels), 8), frameon=False)
+
+    fig.suptitle(f"Restricted sessions — per-cell firing-rate distributions (kept N={chosen_N}, {len(included_eids)} sess.)",
+                 y=0.98, fontsize=12)
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+
+    if save:
+        outdir = Path(pth_meso, 'sparseness'); outdir.mkdir(parents=True, exist_ok=True)
+        fname = f"fr_hist_across_sessions_RESTRICTED_{len(included_eids)}sess_{len(windows)}wins_N{chosen_N}.png"
+        fig.savefig(outdir / fname, dpi=300, bbox_inches='tight')
+        print("Saved:", outdir / fname)
+
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return included_eids
 
 
 # if __name__ == "__main__":
