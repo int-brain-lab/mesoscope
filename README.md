@@ -139,7 +139,7 @@ out = neuron_dropping_curves_cached(
     n_label_shuffles=100,
     shuffle_seed=0,
 )
-
+```
 The function plots session‑wise NDCs (overlay) and prints a compact table with \(k^*\) and the per‑session ceiling. True curves should lie clearly above the shuffled band; a **leftward shift** of the true curves (or decreasing \(k^*\)) across days indicates improved coding efficiency.
 
 ---
