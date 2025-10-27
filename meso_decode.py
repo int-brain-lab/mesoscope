@@ -13,6 +13,7 @@ import pickle
 import json
 from datetime import datetime
 from one.api import ONE
+import re
 
 # ------------------------
 # Local IBL helper imports
@@ -21,7 +22,7 @@ MESO_DIR = Path.home() / "Dropbox/scripts/IBL"
 if str(MESO_DIR) not in sys.path:
     sys.path.insert(0, str(MESO_DIR))
 from meso import get_win_times, load_or_embed
-from meso_chronic import match_tracked_indices_across_sessions
+from meso_chronic import pairwise_shared_indices_for_animal, match_tracked_indices_across_sessions
 
 one = ONE()
 pth_meso = Path(one.cache_dir) / "meso" / "decoding"
@@ -33,6 +34,17 @@ Target = Literal["choice", "feedback", "stimulus", "block"]
 # =============
 # Helper utils
 # =============
+
+def _as_stats_tuple(v) -> Tuple[float, float, int]:
+    """Return (mean, sd, n) whether v is an array or a compact dict."""
+    if isinstance(v, dict):
+        return float(v.get("mean", np.nan)), float(v.get("sd", 0.0)), int(v.get("n", 0))
+    a = np.asarray(v, float)
+    if a.size == 0:
+        return (np.nan, 0.0, 0)
+    m = float(a.mean())
+    s = float(a.std(ddof=1)) if a.size > 1 else 0.0
+    return (m, s, int(a.size))
 
 @dataclass
 class NDCResult:
@@ -215,38 +227,6 @@ def compact_ndc_result(res: NDCResult) -> NDCResult:
     return res
 
 
-def _extract_stats(res: NDCResult, ks_arr: np.ndarray):
-    means, sds, ns = [], [], []
-    for k in ks_arr:
-        v = res.scores[k]
-        if isinstance(v, dict):
-            means.append(v["mean"]); sds.append(v["sd"]); ns.append(v["n"])
-        else:
-            means.append(float(np.mean(v)))
-            sds.append(float(np.std(v, ddof=1)) if len(v) > 1 else 0.0)
-            ns.append(int(len(v)))
-    return np.array(means), np.array(sds), np.array(ns)
-
-def _extract_shuffle_stats(res: NDCResult, ks_arr: np.ndarray):
-    sh_means, sh_sds, sh_ns = [], [], []
-    for k in ks_arr:
-        v = res.shuffled[k]
-        if isinstance(v, dict):
-            sh_means.append(v["mean"]); sh_sds.append(v["sd"]); sh_ns.append(v["n"])
-        else:
-            sh_means.append(float(np.mean(v)))
-            sh_sds.append(float(np.std(v, ddof=1)) if len(v) > 1 else 0.0)
-            sh_ns.append(int(len(v)))
-    return np.array(sh_means), np.array(sh_sds), np.array(sh_ns)
-
-@dataclass
-class NDCResult:
-    ks: np.ndarray
-    scores: Dict[int, np.ndarray]
-    metric: str
-    ceiling: float
-    shuffled: Optional[Dict[int, np.ndarray]] = None
-
 def _cv_score(clf, X, y, metric: str, n_splits: int, seed: int) -> float:
     if not np.all(np.isfinite(X)):
         raise ValueError("X contains non-finite values after preprocessing")
@@ -276,14 +256,25 @@ def neuron_dropping_curve(
     ceiling_mode: str = "maxk",
     n_label_shuffles: int = 0,
     shuffle_seed: Optional[int] = None,
-    scores_dtype: np.dtype = np.float16,   # NEW: smaller arrays
-    stats_only: bool = False,              # NEW: don’t keep per-replicate arrays
+    scores_dtype: np.dtype = np.float16,
+    stats_only: bool = False,
 ) -> NDCResult:
-    ...
-    scores: Dict[int, np.ndarray] = {}
-    # if stats_only: keep OnlineStats in place of arrays, convert at end
-    stats_scores: Dict[int, OnlineStats] = {} if stats_only else None
+    # --- MISSING LINES (restore) ---
+    N = X.shape[1]
+    ks = np.array(sorted([k for k in ks if 1 <= k <= N]), dtype=int)
+    if ks.size == 0:
+        raise ValueError("No valid k in ks <= number of neurons")
 
+    scaler = StandardScaler(with_mean=True, with_std=True)
+    Xs = scaler.fit_transform(X)
+
+    def make_clf():
+        return LogisticRegression(penalty="l2", solver="liblinear", max_iter=2000)
+
+    rng = np.random.default_rng(seed)
+    # -------------------------------
+
+    scores: Dict[int, np.ndarray] = {}
     for k in ks:
         if stats_only:
             acc = OnlineStats()
@@ -291,9 +282,9 @@ def neuron_dropping_curve(
                 cols = rng.choice(N, size=k, replace=False)
                 val = _cv_score(make_clf(), Xs[:, cols], y, metric=metric, n_splits=cv_splits, seed=seed + r)
                 acc.update(float(val))
-            scores[k] = acc.result()  # directly store dict(mean,sd,n)
+            scores[k] = acc.result()
         else:
-            sc = np.empty(R, dtype=scores_dtype)  # np.float16 saves 2–4× RAM vs float64/32
+            sc = np.empty(R, dtype=scores_dtype)
             for r in range(R):
                 cols = rng.choice(N, size=k, replace=False)
                 sc[r] = _cv_score(make_clf(), Xs[:, cols], y, metric=metric, n_splits=cv_splits, seed=seed + r)
@@ -303,10 +294,7 @@ def neuron_dropping_curve(
     if ceiling_mode == "all" and N > ks.max():
         ceiling = _cv_score(make_clf(), Xs, y, metric=metric, n_splits=cv_splits, seed=seed + 12345)
     else:
-        if stats_only:
-            ceiling = scores[int(ks.max())]["mean"]
-        else:
-            ceiling = float(np.mean(scores[ks.max()]))
+        ceiling = (scores[int(ks.max())]["mean"] if stats_only else float(np.mean(scores[ks.max()])))
 
     shuffled: Optional[Dict[int, np.ndarray]] = None
     if n_label_shuffles and n_label_shuffles > 0:
@@ -479,6 +467,42 @@ def session_performance(eid: str) -> float:
     fb = np.asarray(trials["feedbackType"])
     return float(np.sum(fb == 1) / len(fb)) if len(fb) else np.nan
 
+
+def _subject_of_eid(eid: str) -> str:
+    try:
+        meta = one.alyx.rest("sessions", "read", id=eid)
+        return str(meta.get("subject", ""))
+    except Exception:
+        return ""
+
+def save_pairwise_ndc_result(
+    cache_dir: Path,
+    subject: str,
+    prefix: str,
+    target: Target,
+    sessions: Dict[str, dict],   # eid -> {"result": NDCResult, "meta": dict}
+    group_meta: dict
+):
+    """
+    Save pairwise payload to:
+        <cache_dir>/pair_summaries/<subject>/res/<prefix>_<target>.pkl
+    """
+    res_dir = Path(cache_dir) / "pair_summaries" / subject / "res"
+    res_dir.mkdir(parents=True, exist_ok=True)
+    out_path = res_dir / f"{prefix}_{target}.pkl"
+
+    payload = dict(
+        prefix=prefix,
+        target=target,
+        group_meta=group_meta,
+        sessions=sessions,
+        saved_at=datetime.utcnow().isoformat(timespec="seconds") + "Z",
+    )
+    with open(out_path, "wb") as f:
+        pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+    return out_path
+
+
 def _group_cache_name(prefix: str, target: str) -> str:
     return f"{prefix}_{target}.pkl"
 
@@ -549,14 +573,26 @@ def compute_and_cache_ndcs(
     seed: int = 0,
     ceiling_mode: str = "maxk",
     n_label_shuffles: int = 100,
-    shuffle_seed: Optional[str] = None,
+    shuffle_seed: Optional[int] = None,
+    idx_map_override: Optional[Dict[str, np.ndarray]] = None,   # NEW
 ) -> Dict[str, dict]:
+
+
     eids = sorted(list(eids), key=_eid_date)
     if len(eids) < 2:
         raise ValueError("Provide at least two EIDs.")
+    subject = _subject_of_eid(eids[0])
 
     # Shared neurons across sessions
-    idx_map = match_tracked_indices_across_sessions(one, eids[0], eids[1:], roicat_root=roicat_root)
+    if idx_map_override is not None:
+        # use provided indices
+        idx_map = {e: np.asarray(idx_map_override[e], dtype=int) for e in eids if e in idx_map_override}
+        if len(idx_map) != len(eids):
+            missing = [e for e in eids if e not in idx_map]
+            raise ValueError(f"idx_map_override missing entries for: {missing}")
+    else:
+        idx_map = match_tracked_indices_across_sessions(one, eids[0], eids[1:], roicat_root=roicat_root)
+
     lens = {e: int(idx_map[e].size) for e in eids}
     if len(set(lens.values())) != 1:
         n_shared = min(lens.values())
@@ -567,7 +603,7 @@ def compute_and_cache_ndcs(
     if n_shared == 0:
         raise RuntimeError("No shared neurons across the provided sessions.")
 
-    # Prefix like 3c7_4a4_bc3_f89_23c
+    # Prefix like 3c7_4a4_bc3_...
     prefix = "_".join([e[:3] for e in eids])
 
     # ks up to n_shared (ensure max point present)
@@ -591,7 +627,7 @@ def compute_and_cache_ndcs(
     if not Xy_map:
         raise RuntimeError("No sessions/targets yielded valid trial features.")
 
-    # Equalize trial counts per target across sessions
+    # Equalize trials across sessions (per target)
     if equalize_trials:
         for t in targets:
             sizes = [len(Xy_map[(e,t)][1]) for e in eids if (e,t) in Xy_map]
@@ -610,44 +646,42 @@ def compute_and_cache_ndcs(
     group_meta = dict(all_eids=list(eids), n_shared=n_shared, prefix=prefix)
 
     for t in targets:
-        # build & equalize as you already do (Xy_map ready)
+        # compute per-eid, save tmp, merge, save group
+        sessions: Dict[str, dict] = {}
         for e in eids:
-            if (e, t) not in Xy_map:
+            if (e,t) not in Xy_map:
                 continue
-            X, y, (event, win) = Xy_map[(e, t)]
-
-            # --- compute with small dtypes and/or stats-only ---
+            X, y, (event, win) = Xy_map[(e,t)]
             res = neuron_dropping_curve(
-                X, y,
-                ks=ks_grid, R=R, metric=metric, cv_splits=cv_splits, seed=seed,
+                X, y, ks=ks_grid, R=R, metric=metric, cv_splits=cv_splits, seed=seed,
                 ceiling_mode=ceiling_mode, n_label_shuffles=n_label_shuffles, shuffle_seed=shuffle_seed,
-                scores_dtype=np.float16,          # saves RAM
-                stats_only=False                  # set True if you only need mean/SD/N
+                scores_dtype=np.float16, stats_only=False
             )
-
             perf = session_performance(e)
             meta = dict(
                 eid=e, target=t, date=_eid_date(e), n_shared=n_shared,
                 ks_max=int(max(res.ks)), trials=len(y), performance=float(perf),
                 event=event, win=tuple(win), equalize_trials=bool(equalize_trials),
-                prefix=prefix, all_eids=list(eids),
+                prefix=prefix, all_eids=list(eids), subject=subject,
             )
-            metas[(e, t)] = meta
-
-            # --- write immediately and drop from RAM ---
-            save_tmp_session(cache_dir, prefix, t, e, res, meta, compact=True)
+            sessions[e] = {"result": compact_ndc_result(res), "meta": meta}  # compact to save RAM
+            metas[(e,t)] = meta
             del X, y, res
             gc.collect()
 
-        # after all eids for this target, assemble small sessions dict and save once
-        sessions = load_and_merge_tmp_sessions(cache_dir, prefix, t)
         if sessions:
+            # If this is a pair, also save to the new per-subject pairwise layout
+            if len(eids) == 2 and subject:
+                save_pairwise_ndc_result(
+                    cache_dir=cache_dir,
+                    subject=subject,
+                    prefix=prefix,
+                    target=t,
+                    sessions=sessions,
+                    group_meta=group_meta,
+                )
+            # Keep legacy group file for backward compatibility (grid plotters, etc.)
             save_group_ndc_result(cache_dir, prefix=prefix, target=t, sessions=sessions, group_meta=group_meta)
-
-        # optional: clean tmp files now to reclaim disk
-        for p in Path(cache_dir).glob(f"{prefix}__{t}__*.tmp.pkl"):
-            try: p.unlink()
-            except Exception: pass
 
     return metas
 
@@ -657,9 +691,13 @@ def compute_and_cache_ndcs(
 
 
 def summarize_k_star(res: NDCResult, delta: float = 0.02) -> Optional[int]:
-    target = res.ceiling - float(delta)
-    means = {k: float(v.mean()) for k, v in res.scores.items()}
-    ks_ok = sorted([k for k, m in means.items() if m >= target])
+    target = float(res.ceiling) - float(delta)
+    ks_iter = res.ks if isinstance(res.ks, np.ndarray) else np.asarray(res.ks, dtype=int)
+    means_by_k = {}
+    for k in ks_iter:
+        m, s, n = _as_stats_tuple(res.scores[int(k)])
+        means_by_k[int(k)] = m
+    ks_ok = sorted([k for k, m in means_by_k.items() if np.isfinite(m) and m >= target])
     return ks_ok[0] if ks_ok else None
 
 def plot_ndc_grid_from_cache(
@@ -668,9 +706,14 @@ def plot_ndc_grid_from_cache(
     targets: Sequence[Target] = ("choice", "feedback", "stimulus", "block"),
     delta: float = 0.02,
     show_shuffle: bool = True,
+    save_path: Optional[Path] = None,   # keep save option
+    show: bool = True,                  # optionally suppress display
 ):
-    import math
-    # --- automatically infer prefix if a metas dict was passed ---
+    """
+    Load cached NDC results for a given prefix and render a 2x2 grid plot.
+    Works with both array-based caches and compact dict caches {"mean","sd","n"}.
+    """
+    # Resolve prefix
     if isinstance(prefix_or_metas, dict):
         prefix = _infer_prefix_from_metas(prefix_or_metas)
     else:
@@ -679,8 +722,11 @@ def plot_ndc_grid_from_cache(
     fig, axes = plt.subplots(2, 2, figsize=(10, 7.5))
     axes = axes.ravel()
 
+    # Stable panel order
     target_order = ["choice", "feedback", "stimulus", "block"]
     target_order = [t for t in target_order if t in targets] + [t for t in targets if t not in target_order]
+
+    last_res = None  # for axis label fallback
 
     for ax, t in zip(axes, target_order):
         try:
@@ -689,39 +735,53 @@ def plot_ndc_grid_from_cache(
             ax.set_visible(False)
             continue
 
-        sessions = payload["sessions"]
+        sessions = payload.get("sessions", {})
         if not sessions:
             ax.set_visible(False)
             continue
 
+        # Sort sessions chronologically (if dates present)
         def _date_of(eid):
-            return sessions[eid]["meta"].get("date","")
+            return sessions[eid]["meta"].get("date", "")
         eids_sorted = sorted(sessions.keys(), key=_date_of)
 
         first_shuffle_drawn = False
-        last_res = None
-        for i, e in enumerate(eids_sorted):
-            res: NDCResult = sessions[e]["result"]
-            meta = sessions[e]["meta"]
+
+        for eid in eids_sorted:
+            res: NDCResult = sessions[eid]["result"]
+            meta = sessions[eid]["meta"]
             last_res = res
 
-            ks_arr = res.ks
-            means = np.array([res.scores[k].mean() for k in ks_arr])
-            sds   = np.array([res.scores[k].std(ddof=1) for k in ks_arr])
-            ns    = np.array([len(res.scores[k]) for k in ks_arr], dtype=int)
+            ks_arr = np.asarray(res.ks, dtype=int)
+
+            # Means / CIs using unified accessor
+            means, sds, ns = [], [], []
+            for k in ks_arr:
+                m, s, n = _as_stats_tuple(res.scores[int(k)])
+                means.append(m); sds.append(s); ns.append(n)
+            means = np.asarray(means)
+            sds   = np.asarray(sds)
+            ns    = np.asarray(ns, dtype=int)
             cis   = 1.96 * sds / np.sqrt(np.maximum(1, ns))
 
+            # Label with k* summary
             k_star = summarize_k_star(res, delta=delta)
             lbl = f"{meta.get('date','NA')} (k*={k_star})" if k_star is not None else f"{meta.get('date','NA')} (k*=NA)"
             ax.errorbar(ks_arr, means, yerr=cis, fmt="-o", capsize=3, label=lbl, zorder=3)
 
             # Shuffle band once per panel
             if show_shuffle and (res.shuffled is not None) and (not first_shuffle_drawn):
-                sh_means = np.array([res.shuffled[k].mean() for k in ks_arr])
-                sh_sds   = np.array([res.shuffled[k].std(ddof=1) for k in ks_arr])
-                sh_ns    = np.array([len(res.shuffled[k]) for k in ks_arr], dtype=int)
+                sh_means, sh_sds, sh_ns = [], [], []
+                for k in ks_arr:
+                    m, s, n = _as_stats_tuple(res.shuffled[int(k)])
+                    sh_means.append(m); sh_sds.append(s); sh_ns.append(n)
+                sh_means = np.asarray(sh_means)
+                sh_sds   = np.asarray(sh_sds)
+                sh_ns    = np.asarray(sh_ns, dtype=int)
                 sh_cis   = 1.96 * sh_sds / np.sqrt(np.maximum(1, sh_ns))
-                ax.fill_between(ks_arr, sh_means - sh_cis, sh_means + sh_cis, alpha=0.10, color="gray", label="shuffle ±95% CI", zorder=1)
+
+                ax.fill_between(ks_arr, sh_means - sh_cis, sh_means + sh_cis, alpha=0.10, color="gray",
+                                label="shuffle ±95% CI", zorder=1)
                 ax.plot(ks_arr, sh_means, "--", lw=1.0, color="gray", zorder=2)
                 first_shuffle_drawn = True
 
@@ -729,10 +789,11 @@ def plot_ndc_grid_from_cache(
             perf = meta.get("performance", np.nan)
             if np.isfinite(perf):
                 kmax = int(np.max(ks_arr))
-                y_at_kmax = float(res.scores[kmax].mean())
+                y_at_kmax = _as_stats_tuple(res.scores[kmax])[0]
                 ax.annotate(f"{perf:.2f}", xy=(kmax, y_at_kmax), xytext=(0, 6),
                             textcoords="offset points", ha="center", va="bottom", fontsize=8)
 
+        # Ax cosmetics
         ax.set_xscale("log", base=2)
         ax.set_xlabel("neurons (k)")
         ylabel = (last_res.metric.upper() if last_res else "SCORE")
@@ -741,12 +802,22 @@ def plot_ndc_grid_from_cache(
         ax.grid(True, alpha=0.3)
         ax.legend(frameon=False, fontsize=8)
 
+    # Hide any unused panels
     for j in range(len(target_order), 4):
         axes[j].set_visible(False)
 
     fig.suptitle(prefix, fontsize=11, y=0.995)
     fig.tight_layout(rect=[0, 0, 1, 0.97])
-    plt.show()
+
+    if save_path is not None:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=250, bbox_inches="tight")
+
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
 
 # =========================
 # Convenience entrypoint
@@ -836,3 +907,314 @@ def neuron_dropping_curves_cached(
         )
 
     return metas
+
+
+def neuron_dropping_curves_for_session_pairs(
+    subject: str,
+    *,
+    targets: Sequence[Target] = ("choice", "feedback", "stimulus", "block"),
+    roicat_root: Path = Path.home() / "chronic_csv",
+    cache_dir: Path = pth_meso,
+    ks: tuple = (8, 16, 32, 64, 128, 256, 512, 1024, 2048),
+    R: int = 50,
+    metric: str = "auc",
+    cv_splits: int = 5,
+    delta: float = 0.02,
+    equalize_trials: bool = True,
+    seed: int = 0,
+    ceiling_mode: str = "maxk",
+    n_label_shuffles: int = 100,
+    shuffle_seed: Optional[int] = None,
+    min_trials: int = 400,
+    trial_key: str = "stimOn_times",
+    rerun: bool = False,
+    show: bool = False,   # default off when batch-saving images
+):
+    """
+    For a subject, compute NDCs for every consecutive session pair (after trial filtering),
+    using shared-neuron indices per pair.
+
+    Saves:
+      - new payloads:  <cache_dir>/pair_summaries/<subject>/res/<prefix>_<target>.pkl
+      - per-pair grid: <cache_dir>/pair_summaries/<subject>/imgs/<prefix>.png
+    """
+    one = ONE()
+    pairs = pairwise_shared_indices_for_animal(
+        subject, one=one, roicat_root=roicat_root, min_trials=min_trials, trial_key=trial_key
+    )
+    if not pairs:
+        print(f"[info] No valid consecutive pairs found for subject {subject}.")
+        return {}
+
+    saved = {}
+
+    # new layout roots
+    pair_root = Path(cache_dir) / "pair_summaries" / subject
+    img_root = pair_root / "imgs"
+    res_root = pair_root / "res"
+    img_root.mkdir(parents=True, exist_ok=True)
+    res_root.mkdir(parents=True, exist_ok=True)
+
+    for pair_key, idx_map in pairs.items():
+        eids = list(idx_map.keys())
+        eids_sorted = sorted(eids, key=_eid_date)
+        prefix = "_".join([e[:3] for e in eids_sorted])
+
+        # Already computed? Prefer new res/ structure; fall back to legacy.
+        existing_new = {t: (res_root / f"{prefix}_{t}.pkl").exists() for t in targets}
+        existing_legacy = {t: (Path(cache_dir) / f"{prefix}_{t}.pkl").exists() for t in targets}
+        have_any = any(existing_new.values()) or any(existing_legacy.values())
+
+        if not rerun and have_any:
+            save_path = img_root / f"{prefix}.png"
+            plot_ndc_grid_from_cache(
+                cache_dir=cache_dir,
+                prefix_or_metas=prefix,
+                targets=targets,
+                delta=delta,
+                show_shuffle=True,
+                save_path=save_path,
+                show=show,
+            )
+            saved[pair_key] = {"prefix": prefix, "from_cache": True, "save_path": str(save_path)}
+            continue
+
+        # Compute & cache using the provided shared indices for this pair
+        metas = compute_and_cache_ndcs(
+            eids=eids_sorted,
+            targets=targets,
+            roicat_root=roicat_root,
+            cache_dir=cache_dir,
+            ks=ks,
+            R=R,
+            metric=metric,
+            cv_splits=cv_splits,
+            equalize_trials=equalize_trials,
+            seed=seed,
+            ceiling_mode=ceiling_mode,
+            n_label_shuffles=n_label_shuffles,
+            shuffle_seed=shuffle_seed,
+            idx_map_override=idx_map,   # use pair-specific shared indices
+        )
+
+        # Save (or overwrite) the grid figure (legacy loader still works)
+        save_path = img_root / f"{prefix}.png"
+        plot_ndc_grid_from_cache(
+            cache_dir=cache_dir,
+            prefix_or_metas=metas,
+            targets=targets,
+            delta=delta,
+            show_shuffle=True,
+            save_path=save_path,
+            show=show,
+        )
+        saved[pair_key] = {"prefix": prefix, "from_cache": False, "save_path": str(save_path)}
+
+    return saved
+
+def plot_session_pair_kpanels_for_subject(
+    subject: str,
+    *,
+    targets: Sequence[Target] = ("choice", "feedback", "stimulus", "block"),
+    cache_dir: Path = pth_meso,
+    show: bool = True,
+    save: bool = True,
+) -> Dict[str, Optional[Path]]:
+    """
+    Load pairwise decoding payloads from:
+        cache_dir / 'pair_summaries' / subject / 'res' / '*.pkl'
+    (fallback to legacy cache_dir/*_<target>.pkl if none found),
+    then plot 3 fixed ks panels (k = 64, 256, 1024) for each target.
+
+    Style:
+      - data markers black; shuffle markers grey (x, dashed)
+      - legend only in top panel
+      - shared x and y axes across rows
+      - no grid; remove top/right spines
+    """
+    cache_dir = Path(cache_dir)
+    out_paths: Dict[str, Optional[Path]] = {}
+
+    # I/O roots in the new structure
+    res_dir = cache_dir / "pair_summaries" / subject / "res"
+    img_dir = cache_dir / "pair_summaries" / subject / "imgs"
+    if save:
+        img_dir.mkdir(parents=True, exist_ok=True)
+
+    ks_fixed = [64, 256, 1024]
+
+    def _mean_ci(stats_like):
+        m, sd, n = _as_stats_tuple(stats_like)
+        if n <= 1 or not np.isfinite(sd):
+            return m, 0.0, n
+        return m, 1.96 * sd / np.sqrt(max(1, n)), n
+
+    def _sessions_belong_to_subject_by_meta(sessions_dict: dict) -> bool:
+        subs = []
+        for eid, sd in sessions_dict.items():
+            meta = sd.get("meta", {})
+            sub = str(meta.get("subject", ""))  # may or may not be present
+            if sub:
+                subs.append(sub)
+        return (len(set(subs)) == 1 and subs[0] == subject) if subs else True
+
+    def _load_pair_payloads_for_target(target: str) -> Dict[str, dict]:
+        """
+        Returns {prefix: payload} for this target.
+        Prefers new res_dir; falls back to legacy cache_dir files.
+        """
+        out = {}
+
+        # --- new layout: res_dir contains per-pair payloads like 'f7c_002_stimulus.pkl'
+        if res_dir.exists():
+            for p in res_dir.glob(f"*_{target}.pkl"):
+                try:
+                    with open(p, "rb") as f:
+                        pay = pickle.load(f)
+                except Exception:
+                    continue
+                sessions = pay.get("sessions", {})
+                if len(sessions) != 2:
+                    continue
+                if not _sessions_belong_to_subject_by_meta(sessions):
+                    continue
+                # prefix from filename (stem without _target)
+                stem = p.stem
+                prefix = stem[: -len(f"_{target}")]
+                out[prefix] = pay
+
+        # --- fallback: legacy layout in cache_dir
+        if not out:
+            for p in cache_dir.glob(f"*_{target}.pkl"):
+                try:
+                    pay = load_group_ndc_result(cache_dir, prefix=p.stem[: -len(f"_{target}")], target=target)
+                except Exception:
+                    continue
+                sessions = pay.get("sessions", {})
+                if len(sessions) != 2:
+                    continue
+                if not _sessions_belong_to_subject_by_meta(sessions):
+                    continue
+                prefix = p.stem[: -len(f"_{target}")]
+                out[prefix] = pay
+
+        return out
+
+    for target in targets:
+        payloads = _load_pair_payloads_for_target(target)
+        if not payloads:
+            print(f"[info] No cached pair payloads found for {subject} [{target}].")
+            out_paths[target] = None
+            continue
+
+        # Build global session timeline (dates) from payload metas
+        eid_dates: Dict[str, str] = {}
+        for pay in payloads.values():
+            for eid, sd in pay.get("sessions", {}).items():
+                meta = sd.get("meta", {})
+                eid_dates[eid] = meta.get("date") or _eid_date(eid)
+
+        unique_eids = sorted(eid_dates.keys(), key=lambda e: eid_dates[e])
+        x_pos = {eid: i for i, eid in enumerate(unique_eids)}
+        x_ticks = [eid_dates[e] for e in unique_eids]
+
+        # Figure with shared axes
+        fig, axes = plt.subplots(
+            len(ks_fixed), 1, figsize=(6.26, 4.55), sharex=True, sharey=True,
+            constrained_layout=True
+        )
+        metric_label = None
+
+        def _pair_date(prefix):
+            try:
+                sess = payloads[prefix]["sessions"]
+                eids_here = sorted(sess.keys(), key=lambda e: sess[e]["meta"].get("date", ""))
+                return sess[eids_here[0]]["meta"].get("date", "")
+            except Exception:
+                return ""
+
+        for i, (ax, k) in enumerate(zip(axes, ks_fixed)):
+            drawn_any = False
+            for prefix in sorted(payloads.keys(), key=_pair_date):
+                sessions = payloads[prefix]["sessions"]
+                # chronological within pair
+                eids_here = sorted(sessions.keys(), key=lambda e: sessions[e]["meta"].get("date", ""))
+                if len(eids_here) != 2:
+                    continue
+                eid_a, eid_b = eids_here
+                res_a = sessions[eid_a]["result"]
+                res_b = sessions[eid_b]["result"]
+                if metric_label is None:
+                    metric_label = (res_a.metric.upper() if hasattr(res_a, "metric") else "SCORE")
+
+                ks_a = set(map(int, (res_a.ks if isinstance(res_a.ks, np.ndarray) else list(res_a.ks))))
+                ks_b = set(map(int, (res_b.ks if isinstance(res_b.ks, np.ndarray) else list(res_b.ks))))
+                if k not in ks_a or k not in ks_b:
+                    continue
+
+                # data
+                m_a, ci_a, _ = _mean_ci(res_a.scores[int(k)])
+                m_b, ci_b, _ = _mean_ci(res_b.scores[int(k)])
+                # shuffle
+                sh_a = getattr(res_a, "shuffled", None)
+                sh_b = getattr(res_b, "shuffled", None)
+                if sh_a and k in sh_a:
+                    sm_a, sci_a, _ = _mean_ci(sh_a[int(k)])
+                else:
+                    sm_a, sci_a = np.nan, 0.0
+                if sh_b and k in sh_b:
+                    sm_b, sci_b, _ = _mean_ci(sh_b[int(k)])
+                else:
+                    sm_b, sci_b = np.nan, 0.0
+
+                xa = x_pos.get(eid_a); xb = x_pos.get(eid_b)
+                if xa is None or xb is None:
+                    continue
+
+                # main (black)
+                ax.errorbar(xa + 0.25, m_a, yerr=ci_a, fmt="o", capsize=2.5, color="black", zorder=3)
+                ax.errorbar(xb - 0.25, m_b, yerr=ci_b, fmt="o", capsize=2.5, color="black", zorder=3)
+                # shuffle (grey)
+                if np.isfinite(sm_a):
+                    ax.errorbar(xa + 0.25, sm_a, yerr=sci_a, fmt="x", capsize=2.5,
+                                linestyle="--", color="grey", zorder=2)
+                if np.isfinite(sm_b):
+                    ax.errorbar(xb - 0.25, sm_b, yerr=sci_b, fmt="x", capsize=2.5,
+                                linestyle="--", color="grey", zorder=2)
+
+                drawn_any = True
+
+            # per-axis cosmetics
+            ax.set_title(f"{target.capitalize()} — k={k}", fontsize=10)
+            ax.set_ylabel(metric_label if metric_label else "Score", fontsize=9)
+            ax.grid(False)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            if drawn_any and i == 0:
+                data_line = ax.errorbar([], [], fmt="o", color="black", label="data")[0]
+                shuf_line = ax.errorbar([], [], fmt="x", linestyle="--", color="grey", label="shuffle")[0]
+                ax.legend(handles=[data_line, shuf_line], frameon=False, fontsize=9, loc="best")
+
+        # shared x-axis
+        axes[-1].set_xticks(list(range(len(unique_eids))))
+        axes[-1].set_xticklabels(x_ticks, rotation=45, ha="right", fontsize=8)
+        axes[-1].set_xlabel("Session date", fontsize=9)
+        axes[-1].set_xlim(-0.5, len(unique_eids) - 0.5)
+        for ax in axes:
+            ax.tick_params(labelsize=8)
+
+        
+        fig.suptitle(f"{subject} — {target}", fontsize=12, y=0.995)
+        fig.tight_layout()
+        save_path = None
+        if save:
+            save_path = img_dir / f"{subject}_{target}_kpanels_k64_256_1024_black.png"
+            fig.savefig(save_path, dpi=300, bbox_inches="tight")
+        if show:
+            plt.show()
+        else:
+            plt.close(fig)
+
+        out_paths[target] = save_path
+
+    return out_paths
