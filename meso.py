@@ -43,7 +43,7 @@ def load_distinct_bright_colors(n=20, saturation=0.9, brightness=0.95):
     return hex_colors
 
 
-def embed_meso(eid):
+def embed_meso(eid, filter_neurons=False):
     """
     Load and embed mesoscope data via rastermap for a given experiment ID (eid).
 
@@ -53,8 +53,10 @@ def embed_meso(eid):
         'region_colors' (N,), 'isort' (N,), 'xyz' (N,3 or similar)
     - Saves rr to {pth_meso}/data/{eid}.npy
     - Uses Rastermap with the same parameters to compute 'isort'
+    
     """
     print('Loading mesoscope data for experiment ID:', eid)
+    print('Filter neurons:', filter_neurons)
 
     # -------- Legacy path (your current logic; functionally unchanged) --------
     objects = ['mpci', 'mpciROIs', 'mpciROITypes', 'mpciStack']
@@ -120,11 +122,18 @@ def embed_meso(eid):
         mask = ROI['mpciROIs']['mpciROITypes'].astype(bool)
         print(fov, int(mask.sum()), 'of', len(mask), 'channels are neurons')
 
-        roi_signals.append(roi_signal[mask].astype(np.float32, copy=False))
-        roi_timess.append(roi_times)  # keep full per-ROI times (Nroi,T)
-        region_labelss.append(region_labels[mask])
-        region_colorss.append(region_colors[mask])
-        xyzs.append(ROI['mpciROIs']['mlapdv_estimate'][mask])
+        if filter_neurons:
+            roi_signals.append(roi_signal[mask].astype(np.float32, copy=False))
+            roi_timess.append(roi_times)  # keep full per-ROI times (Nroi,T)
+            region_labelss.append(region_labels[mask])
+            region_colorss.append(region_colors[mask])
+            xyzs.append(ROI['mpciROIs']['mlapdv_estimate'][mask])
+        else:
+            roi_signals.append(roi_signal.astype(np.float32, copy=False))
+            roi_timess.append(roi_times)
+            region_labelss.append(region_labels)
+            region_colorss.append(region_colors)
+            xyzs.append(ROI['mpciROIs']['mlapdv_estimate'])
 
         # FOV time signature for sanity check (start, stop, dt)
         t0, t1 = roi_times[0, 0], roi_times[0, -1]
@@ -152,10 +161,14 @@ def embed_meso(eid):
     print(roi_signal.shape, 'ROI signal shape')
     print(Counter(region_labels))
 
-    print('Running rastermap...')
-    model = Rastermap(n_PCs=100, n_clusters=30,
-                      locality=0.75, time_lag_window=5, bin_size=1).fit(roi_signal)
-    isort = model.isort
+    if filter_neurons:
+        print('Running rastermap...')
+        model = Rastermap(n_PCs=100, n_clusters=30,
+                        locality=0.75, time_lag_window=5, bin_size=1).fit(roi_signal)
+        isort = model.isort
+    else:
+        print('Skipping rastermap (filter_neurons=False)')
+        isort = np.arange(roi_signal.shape[0])
 
     rr = {
         'roi_signal': roi_signal,
@@ -168,16 +181,17 @@ def embed_meso(eid):
 
     dpth = Path(pth_meso, 'data')
     dpth.mkdir(parents=True, exist_ok=True)
-    np.save(Path(dpth, f"{eid}.npy"), rr, allow_pickle=True)
+    np.save(Path(dpth, f"{eid}_filter_{filter_neurons}.npy"), 
+        rr, allow_pickle=True)
     return rr
 
 
-def load_or_embed(eid, restrict=None):
-    fpath = Path(pth_meso, 'data', f"{eid}.npy")
-    if fpath.exists():
+def load_or_embed(eid, restrict=None, rerun=False, filter_neurons=False):
+    fpath = Path(pth_meso, 'data', f"{eid}_filter_{filter_neurons}.npy")
+    if fpath.exists() and (not rerun):
         rr = np.load(fpath, allow_pickle=True).item()
     else:
-        rr = embed_meso(eid)   # run your embedding function
+        rr = embed_meso(eid,filter_neurons=filter_neurons)   # run your embedding function
 
     if restrict is not None:
         print('pre restrict shape:', rr['roi_signal'].shape)
@@ -1174,6 +1188,30 @@ def plot_fr_histograms_across_sessions_restricted(
         plt.close(fig)
 
     return included_eids
+
+
+
+
+# eid = '38bc2e7c-d160-4887-86f6-4368bfd58c5f'
+
+# # Spontaneous activity:
+# passive_times = one.load_dataset(eid, '*passivePeriods*', collection='alf')
+# SP_times = passive_times['spontaneousActivity']
+
+# # Receptive field mapping:
+# from brainbox.io.one import load_passive_rfmap
+# RFMap = load_passive_rfmap(eid, one=one)
+
+# # Task‐replay (visual):
+# visual_TR = one.load_dataset(eid, '*passiveGabor*', collection='alf')
+
+# # Task‐replay (auditory):
+# auditory_TR = one.load_dataset(eid, '*passiveStims*', collection='alf')
+
+
+
+
+
 
 
 # if __name__ == "__main__":
