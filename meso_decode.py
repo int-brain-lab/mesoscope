@@ -4,6 +4,9 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import Sequence, Tuple, Dict, Optional, List, Literal, Union
 from sklearn.linear_model import LogisticRegression
+from sklearn.decomposition import PCA
+from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.pipeline import Pipeline
 from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import roc_auc_score, accuracy_score
 from sklearn.preprocessing import StandardScaler
@@ -15,6 +18,13 @@ from datetime import datetime
 from one.api import ONE
 import re
 
+# --- progress support (no hard dependency) ---
+try:
+    from tqdm import tqdm
+except Exception:
+    def tqdm(x, **kwargs):  # fallback: identity iterator
+        return x
+
 # ------------------------
 # Local IBL helper imports
 # ------------------------
@@ -22,7 +32,7 @@ MESO_DIR = Path.home() / "Dropbox/scripts/IBL"
 if str(MESO_DIR) not in sys.path:
     sys.path.insert(0, str(MESO_DIR))
 from meso import get_win_times, load_or_embed
-from meso_chronic import pairwise_shared_indices_for_animal, match_tracked_indices_across_sessions
+from meso_chronic import (pairwise_shared_indices_for_animal, match_tracked_indices_across_sessions, best_eid_subsets_for_animal)
 
 one = ONE()
 pth_meso = Path(one.cache_dir) / "meso" / "decoding"
@@ -30,6 +40,8 @@ pth_meso.mkdir(parents=True, exist_ok=True)
 print(f"[meso] Using global cache directory: {pth_meso}")
 
 Target = Literal["choice", "feedback", "stimulus", "block"]
+ShuffleMode = Literal["permute", "circular", "blockwise"]
+
 
 # =============
 # Helper utils
@@ -91,6 +103,27 @@ def _windowed_mean(rr, i0: np.ndarray, i1: np.ndarray) -> np.ndarray:
 # Label constructors
 # =====================
 
+def _permute_labels(rng, y):
+    return rng.permutation(y)
+
+def _circular_shift_labels(rng, y):
+    if y.size <= 1: return y.copy()
+    s = rng.integers(1, y.size)  # 1..n-1
+    return np.roll(y, s)
+
+def _blockwise_permute_labels(rng, y, block_ids):
+    # Permute y within each block id (e.g., session block or contrast block)
+    if block_ids is None:
+        return _permute_labels(rng, y)
+    y_perm = y.copy()
+    for b in np.unique(block_ids):
+        idx = np.flatnonzero(block_ids == b)
+        if idx.size > 1:
+            y_perm[idx] = rng.permutation(y[idx])
+    return y_perm
+
+
+
 def _labels_choice(trials):
     choice = np.asarray(trials["choice"], float)  # -1,0,1
     valid = np.isfinite(choice) & (choice != 0)
@@ -136,9 +169,11 @@ def _labels_block(trials):
 def build_trial_features(
     eid: str,
     target: Target = "choice",
+    rerun = False,
     restrict: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray, Tuple[str, Tuple[float, float]]]:
-    rr = load_or_embed(eid, restrict=restrict)
+
+    rr = load_or_embed(eid, restrict=restrict, rerun=rerun)
     times = rr["roi_times"][0]
     trials, _tts = get_win_times(eid)
 
@@ -193,6 +228,7 @@ def build_trial_features(
     n0 = int(np.sum(y == 0)); n1 = int(np.sum(y == 1))
     if n0 == 0 or n1 == 0:
         raise RuntimeError(f"{eid} [{target}]: not enough balanced trials (class counts 0={n0},1={n1})")
+
     n = min(n0, n1)
     rng = np.random.default_rng(0)
     keep0 = rng.choice(np.flatnonzero(y == 0), n, replace=False)
@@ -256,8 +292,11 @@ def neuron_dropping_curve(
     ceiling_mode: str = "maxk",
     n_label_shuffles: int = 0,
     shuffle_seed: Optional[int] = None,
+    shuffle_mode: ShuffleMode = "circular",
+    block_ids: Optional[np.ndarray] = None,
     scores_dtype: np.dtype = np.float16,
     stats_only: bool = False,
+    progress: bool = True,
 ) -> NDCResult:
     # --- MISSING LINES (restore) ---
     N = X.shape[1]
@@ -265,58 +304,64 @@ def neuron_dropping_curve(
     if ks.size == 0:
         raise ValueError("No valid k in ks <= number of neurons")
 
-    scaler = StandardScaler(with_mean=True, with_std=True)
-    Xs = scaler.fit_transform(X)
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import StandardScaler
 
-    def make_clf():
-        return LogisticRegression(penalty="l2", solver="liblinear", max_iter=2000)
+    def make_pipe():
+        # scaler refit inside each CV split (no leakage)
+        return Pipeline([
+            ("scaler", StandardScaler(with_mean=True, with_std=True)),
+            ("clf", LogisticRegression(penalty="l2", solver="liblinear", max_iter=2000))
+        ])
 
     rng = np.random.default_rng(seed)
-    # -------------------------------
 
     scores: Dict[int, np.ndarray] = {}
-    for k in ks:
+    for k in tqdm(ks, desc=f"NDC[{metric}] ks", disable=not progress):
         if stats_only:
             acc = OnlineStats()
-            for r in range(R):
+            for r in tqdm(range(R), desc=f"k={k} reps", leave=False, disable=not progress):
                 cols = rng.choice(N, size=k, replace=False)
-                val = _cv_score(make_clf(), Xs[:, cols], y, metric=metric, n_splits=cv_splits, seed=seed + r)
+                val = _cv_score(make_pipe(), X[:, cols], y, metric=metric, n_splits=cv_splits, seed=seed + r)
                 acc.update(float(val))
             scores[k] = acc.result()
         else:
             sc = np.empty(R, dtype=scores_dtype)
-            for r in range(R):
+            for r in tqdm(range(R), desc=f"k={k} reps", leave=False, disable=not progress):
                 cols = rng.choice(N, size=k, replace=False)
-                sc[r] = _cv_score(make_clf(), Xs[:, cols], y, metric=metric, n_splits=cv_splits, seed=seed + r)
+                sc[r] = _cv_score(make_pipe(), X[:, cols], y, metric=metric, n_splits=cv_splits, seed=seed + r)
             scores[k] = sc
             print(f"k={k:4d} | {metric} mean={sc.mean():.3f} ± {sc.std(ddof=1):.3f}")
 
-    if ceiling_mode == "all" and N > ks.max():
-        ceiling = _cv_score(make_clf(), Xs, y, metric=metric, n_splits=cv_splits, seed=seed + 12345)
-    else:
-        ceiling = (scores[int(ks.max())]["mean"] if stats_only else float(np.mean(scores[ks.max()])))
-
-    shuffled: Optional[Dict[int, np.ndarray]] = None
     if n_label_shuffles and n_label_shuffles > 0:
         shuffled = {}
         rng_shuf = np.random.default_rng(seed if shuffle_seed is None else shuffle_seed)
-        for k in ks:
+        for k in tqdm(ks, desc="Shuffle ks", disable=not progress):
             if stats_only:
                 acc = OnlineStats()
-                for s in range(n_label_shuffles):
+                for s in tqdm(range(n_label_shuffles), desc=f"k={k} shuf", leave=False, disable=not progress):
                     cols = rng_shuf.choice(N, size=k, replace=False)
-                    y_perm = rng_shuf.permutation(y)
-                    val = _cv_score(make_clf(), Xs[:, cols], y_perm, metric=metric, n_splits=cv_splits, seed=seed + 10_000 + s)
+                    if shuffle_mode == "permute":
+                        y_perm = _permute_labels(rng_shuf, y)
+                    elif shuffle_mode == "circular":
+                        y_perm = _circular_shift_labels(rng_shuf, y)
+                    else:
+                        y_perm = _blockwise_permute_labels(rng_shuf, y, block_ids)
+                    val = _cv_score(make_pipe(), X[:, cols], y_perm, metric=metric, n_splits=cv_splits, seed=seed + 10_000 + s)
                     acc.update(float(val))
                 shuffled[k] = acc.result()
             else:
                 scs = np.empty(n_label_shuffles, dtype=scores_dtype)
-                for s in range(n_label_shuffles):
+                for s in tqdm(range(n_label_shuffles), desc=f"k={k} shuf", leave=False, disable=not progress):
                     cols = rng_shuf.choice(N, size=k, replace=False)
-                    y_perm = rng_shuf.permutation(y)
-                    scs[s] = _cv_score(make_clf(), Xs[:, cols], y_perm, metric=metric, n_splits=cv_splits, seed=seed + 10_000 + s)
+                    if shuffle_mode == "permute":
+                        y_perm = _permute_labels(rng_shuf, y)
+                    elif shuffle_mode == "circular":
+                        y_perm = _circular_shift_labels(rng_shuf, y)
+                    else:
+                        y_perm = _blockwise_permute_labels(rng_shuf, y, block_ids)
+                    scs[s] = _cv_score(make_pipe(), X[:, cols], y_perm, metric=metric, n_splits=cv_splits, seed=seed + 10_000 + s)
                 shuffled[k] = scs
-                print(f"[shuffle] k={k:4d} | {metric} mean={scs.mean():.3f} ± {scs.std(ddof=1):.3f}")
 
     return NDCResult(ks=ks, scores=scores, metric=metric, ceiling=float(ceiling), shuffled=shuffled)
 
@@ -571,6 +616,7 @@ def compute_and_cache_ndcs(
     cv_splits: int = 5,
     equalize_trials: bool = True,
     seed: int = 0,
+    rerun = False,
     ceiling_mode: str = "maxk",
     n_label_shuffles: int = 100,
     shuffle_seed: Optional[int] = None,
@@ -616,10 +662,10 @@ def compute_and_cache_ndcs(
 
     # Build features per (eid,target)
     Xy_map: Dict[tuple, Tuple[np.ndarray, np.ndarray, Tuple[str, Tuple[float,float]]]] = {}
-    for e in eids:
-        for t in targets:
+    for e in tqdm(eids, desc="Build features: sessions"):
+        for t in tqdm(targets, desc="Targets", leave=False):
             try:
-                X, y, (event, win) = build_trial_features(e, target=t, restrict=idx_map[e])
+                X, y, (event, win) = build_trial_features(e, target=t, restrict=idx_map[e], rerun=rerun)
                 Xy_map[(e,t)] = (X, y, (event, win))
             except Exception as ex:
                 print(f"[skip] {e} [{t}]: {type(ex).__name__}: {ex}")
@@ -639,23 +685,33 @@ def compute_and_cache_ndcs(
                 if (e,t) not in Xy_map: continue
                 X, y, meta_ev = Xy_map[(e,t)]
                 if len(y) > n_common:
-                    keep = rng.choice(len(y), size=n_common, replace=False)
-                    Xy_map[(e,t)] = (X[keep], y[keep], meta_ev)
+                    # stratify: keep class proportions ~equal
+                    idx0 = np.flatnonzero(y == 0)
+                    idx1 = np.flatnonzero(y == 1)
+                    n_each = n_common // 2
+                    take0 = rng.choice(idx0, size=min(n_each, len(idx0)), replace=False)
+                    take1 = rng.choice(idx1, size=min(n_each, len(idx1)), replace=False)
+                    take  = np.sort(np.concatenate([take0, take1]))
+                    # if odd remainder, fill from the larger class
+                    if take.size < n_common:
+                        rest = np.setdiff1d(np.arange(len(y)), take, assume_unique=False)
+                        extra = rng.choice(rest, size=(n_common - take.size), replace=False)
+                        take = np.sort(np.concatenate([take, extra]))
+                    Xy_map[(e,t)] = (X[take], y[take], meta_ev)
 
     metas = {}
     group_meta = dict(all_eids=list(eids), n_shared=n_shared, prefix=prefix)
 
-    for t in targets:
-        # compute per-eid, save tmp, merge, save group
+    for t in tqdm(targets, desc="Compute NDC by target"):
         sessions: Dict[str, dict] = {}
-        for e in eids:
+        for e in tqdm(eids, desc=f"{t}: sessions", leave=False):
             if (e,t) not in Xy_map:
                 continue
             X, y, (event, win) = Xy_map[(e,t)]
             res = neuron_dropping_curve(
                 X, y, ks=ks_grid, R=R, metric=metric, cv_splits=cv_splits, seed=seed,
                 ceiling_mode=ceiling_mode, n_label_shuffles=n_label_shuffles, shuffle_seed=shuffle_seed,
-                scores_dtype=np.float16, stats_only=False
+                scores_dtype=np.float16, stats_only=False, progress=True   # <- show bars
             )
             perf = session_performance(e)
             meta = dict(
@@ -1218,3 +1274,275 @@ def plot_session_pair_kpanels_for_subject(
         out_paths[target] = save_path
 
     return out_paths
+
+
+def run_cross_session_train_first_test_rest(
+    subject: str,
+    *,
+    one: Optional[ONE] = None,
+    roicat_root: Path = Path.home() / "chronic_csv",
+    min_sessions: int = 10,
+    min_k_shared: int = 1349,
+    targets: Sequence[Target] = ("choice", "feedback", "stimulus", "block"),
+    n_shuffle: int = 200,              # shuffle control on the train/test accuracies
+    # --- regularization / model selection controls ---
+    inner_cv_splits: int = 5,          # CV inside FIRST session for train accuracy & tuning
+    Cs: Sequence[float] = (0.01, 0.03, 0.1, 0.3, 1.0),
+    use_elasticnet: bool = False,      # if True → elastic-net (solver='saga')
+    l1_ratio_grid: Sequence[float] = (0.0, 0.25, 0.5, 0.75),
+    dimreduce: Literal["none", "pca", "selectk"] = "pca",
+    dim_k: int = 512,                  # #PCs or #features for SelectKBest
+    max_iter: int = 2000,
+    seed: int = 0,
+    rerun = False
+) -> dict:
+    """
+    Select a subset of sessions for `subject` via best_eid_subsets_for_animal,
+    requiring at least `min_sessions` sessions and global shared neurons >= `min_k_shared`.
+    Train a single decoder on the FIRST session (all trials; k = n_shared), then
+    test on each remaining session (same neuron indices). Compute accuracy and a
+    shuffle-control accuracy (permute labels on the test set).
+    
+    Returns a dict with:
+      'subject', 'eids' (ordered), 'dates', 'n_shared', 'results' (per target, per session).
+    """
+    if one is None:
+        one = ONE()
+    rng = np.random.default_rng(seed)
+
+    # --- pick sessions via best_eid_subsets_for_animal (first outcome) ---
+    subset_map = best_eid_subsets_for_animal(
+        subject,
+        one=one,
+        roicat_root=roicat_root,
+        k_min=min_sessions,
+        k_max=min_sessions,   # exactly min_sessions (e.g., 10)
+        n_starts=10,
+        random_starts=5,
+        enforce_monotone=True,
+        min_trials=400,
+        trial_key="stimOn_times",
+    )
+    if not subset_map:
+        raise RuntimeError(f"{subject}: best_eid_subsets_for_animal returned no subsets.")
+
+    # "Pick first outcome": take the first (lowest k) entry
+    k = sorted(subset_map.keys())[0]
+    eids = list(subset_map[k]["eids"])
+    n_shared = int(subset_map[k]["n_shared"])
+
+    if len(eids) < min_sessions:
+        raise RuntimeError(f"{subject}: only {len(eids)} sessions returned; need ≥ {min_sessions}.")
+    if n_shared < min_k_shared:
+        raise RuntimeError(f"{subject}: n_shared={n_shared} < required {min_k_shared}.")
+
+    # order by date
+    def _date_of(eid: str) -> str:
+        try:
+            m = one.alyx.rest("sessions", "read", id=eid)
+            return str(m.get("start_time", ""))[:10]
+        except Exception:
+            return ""
+    eids = sorted(eids, key=_date_of)
+    dates = [_date_of(e) for e in eids]
+
+    # print the chosen eids
+    print(f"[subject] {subject}")
+    print(f"[sessions] {len(eids)} sessions; global shared neurons k = {n_shared}")
+    for i, (e, d) in enumerate(zip(eids, dates)):
+        print(f"  {i:02d}  {d}  {e}")
+
+    # --- get the actual shared-neuron indices aligned to n_shared for the chosen set ---
+    idx_map = match_tracked_indices_across_sessions(one, eids[0], eids[1:], roicat_root=roicat_root)
+    if eids[0] not in idx_map:
+        # identity mapping for train eid
+        idx_map[eids[0]] = np.arange(n_shared, dtype=int)
+    # truncate defensively to n_shared
+    for e in eids:
+        arr = np.asarray(idx_map[e], dtype=int)
+        if arr.size < n_shared:
+            raise RuntimeError(f"{subject}: mapping produced {arr.size} < n_shared({n_shared}) for {e}.")
+        idx_map[e] = arr[:n_shared]
+
+    # --- build features for all sessions/targets with the global shared neurons ---
+    Xy = {}
+    for e in tqdm(eids, desc="Build features: sessions"):
+        restrict = np.asarray(idx_map[e], dtype=int)
+        for t in tqdm(targets, desc="Targets", leave=False):
+            try:
+                X, y, _ = build_trial_features(e, target=t, restrict=restrict, rerun=rerun)
+                Xy[(e, t)] = (X, y)
+            except Exception as ex:
+                print(f"[skip] build features {e} [{t}]: {type(ex).__name__}: {ex}")
+
+    # --- train on first, test on rest (accuracy + shuffle control) ---
+    results = {t: [] for t in targets}
+    train_eid = eids[0]
+
+    for t in targets:
+        if (train_eid, t) not in Xy:
+            print(f"[warn] no training features for {train_eid} [{t}] → skipping target.")
+            continue
+
+        Xtr, ytr = Xy[(train_eid, t)]
+
+        from sklearn.model_selection import GridSearchCV
+
+        # ---- determine effective CV splits and smallest training-fold size
+        min_class = int(np.min(np.bincount(ytr)))
+        cv_splits_eff = max(2, min(inner_cv_splits, min_class))
+        # floor((cv_splits_eff - 1) / cv_splits_eff * n_samples)
+        n_train_min = (cv_splits_eff - 1) * len(ytr) // cv_splits_eff
+        if n_train_min <= 2:
+            raise ValueError(f"Too few trials for CV with {cv_splits_eff} folds (n_train_min={n_train_min}).")
+
+        # ---- build preprocessing steps
+        steps = [("scaler", StandardScaler(with_mean=True, with_std=True))]
+        if dimreduce == "pca":
+            # cap PCs to <= min(n_features, min training samples - 1)
+            n_comp_cap = max(2, min(dim_k, Xtr.shape[1], n_train_min - 1))
+            steps.append(("pca", PCA(n_components=n_comp_cap,
+                                     svd_solver="randomized", random_state=seed)))
+        elif dimreduce == "selectk":
+            k_sel = max(2, min(dim_k, Xtr.shape[1], n_train_min - 1))
+            steps.append(("skb", SelectKBest(score_func=f_classif, k=k_sel)))
+
+        base = Pipeline(steps + [("clf", LogisticRegression(
+            penalty=("elasticnet" if use_elasticnet else "l2"),
+            solver=("saga" if use_elasticnet else "liblinear"),
+            max_iter=max_iter,
+            random_state=seed
+        ))])
+
+        param_grid = {"clf__C": list(Cs)}
+        if use_elasticnet:
+            param_grid["clf__l1_ratio"] = list(l1_ratio_grid)
+
+        skf = StratifiedKFold(
+            n_splits=cv_splits_eff, shuffle=True, random_state=seed
+        )
+        gs = GridSearchCV(base, param_grid=param_grid, verbose=1,
+                          scoring="roc_auc", cv=skf, refit=True)
+        gs.fit(Xtr, ytr)
+        final_pipe = gs.best_estimator_
+        # ---- training-session accuracy: cross-validated (prevents inflated ~1.0)
+        acc_tr = _cv_score(final_pipe, Xtr, ytr, metric="accuracy",
+                           n_splits=cv_splits_eff, seed=seed)
+
+        # Shuffle-control on training (same CV protocol)
+        sh_tr = []
+        rng_tr = np.random.default_rng(seed)
+        for _ in range(n_shuffle):
+            y_perm = _permute_labels(rng_tr, ytr)
+            sh_tr.append(_cv_score(final_pipe, Xtr, y_perm, metric="accuracy",
+                                   n_splits=cv_splits_eff, seed=seed))
+
+        acc_tr_shuf = float(np.mean(sh_tr)) if sh_tr else np.nan
+
+        # Save training record
+        results[t].append(dict(eid=train_eid, date=_date_of(train_eid), which="train",
+                            n_trials=int(len(ytr)), acc=float(acc_tr),
+                            acc_shuffle=acc_tr_shuf, k=n_shared))
+
+        # ---- fit final pipeline on FULL training session once for testing on other days
+        final_pipe.fit(Xtr, ytr)
+
+        # test sessions
+        for e in eids[1:]:
+            if (e, t) not in Xy:
+                print(f"[skip] no test features for {e} [{t}]")
+                continue
+            Xte, yte = Xy[(e, t)]
+            yhat = final_pipe.predict(Xte)
+            acc  = float(accuracy_score(yte, yhat))
+            sh   = [float(accuracy_score(_permute_labels(rng, yte), yhat)) for _ in range(n_shuffle)]
+            results[t].append(dict(eid=e, date=_date_of(e), which="test",
+                                    n_trials=int(len(yte)), acc=acc, acc_shuffle=float(np.mean(sh)), k=n_shared))
+
+    return dict(subject=subject, eids=eids, dates=dates, n_shared=n_shared, targets=list(targets), results=results)  
+
+
+def plot_cross_session_train_first_test_rest(payload: dict, *, show: bool = True, save_path: Optional[Path] = None):
+    """
+    Plot 4 panels (choice/feedback/stimulus/block) for k = n_shared only.
+    Each panel shows per-session accuracy and shuffle-control accuracy (markers).
+    """
+    subject = payload["subject"]
+    eids = payload["eids"]
+    dates = payload["dates"]
+    n_shared = payload["n_shared"]
+    results = payload["results"]
+
+    # x-axis order matches eids
+    xs = np.arange(len(eids))
+
+    fig, axes = plt.subplots(2, 2, figsize=(9.0, 6.8), constrained_layout=True)
+    axes = axes.ravel()
+    target_order = ["choice", "feedback", "stimulus", "block"]
+
+    for ax, t in zip(axes, target_order):
+        recs = results.get(t, [])
+        if not recs:
+            ax.set_visible(False)
+            continue
+
+        # gather in eids order
+        accs, shfs, ntr = [], [], []
+        for e in eids:
+            r = next((row for row in recs if row["eid"] == e), None)
+            if r is None:
+                accs.append(np.nan); shfs.append(np.nan); ntr.append(0)
+            else:
+                accs.append(float(r["acc"])); shfs.append(float(r["acc_shuffle"])); ntr.append(int(r["n_trials"]))
+
+        accs = np.asarray(accs, float)
+        shfs = np.asarray(shfs, float)
+
+        ax.plot(xs, accs, "o-", label="accuracy (k = n_shared)")
+        ax.plot(xs, shfs, "x--", label="shuffle (permute labels)")
+
+        ax.set_title(t.capitalize())
+        ax.set_ylabel("Accuracy")
+        ax.set_xticks(xs)
+        ax.set_xticklabels(dates, rotation=45, ha="right", fontsize=8)
+        ax.set_ylim(0.4, 1.0)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+        # annotate trial counts near points
+        for xi, (a, n) in enumerate(zip(accs, ntr)):
+            if np.isfinite(a):
+                ax.annotate(f"n={n}", xy=(xi, a), xytext=(0, 6),
+                            textcoords="offset points", ha="center", fontsize=7)
+
+        # legend only on first visible panel
+        handles, labels = ax.get_legend_handles_labels()
+        if handles and labels:
+            ax.legend(frameon=False, fontsize=8, loc="lower right")
+
+    # hide unused panels (if any)
+    for j in range(len(target_order), 4):
+        axes[j].set_visible(False)
+
+    fig.suptitle(f"{subject} — k (global shared) = {n_shared} — {len(eids)} sessions", y=0.995, fontsize=11)
+    if save_path is not None:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=300, bbox_inches="tight")
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+
+
+# payload = run_cross_session_train_first_test_rest(
+#     subject="SP072",
+#     min_sessions=10,
+#     min_k_shared=3000,
+#     targets=("choice","feedback","stimulus","block"),
+#     n_shuffle=200,
+#     seed=0,
+# )
+
+# plot_cross_session_train_first_test_rest(payload, show=True, save_path=None)       
