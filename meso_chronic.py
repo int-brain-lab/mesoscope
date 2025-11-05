@@ -12,10 +12,12 @@ from urllib.parse import urljoin
 import math
 import matplotlib.pyplot as plt
 
+one = ONE()
+
 MESO_DIR = Path.home() / "Dropbox/scripts/IBL"
 if str(MESO_DIR) not in sys.path:
     sys.path.insert(0, str(MESO_DIR))
-from meso import plot_raster, plot_sparseness_res
+from meso import plot_raster, plot_sparseness_res, load_or_embed
 
 BASE_ROOT = "https://ibl.flatironinstitute.org/resources/mesoscope/ROICaT/"
 FNAME = "mpciROIs.clusterUIDs.csv"
@@ -214,8 +216,10 @@ def get_cluster_uids_neuronal(
     one: ONE,
     eid: str,
     roicat_root: str | Path | None = None,
-    server_root: str | Path | None = None
-) -> np.ndarray:
+    server_root: str | Path | None = None,
+    filter_neurons: bool = False) -> np.ndarray:
+
+
     roicat_root = Path(roicat_root) if roicat_root is not None else None
     server_root = Path(server_root) if server_root is not None else None
 
@@ -264,7 +268,10 @@ def get_cluster_uids_neuronal(
                 uid_vec = uid_vec[:n]
 
         uid_vec = np.array(['' if (x is None) else str(x).strip() for x in uid_vec], dtype=object)
-        out.append(uid_vec[mask_neuron] if mask_neuron is not None else uid_vec)
+        if filter_neurons and (mask_neuron is not None):
+            out.append(uid_vec[mask_neuron])
+        else:
+            out.append(uid_vec)
 
     if not out:
         return np.array([], dtype=object)
@@ -278,7 +285,7 @@ def match_tracked_indices_across_sessions(
     one: ONE,
     anchor_eid: str,
     other_eids: list[str],
-    roicat_root: str | Path | None = None,
+    roicat_root: Path = Path.home() / "chronic_csv",
     server_root: str | Path | None = None,
 ) -> dict[str, np.ndarray]:
     """
@@ -506,47 +513,190 @@ def safe_plot_subset(eids_subset, idx_map):
             print(f"sparseness error for {eid}\n{type(e).__name__}: {e}")
 
 
-# if __name__ == "__main__":
-#     one = ONE(base_url='https://alyx.internationalbrainlab.org')
-#     roicat_root = Path.home() / 'chronic_csv'   # parent of 'ROICaT'
+def best_eid_subsets_for_animal(
+    subject: str,
+    *,
+    one: Optional[ONE] = None,
+    roicat_root: Path = Path.home() / "chronic_csv",
+    server_root: Optional[Path] = None,
+    k_min: int = 5,
+    k_max: Optional[int] = None,
+    n_starts: int = 10,
+    random_starts: int = 5,
+    enforce_monotone: bool = True,
+    min_trials: int = 400,
+    trial_key: str = "stimOn_times",
+) -> Dict[int, Dict[str, object]]:
+    """
+    Return dict: {k: {'eids': [...], 'n_shared': int}} for a subject, using
+    the greedy shared-neuron subset finder, after filtering sessions by trial count.
 
-#     # discover EIDs for SP072 from your local mirror
-#     sess_dirs = find_session_dirs_with_uids_for_subject(roicat_root, subject='SP072')
-#     path2eid = eids_from_session_dirs(sess_dirs, one)
-#     eids = sorted(set([e for e in path2eid.values() if e and e.lower() != 'none']))
-#     print(f"Found {len(eids)} EIDs with UID CSVs for SP072.")
+    Sessions are kept only if trials[trial_key].size >= min_trials (default 400).
+    Falls back to skipping sessions where 'trials' are missing.
 
-#     # compute best-k subsets
-#     res = find_best_subsets_by_greedy_intersection(
-#         one, eids,
-#         roicat_root=roicat_root,
-#         server_root=None,
-#         k_min=5,
-#         k_max=min(10, len(eids)),
-#         n_starts=10, random_starts=5
-#     )
-#     for k in sorted(res):
-#         print(f"{k}: {{'eids': {res[k]['eids']}, 'n_shared': {res[k]['n_shared']}}}")
+    Parameters
+    ----------
+    subject : str
+        Animal/subject name (e.g., 'SP072').
+    one : ONE, optional
+        Preconfigured ONE instance. If None, a default ONE() is created.
+    roicat_root : Path
+        Local root containing 'ROICaT' exports.
+    server_root : Path or None
+        Optional server path to ROICaT.
+    k_min, k_max : int
+        Min/max subset sizes to evaluate. If k_max is None, uses min(10, n_sessions_filtered).
+    n_starts : int
+        Number of deterministic starts for the greedy procedure.
+    random_starts : int
+        Number of random starts (adds robustness).
+    enforce_monotone : bool
+        If True, post-process to make n_shared non-increasing with k.
+    min_trials : int
+        Minimum number of trials required to include a session (default 400).
+    trial_key : str
+        Trials field to count (default 'stimOn_times').
 
-#     last = math.inf
-#     for k in sorted(res):
-#         n = int(res[k].get('n_shared', 0))
-#         n = min(n, last)          # if last is inf, this returns n (safe)
-#         res[k]['n_shared'] = int(n)
-#         last = n
+    Returns
+    -------
+    Dict[int, Dict[str, object]]
+        Mapping k -> {'eids': [EID...], 'n_shared': int}.
+    """
+    if one is None:
+        one = ONE()
 
-#     # Choose the largest k with nonzero intersection; bail cleanly otherwise
-#     valid_ks = [k for k in sorted(res) if int(res[k]['n_shared']) > 0]
-#     if not valid_ks:
-#         raise SystemExit("No subset with non-zero shared neurons was found.")
-#     k = max(valid_ks)
+    # 1) discover sessions for this subject that have ROICaT UID CSVs
+    sess_dirs = find_session_dirs_with_uids_for_subject(roicat_root, subject=subject)
+    path2eid = eids_from_session_dirs(sess_dirs, one)
+    eids_all = sorted(set([e for e in path2eid.values() if e and str(e).lower() != "none"]))
+    if not eids_all:
+        raise RuntimeError(f"No EIDs with UID CSVs found for subject '{subject}' under {roicat_root}.")
 
-#     idx_map = match_tracked_indices_across_sessions(
-#         one, eids_k[0], eids_k[1:], roicat_root=roicat_root, server_root=None
-#     )
+    # 2) filter by trial count
+    eids = []
+    for eid in eids_all:
+        try:
+            trials = one.load_object(eid, "trials")
+        except Exception:
+            # missing trials object; skip
+            continue
+        arr = trials.get(trial_key, None)
+        if arr is None:
+            # optional fallback to another key (comment in/out as needed)
+            # arr = trials.get("goCue_times", None)
+            # if arr is None:
+            continue
+        try:
+            n = int(arr.size)
+        except Exception:
+            # if the loaded field isn't a numpy array; try to coerce
+            try:
+                n = len(arr)
+            except Exception:
+                n = 0
+        if n >= min_trials:
+            eids.append(eid)
 
-#     # your plotting loop
-    
-#     for eid in idx_map:
-#         safe_plot_subset(eids_k, idx_map)
+    if not eids:
+        raise RuntimeError(
+            f"No sessions for subject '{subject}' passed the trial filter: "
+            f"{trial_key}.size >= {min_trials}."
+        )
+
+    # 3) set k bounds after filtering
+    if k_max is None:
+        k_max = min(10, len(eids))
+    else:
+        k_max = min(k_max, len(eids))
+    if k_min < 1 or k_min > k_max:
+        raise ValueError(f"Invalid k_min/k_max: {k_min}/{k_max} for n_sessions={len(eids)} after filtering.")
+
+    # 4) run greedy finder on the filtered EIDs
+    res = find_best_subsets_by_greedy_intersection(
+        one, eids,
+        roicat_root=roicat_root,
+        server_root=server_root,
+        k_min=k_min,
+        k_max=k_max,
+        n_starts=n_starts,
+        random_starts=random_starts,
+    )
+
+    # 5) enforce monotone non-increasing n_shared across k (optional)
+    if enforce_monotone and res:
+        last = math.inf
+        for k in sorted(res):
+            n = int(res[k].get("n_shared", 0))
+            n = min(n, last)
+            res[k]["n_shared"] = int(n)
+            last = n
+
+    return res
+
+
+def _eid_date(one: ONE, eid: str) -> str:
+    try:
+        meta = one.alyx.rest("sessions", "read", id=eid)
+        return str(meta["start_time"])[:10]
+    except Exception:
+        return "9999-99-99"
+
+def pairwise_shared_indices_for_animal(
+    subject: str,
+    *,
+    one: Optional[ONE] = None,
+    roicat_root: Path = Path.home() / "chronic_csv",
+    server_root: Optional[Path] = None,
+    min_trials: int = 400,
+    trial_key: str = "stimOn_times",
+    require_nonzero: bool = True,
+) -> Dict[str, Dict[str, np.ndarray]]:
+    if one is None:
+        one = ONE()
+    sess_dirs = find_session_dirs_with_uids_for_subject(roicat_root, subject=subject)
+    path2eid = eids_from_session_dirs(sess_dirs, one)
+    eids_all = sorted({e for e in path2eid.values() if e and str(e).lower() != "none"})
+    if not eids_all:
+        return {}
+
+    # Filter by trials
+    eids_keep = []
+    for eid in eids_all:
+        try:
+            trials = one.load_object(eid, "trials")
+            arr = trials.get(trial_key, None)
+            n = int(arr.size) if arr is not None else 0
+            if (n >= min_trials) and (not all(trials['probabilityLeft'] == 0.5)):
+                eids_keep.append(eid)
+        except Exception:
+            continue
+    if len(eids_keep) < 2:
+        return {}
+
+    # Chronological order
+    eids_sorted = sorted(eids_keep, key=lambda e: (_eid_date(one, e), e))
+
+    out: Dict[str, Dict[str, np.ndarray]] = {}
+    for i in range(len(eids_sorted) - 1):
+        e0, e1 = eids_sorted[i], eids_sorted[i+1]
+        try:
+            idx_map = match_tracked_indices_across_sessions(
+                one, e0, [e1], roicat_root=roicat_root, server_root=server_root
+            )
+        except Exception:
+            continue
+
+        a = np.asarray(idx_map.get(e0, np.array([], dtype=int)), dtype=int)
+        b = np.asarray(idx_map.get(e1, np.array([], dtype=int)), dtype=int)
+        n = min(a.size, b.size)
+        a, b = a[:n], b[:n]
+
+        if require_nonzero and n == 0:
+            continue
+
+        key = f"{e0[:3]}_{e1[:3]}"
+        out[key] = {e0: a, e1: b}
+
+    return out
+
 
