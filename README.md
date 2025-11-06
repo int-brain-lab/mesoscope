@@ -1,29 +1,28 @@
-# Mesoscope: data loading, chronic tracking, and decoding
+# Mesoscope: loading, chronic tracking, and decoding
 
-This repository contains utilities for loading mesoscope sessions from the IBL **ONE** backend, caching per‑session data, plotting Rastermap‑sorted activity, and aligning the **same tracked neurons** across days to enable cross‑session analyses and decoding.
+Utilities for working with IBL mesoscope sessions: fast per-session embedding/caching, cross-day neuron alignment from ROICaT CSVs, and decoding analyses (neuron-dropping curves; cross-session generalization).
 
-> You need a working ONE setup and access to the relevant datasets.
+> You need an IBL ONE setup and access to mesoscope datasets.
 
 ---
 
-## Environment and dependencies
+## Quick install
 
-Typical Python stack used by these scripts:
-
-- `one.api` (ONE client) and `brainbox` (IBL helpers)
-- `iblatlas` (Allen CCF 2017 region info)
-- `numpy`, `matplotlib`, `scipy`
-- `scikit-learn` (decoding)
-- `rastermap` (embedding / ordering)
-- `pathlib`, `dataclasses`
-
-Example install:
+Tested with Python ≥3.10.
 
 ```bash
-pip install one-api iblutil iblatlas brainbox rastermap numpy matplotlib scipy scikit-learn
+# conda (recommended)
+conda create -n iblenv python=3.10 -y
+conda activate iblenv
+
+# core deps
+pip install one-api iblutil iblatlas brainbox rastermap numpy scipy matplotlib scikit-learn
+
+# optional: progress bars, plotting niceties
+pip install tqdm
 ```
 
-After installing, make sure you can log in and query:
+Check ONE auth:
 
 ```python
 from one.api import ONE
@@ -33,126 +32,141 @@ one.search()  # should return without auth errors
 
 ---
 
-## Cache and directory layout
+## Repo layout
 
-By default, `meso.py` writes per‑session caches under:
+- `meso.py` — load or embed a mesoscope session into a cached dict (Rastermap ordering, ROI signals/metadata)
+- `meso_chronic.py` — mirror `mpciROIs.clusterUIDs.csv` (ROICaT) and align tracked neurons across days
+- `meso_decode.py` — trial-window feature extraction, neuron-dropping curves (NDCs), and cross-session decoding
+
+---
+
+## Caching and paths
+
+By default files are cached under:
 
 ```
 <ONE.cache_dir>/meso/
 └── data/
-    └── <eid>.npy      # cached dictionary for that session
+    └── <eid>.npy         # per-session dict (signals, times, regions, isort, etc.)
+└── decoding/
+    ├── <prefix>_<target>.pkl         # group NDC payloads
+    └── pair_summaries/<subject>/
+        ├── res/<prefix>_<target>.pkl # pairwise payloads
+        └── imgs/<prefix>.png         # saved figures
 ```
 
-Figures created by plotting functions are also saved under this tree.
+`<prefix>` is derived from the EID list (date-sorted), `<target> ∈ {choice, feedback, stimulus, block}`.
 
 ---
 
-## What `embed_meso` does (in `meso.py`)
-
-For a mesoscope experiment ID (`eid`), `embed_meso`:
-
-1. Enumerates `alf/FOV_*` collections and loads:
-   - `mpci`, `mpciROIs`, `mpciROITypes`, `mpciStack`
-2. Builds per‑ROI metadata:
-   - Region acronyms (Allen CCF 2017) and corresponding colors
-   - Per‑ROI time bases from `mpci.times` and `mpciStack.timeshift`
-   - Deconvolved ROI signals when available (falls back to fluorescence)
-   - Masks to keep only neuron ROIs (`mpciROITypes`)
-3. Stacks ROIs across FOVs and computes a Rastermap ordering (`isort`)
-4. Saves a dict with keys such as:
-   - `roi_signal` (N×T), `roi_times`, `region_labels`, `region_colors`, `isort`, `xyz`
-
-### Quick usage
+## Load or embed a session (Rastermap + region metadata)
 
 ```python
 from meso import load_or_embed, plot_raster
 
 eid = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-rr = load_or_embed(eid)           # loads cached dict or computes & caches
-plot_raster(eid, bg="regions")    # Rastermap-sorted raster with region background
+rr = load_or_embed(eid)     # loads cached dict or computes & caches
+plot_raster(eid, bg="regions")
 ```
 
----
-
-## Chronic tracking across days (`meso_chronic.py`)
-
-- Functions to **mirror** `mpciROIs.clusterUIDs.csv` files locally (ROICaT tree) and
-- Align tracked neurons across sessions: `match_tracked_indices_across_sessions(...)`
-
-With the mirrored CSVs available, you can produce a mapping from each EID to indices that select the **same** cells, enabling cross‑day comparisons on a fixed population.
+The cached dict includes at least:
+- `roi_signal` (N×T, float; deconvolved if available, else fluorescence)
+- `roi_times` (per-FOV)
+- `isort` (Rastermap row order)
+- `region_labels`, `region_colors`
+- `xyz`, ROI metadata
 
 ---
 
-## Decoding and neuron‑dropping curves (`meso_decode.py`) — brief
+## Cross-day alignment (tracked same neurons)
 
-**Goal.** Test whether the neural code becomes more **efficient** over sessions by asking: *How many shared neurons are required to decode a behavioral variable (e.g., choice) to near‑ceiling accuracy?*
+```python
+from pathlib import Path
+from one.api import ONE
+from meso_chronic import match_tracked_indices_across_sessions
 
-**Idea.**
-1. **Align the same cells** across sessions using `match_tracked_indices_across_sessions(...)`.
-2. **Extract trial features**: for each trial, average activity in a short window around an event
-   (default `firstMovement_times`, window `[0.0, 0.15]` s for choice for example; can do stimulus and fedback decoding also.).
-3. **Decode with cross‑validation**: for each neuron count `k`, sample many random subsets, fit
-   a linear logistic decoder (AUC/accuracy), and record performance. Also build a **label‑shuffled
-   baseline** (repeat permutations many times) to visualize chance levels.
-4. **Summarize** with **neuron‑dropping curves (NDCs)** and report \(k^*\): the smallest `k`
-   whose mean score is within Δ (e.g., 0.02 AUC) of that session’s ceiling. A decreasing \(k^*\)
-   over time suggests increasing coding efficiency.
+one = ONE()
+eids = ["…", "…", "…"]  # chronological
+idx_map = match_tracked_indices_across_sessions(one, eids[0], eids[1:], roicat_root=Path.home()/"chronic_csv")
+# idx_map[eid] gives integer indices selecting the shared cells in each session
+```
 
-# Decoding & Neuron-Dropping Curves (`meso_decode.py`)
-
-This module quantifies how many shared neurons are required to decode behavioral variables and how decoding accuracy scales with population size.  
-It computes **neuron-dropping curves (NDCs)** by subsampling neurons and cross-validating a linear decoder.  
-By default, **label-shuffled baselines** are computed to visualize chance performance.
+Mirror (or point to) your `mpciROIs.clusterUIDs.csv` tree under `~/chronic_csv/ROICaT/<subject>/<date>/…`.
 
 ---
 
-## Minimal example
+## Decoding I: Neuron-dropping curves (NDCs)
+
+**Goal:** quantify how decoding performance scales with #neurons and summarize k* (smallest k within Δ of ceiling).
 
 ```python
 from pathlib import Path
 from meso_decode import neuron_dropping_curves_cached
 
-# Example session EIDs (replace with your own)
-eids = [
-    "38bc2e7c-d160-4887-86f6-4368bfd58c5f",
-    "74ffa405-3e23-47d9-972b-11bea1c3c2f6",
-    "1322edbf-5c42-4b9a-aecd-7ddaf4f44387",
-    "20ebc2b9-5b4c-42cd-8e4b-65ddb427b7ff",
-]
-
-# Decode up to 3 behavioral variables
+eids = ["…", "…", "…"]  # ≥2 sessions
 out = neuron_dropping_curves_cached(
     eids=eids,
-    targets=("choice", "feedback", "stimulus"),  # up to 3
-    cache_dir=Path.home() / "ndc_cache",
-    event="firstMovement_times",
-    win=(0.0, 0.15),                 # seconds relative to event
-    ks=(8, 16, 32, 64, 128, 256, 512, 1024, 2048),
-    R=50,                            # resamples per k
-    metric="auc",                    # or "accuracy"
-    cv_splits=5,                     # stratified K-fold CV
-    class_balance="downsample",      # balances trial classes
-    scaling=True,                    # per-neuron z-score across trials
-    equalize_trials=True,            # match trial counts across sessions
-    ceiling_mode="maxk",             # session ceiling = max k
-    # Shuffled baseline control (enabled by default):
-    n_label_shuffles=100,
-    shuffle_seed=0,
+    targets=("choice","feedback","stimulus","block"),
+    cache_dir=Path.home()/ "FlatIron/meso/decoding",
+    ks=(8,16,32,64,128,256,512,1024,2048),
+    R=50,
+    metric="auc",
+    cv_splits=5,
+    n_label_shuffles=100,   # builds a shuffle band
+    equalize_trials=True,   # same #trials across sessions per target
 )
+# If cache exists for the derived prefix, it plots from cache only.
 ```
 
-The function plots session‑wise NDCs (overlay) and prints a compact table with the neuron dsample numbers **k** and the per‑session ceiling. True curves should lie clearly above the shuffled band; a **leftward shift** of the true curves (or decreasing **k**) across days indicates improved coding efficiency.
+**What features are used?** For each trial, mean ROI activity in a short window around an event (per target):
+- choice: `firstMovement_times`, window `(-0.1, 0.0)` s
+- feedback: `feedback_times`, `(0.0, 0.20)` s
+- stimulus: `stimOn_times`, `(0.0, 0.10)` s
+- block (context): `stimOn_times`, `(-0.40, -0.10)` s (pre-stimulus)
+
+Trials are z-scored per neuron across trials and downsampled to balance classes.
 
 ---
 
-## Notes
+## Decoding II: Train on first session, test on the rest
 
-- Scripts prefer deconvolved activity; they fall back to fluorescence where necessary.
-- Trial classes are balanced by default for decoding; you can disable or change the strategy.
-- Time bases are per ROI; plotting treats the first ROI’s timeline as the session reference.
+```python
+from meso_decode import run_cross_session_train_first_test_rest, plot_cross_session_train_first_test_rest
+
+payload = run_cross_session_train_first_test_rest(
+    subject="SP072",
+    min_sessions=10,
+    min_k_shared=1000,            # require at least this many globally shared neurons
+    targets=("choice","feedback","stimulus","block"),
+    dimreduce="pca", dim_k=512,   # PCA is capped by training fold size; see notes
+    n_shuffle=200,
+)
+plot_cross_session_train_first_test_rest(payload)
+```
+
+Pipeline:
+1. Choose a date-ordered subset with robust shared-neuron count
+2. Build trial-window features using the **same** shared indices for all sessions
+3. Tune a linear decoder on the first session (grid over `C`, optional elastic-net)
+4. Report cross-validated train accuracy and test accuracy per later session, with a permutation control
+
+---
+
+## Notes & troubleshooting
+
+- **PCA safety cap:** During inner CV on the training session, the PCA component count is automatically clipped to `≤ min(n_features, min_training_fold_size−1)` to avoid `ValueError: n_components must be ≤ …`
+- **“no finite event times” / empty windows:** happens if the chosen event vector contains NaNs after trial filtering; verify `get_win_times(eid)` and the target’s event field
+- **Low trial counts after filtering:** class balancing and removal of NaN rows can reduce `n`. Inspect `Counter(trials['choice'])` vs. the post-filter sizes
+- **Cache location:** override with the `cache_dir` argument if you don’t want to use `<ONE.cache_dir>/meso/decoding`
+
+---
+
+## Citation
+
+If you use these tools, please cite the IBL Brain-Wide Map dataset and mesoscope methods papers as appropriate, along with this repository.
 
 ---
 
 ## License
 
-MIT (see `LICENSE` if present).
+MIT (unless otherwise stated in file headers)
