@@ -20,6 +20,13 @@ from sklearn.model_selection import GridSearchCV, StratifiedKFold
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
+
+'''
+Sam's favourite mice
+
+SP058, SP072, SP066, SP067, SP061
+'''
+
 # ------------------------
 # Local IBL helper imports
 # ------------------------
@@ -152,6 +159,7 @@ def build_trial_features(
     target: Target = "choice",
     rerun: bool = False,
     restrict: Optional[np.ndarray] = None,
+    filter_neurons: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray, Tuple[str, Tuple[float, float]]]:
     """Return (X,y,(event,win)) of per-trial mean activity for a target.
 
@@ -159,7 +167,7 @@ def build_trial_features(
     `restrict` to the neuron axis (rows). This mirrors meso_decode2.py and
     avoids inadvertent reshuffling inside load_or_embed.
     """
-    rr = load_or_embed(eid, rerun=rerun)  # do not pass restrict to loader
+    rr = load_or_embed(eid, rerun=rerun, filter_neurons=filter_neurons)  # do not pass restrict to loader
 
     # Validate and apply restrict (row selection)
     if restrict is not None:
@@ -493,6 +501,7 @@ def compute_and_cache_ndcs(
     n_label_shuffles: int = 100,
     shuffle_seed: Optional[int] = None,
     idx_map_override: Optional[Dict[str, np.ndarray]] = None,
+    filer_neurons: bool = False,
 ) -> Dict[str, dict]:
 
     eids = sorted(list(eids), key=_eid_date)
@@ -531,7 +540,7 @@ def compute_and_cache_ndcs(
     for e in tqdm(eids, desc="Build features: sessions"):
         for t in tqdm(targets, desc="Targets", leave=False):
             try:
-                X, y, (event, win) = build_trial_features(e, target=t, restrict=idx_map[e], rerun=rerun)
+                X, y, (event, win) = build_trial_features(e, target=t, restrict=idx_map[e], rerun=rerun, filter_neurons=filter_neurons)
                 Xy_map[(e, t)] = (X, y, (event, win))
             except Exception as ex:
                 print(f"[skip] {e} [{t}]: {type(ex).__name__}: {ex}")
@@ -816,8 +825,8 @@ def run_cross_session_train_first_test_rest(
     *,
     one: Optional[ONE] = None,
     roicat_root: Path = Path.home() / "chronic_csv",
-    min_sessions: int = 10,
-    min_k_shared: int = 1349,
+    min_sessions: int = 4,
+    min_k_shared: int = 500,
     targets: Sequence[Target] = ("choice", "feedback", "stimulus", "block"),
     n_shuffle: int = 50,
     inner_cv_splits: int = 3,
@@ -831,7 +840,7 @@ def run_cross_session_train_first_test_rest(
     rerun: bool = False,
     eid_train: Optional[str] = None,
     eid_test: Optional[Sequence[str]] = None,
-    filter_neurons: bool = True,
+    filter_neurons: bool = False,
 ) -> dict:
 
     if one is None:
@@ -886,6 +895,7 @@ def run_cross_session_train_first_test_rest(
             enforce_monotone=True,
             min_trials=400,
             trial_key="stimOn_times",
+            filter_neurons=filter_neurons,
         )
         if not subset_map:
             raise RuntimeError(f"{subject}: best_eid_subsets_for_animal returned no subsets.")
@@ -937,7 +947,7 @@ def run_cross_session_train_first_test_rest(
     restrict_train = np.asarray(idx_map[train_eid], dtype=int)
     for t in targets:
         try:
-            X, y, _ = build_trial_features(train_eid, target=t, restrict=restrict_train, rerun=rerun)
+            X, y, _ = build_trial_features(train_eid, target=t, restrict=restrict_train, rerun=rerun, filter_neurons=filter_neurons)
         except Exception as ex:
             print(f"[skip] train features {train_eid} [{t}]: {type(ex).__name__}: {ex}")
             continue
@@ -995,7 +1005,7 @@ def run_cross_session_train_first_test_rest(
         for e in test_eids:
             restrict = np.asarray(idx_map[e], dtype=int)
             try:
-                Xte, yte, _ = build_trial_features(e, target=t, restrict=restrict, rerun=rerun)
+                Xte, yte, _ = build_trial_features(e, target=t, restrict=restrict, rerun=rerun, filter_neurons=filter_neurons)
             except Exception as ex:
                 print(f"[skip] test features {e} [{t}]: {type(ex).__name__}: {ex}")
                 continue
@@ -1019,6 +1029,7 @@ def run_cross_session_train_first_test_rest(
 
     payload = dict(
         subject=subject,
+        filter_neurons=filter_neurons,
         eids=[train_eid] + list(test_eids),
         train_eid=train_eid,
         dates=[_eid_date(e) for e in [train_eid] + list(test_eids)],
@@ -1068,46 +1079,6 @@ def load_trainFirst_payload(eid_train: str, eid_test: Sequence[str], one: Option
     if json_path.exists():
         return json.loads(json_path.read_text())
     raise FileNotFoundError(f"No payload found for {prefix}")
-
-
-def plot_trainFirst(payload: dict, targets: Sequence[Target] = ("choice", "feedback", "stimulus", "block")):
-    eids = payload["eids"]
-    dates = payload["dates"]
-    results = payload["results"]
-    first_cv = payload["first_session_cv"]
-
-    fig, axes = plt.subplots(2, 2, figsize=(10, 7))
-    axes = axes.ravel()
-    order = ["choice", "feedback", "stimulus", "block"]
-    order = [t for t in order if t in targets] + [t for t in targets if t not in order]
-
-    for ax, t in zip(axes, order):
-        rows = results.get(t, [])
-        if not rows:
-            ax.set_visible(False)
-            continue
-        xs, ys, ysh = [], [], []
-        for r in rows:
-            xs.append(r.get("date", ""))
-            ys.append(r.get("acc", np.nan))
-            ysh.append(r.get("acc_shuffle", np.nan))
-        xs_tick = np.arange(len(xs))
-        ax.plot(xs_tick, ys, marker="o", label="acc")
-        if np.isfinite(np.nanmean(ysh)):
-            ax.plot(xs_tick, ysh, linestyle="--", label="shuffle")
-        ax.set_xticks(xs_tick)
-        ax.set_xticklabels(xs, rotation=45, ha="right")
-        ax.set_ylim(0.0, 1.0)
-        ax.set_title(t)
-        ax.grid(True, alpha=0.3)
-        ax.legend(frameon=False, fontsize=8)
-        cv = first_cv.get(t, {})
-        if cv:
-            ax.annotate(f"train-CV={cv.get('mean_acc', np.nan):.2f}", xy=(0, ys[0]), xytext=(5, 8), textcoords="offset points", fontsize=8)
-
-    fig.suptitle("Train-first transfer accuracy across sessions", fontsize=11)
-    fig.tight_layout(rect=[0, 0, 1, 0.95])
-    plt.show()
 
 
 def plot_cross_session_train_first_test_rest(payload: dict, *, show: bool = True, save_path: Optional[Path] = None):
@@ -1172,7 +1143,9 @@ def plot_cross_session_train_first_test_rest(payload: dict, *, show: bool = True
     for j in range(len(target_order), 4):
         axes[j].set_visible(False)
 
-    fig.suptitle(f"{subject} — k (global shared) = {n_shared} — {len(eids)} sessions", y=0.995, fontsize=11)
+    filter_neurons = payload["filter_neurons"]
+    fig.suptitle(f"{subject} — k (global shared) = {n_shared} (filter_neurons={filter_neurons}) — {len(eids)} sessions", y=0.995, fontsize=11)
+    plt.tight_layout()
     if save_path is not None:
         save_path = Path(save_path)
         save_path.parent.mkdir(parents=True, exist_ok=True)
