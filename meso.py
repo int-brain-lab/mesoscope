@@ -43,7 +43,7 @@ def load_distinct_bright_colors(n=20, saturation=0.9, brightness=0.95):
     return hex_colors
 
 
-def embed_meso(eid, filter_neurons=False):
+def embed_meso(eid, filter_neurons=False, run_rastermap=False):
     """
     Load and embed mesoscope data via rastermap for a given experiment ID (eid).
 
@@ -161,13 +161,13 @@ def embed_meso(eid, filter_neurons=False):
     print(roi_signal.shape, 'ROI signal shape')
     print(Counter(region_labels))
 
-    if filter_neurons:
+    if run_rastermap:
         print('Running rastermap...')
         model = Rastermap(n_PCs=100, n_clusters=30,
                         locality=0.75, time_lag_window=5, bin_size=1).fit(roi_signal)
         isort = model.isort
     else:
-        print('Skipping rastermap (filter_neurons=False)')
+        print(f'Skipping rastermap (filter_neurons={filter_neurons})')
         isort = np.arange(roi_signal.shape[0])
 
     rr = {
@@ -186,7 +186,7 @@ def embed_meso(eid, filter_neurons=False):
     return rr
 
 
-def load_or_embed(eid, restrict=None, rerun=False, filter_neurons=False):
+def load_or_embed(eid, restrict=None, rerun=False, filter_neurons=True):
     fpath = Path(pth_meso, 'data', f"{eid}_filter_{filter_neurons}.npy")
     if fpath.exists() and (not rerun):
         rr = np.load(fpath, allow_pickle=True).item()
