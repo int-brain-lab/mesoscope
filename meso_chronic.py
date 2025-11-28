@@ -11,6 +11,7 @@ import re, os, sys, threading, requests
 from urllib.parse import urljoin
 import math
 import matplotlib.pyplot as plt
+from uuid import UUID
 
 one = ONE()
 
@@ -217,7 +218,7 @@ def get_cluster_uids_neuronal(
     eid: str,
     roicat_root: str | Path | None = None,
     server_root: str | Path | None = None,
-    filter_neurons: bool = False) -> np.ndarray:
+    filter_neurons: bool = True) -> np.ndarray:
 
 
     roicat_root = Path(roicat_root) if roicat_root is not None else None
@@ -287,60 +288,87 @@ def match_tracked_indices_across_sessions(
     other_eids: list[str],
     roicat_root: Path = Path.home() / "chronic_csv",
     server_root: str | Path | None = None,
+    *,
+    filter_neurons: bool = True,
+    sanity_check: bool = False,
 ) -> dict[str, np.ndarray]:
     """
-    Return a mapping {eid: indices} such that indexing rr['roi_signal'][indices, :]
-    selects the same tracked neurons (same UIDs) in the same order across all sessions.
+    Map each session to row indices in rr['roi_signal'] that select the SAME tracked neurons,
+    aligned by ROICaT cluster UIDs.
 
-    The order is lexicographic by UID. If no common UIDs exist, each array is length 0.
+    - Shared UIDs are the lexicographic intersection across all sessions.
+    - If filter_neurons=True, only ROIs flagged neuronal by mpciROITypes are considered.
+    - If no shared UIDs exist, returns zero-length int arrays for ALL sessions.
+    - If sanity_check=True, verifies indices are within [0, N-1] using load_or_embed(eid).
+
+    Returns
+    -------
+    dict {eid: np.ndarray[int]} with identical lengths and order across sessions.
     """
 
-    def _uid_first_index_map(u: np.ndarray) -> tuple[dict[str, int], np.ndarray, np.ndarray]:
-        """Build UID -> absolute first index map for non-empty UIDs."""
+    def _uid_first_index_map(u: np.ndarray) -> tuple[dict[str, int], np.ndarray]:
+        """Map UID -> first absolute row index (only for non-empty UIDs)."""
+        if u.size == 0:
+            return {}, np.empty(0, dtype=object)
         nz = (u != '')
         if not np.any(nz):
-            return {}, np.empty(0, dtype=object), np.empty(0, dtype=int)
+            return {}, np.empty(0, dtype=object)
         u_nz = u[nz]
-        # first occurrence among duplicates
         u_unique, idx_first = np.unique(u_nz, return_index=True)
         idx_abs = np.flatnonzero(nz)[idx_first]
-        uid2abs = {uid: int(ix) for uid, ix in zip(u_unique, idx_abs)}
-        return uid2abs, u_unique, idx_abs
+        return {uid: int(ix) for uid, ix in zip(u_unique, idx_abs)}, u_unique
 
-    # 1) Collect UIDs
-    u_anchor = get_cluster_uids_neuronal(one, anchor_eid, roicat_root=roicat_root, server_root=server_root)
-    anchor_uid2abs, anchor_unique, _ = _uid_first_index_map(u_anchor)
+    # ---------- collect UIDs ----------
+    u_anchor = get_cluster_uids_neuronal(
+        one, anchor_eid, roicat_root=roicat_root, server_root=server_root, filter_neurons=filter_neurons
+    )
+    anchor_uid2abs, anchor_unique = _uid_first_index_map(u_anchor)
 
-    # Start with all non-empty anchor UIDs
-    shared = anchor_unique.copy()
-
-    # Intersect with each other session's non-empty UIDs
     per_session_uidmaps: dict[str, dict[str, int]] = {anchor_eid: anchor_uid2abs}
+    shared = anchor_unique.copy()  # running intersection (lexicographic)
+
     for e in other_eids:
-        u_e = get_cluster_uids_neuronal(one, e, roicat_root=roicat_root, server_root=server_root)
-        uid2abs_e, u_e_unique, _ = _uid_first_index_map(u_e)
-        shared = np.intersect1d(shared, u_e_unique)  # lexicographic, unique
+        u_e = get_cluster_uids_neuronal(
+            one, e, roicat_root=roicat_root, server_root=server_root, filter_neurons=filter_neurons
+        )
+        uid2abs_e, u_e_unique = _uid_first_index_map(u_e)
         per_session_uidmaps[e] = uid2abs_e
+        # intersection across sessions; ensures uniqueness & lexicographic order
+        shared = np.intersect1d(shared, u_e_unique, assume_unique=False)
 
-    # Handle empty intersection early
-    if shared.size == 0:
-        out = {eid: np.empty(0, dtype=int) for eid in [anchor_eid, *other_eids]}
-        return out
+        # early exit if empty
+        if shared.size == 0:
+            return {eid: np.empty(0, dtype=int) for eid in [anchor_eid, *other_eids]}
 
-    # 2) Shared UIDs are already sorted lexicographically by np.intersect1d
-    shared_uids = shared
-
-    # 3) Build aligned indices per session (first occurrence per UID)
+    # ---------- build aligned indices ----------
     out: dict[str, np.ndarray] = {}
     for eid, uid2abs in per_session_uidmaps.items():
         try:
-            idx = np.array([uid2abs[uid] for uid in shared_uids], dtype=int)
-        except KeyError as e:
-            missing = str(e).strip("'")
-            raise ValueError(f"Internal mismatch: shared UID not found in session {eid}: {missing}")
+            idx = np.fromiter((uid2abs[uid] for uid in shared), dtype=int, count=shared.size)
+        except KeyError as ke:
+            # This should not happen after intersect1d; signal internal inconsistency clearly.
+            missing = str(ke).strip("'")
+            raise ValueError(f"Shared UID not found in {eid}: {missing}") from None
         out[eid] = idx
 
+    # ---------- optional sanity check against rr['roi_signal'].shape[0] ----------
+    if sanity_check:
+        from meso import load_or_embed  # lazy import to avoid heavy deps unless requested
+        for eid, idx in out.items():
+            if idx.size == 0:
+                continue
+            rr = load_or_embed(eid, rerun=False)
+            N = int(rr["roi_signal"].shape[0])
+            mx = int(idx.max()) if idx.size else -1
+            mn = int(idx.min()) if idx.size else 0
+            if mn < 0 or mx >= N:
+                raise IndexError(
+                    f"{eid}: tracked indices out of bounds (min={mn}, max={mx}, N={N}). "
+                    "Ensure mappings are per-session row indices aligned to roi_signal."
+                )
+
     return out
+
 
 
 def _build_presence_matrix(
@@ -348,6 +376,7 @@ def _build_presence_matrix(
     eids: List[str],
     roicat_root: str | Path | None = None,
     server_root: str | Path | None = None,
+    filter_neurons: bool = True
 ) -> Tuple[np.ndarray, List[str], Dict[str, int]]:
     """
     Build a boolean matrix M [n_sessions x n_uids], where M[i, j] = True
@@ -356,7 +385,7 @@ def _build_presence_matrix(
     # Gather unique UIDs per session
     sess_uids: List[np.ndarray] = []
     for eid in eids:
-        u = get_cluster_uids_neuronal(one, eid, roicat_root=roicat_root, server_root=server_root)
+        u = get_cluster_uids_neuronal(one, eid, roicat_root=roicat_root, server_root=server_root, filter_neurons=filter_neurons)
         sess_uids.append(np.unique(u[u != '']).astype(str))
 
     # Global UID vocabulary
@@ -385,6 +414,7 @@ def find_best_subsets_by_greedy_intersection(
     n_starts: int = 10,
     random_starts: int = 0,
     rng: Optional[np.random.Generator] = None,
+    filter_neurons: bool = True,
 ) -> Dict[int, Dict[str, object]]:
     """
     For each k in [k_min, k_max], greedily select k sessions that maximize
@@ -396,7 +426,7 @@ def find_best_subsets_by_greedy_intersection(
         k_max = len(eids)
     assert k_max <= len(eids) and k_min <= k_max
 
-    M, uid_list, eid_index = _build_presence_matrix(one, eids, roicat_root, server_root)
+    M, uid_list, eid_index = _build_presence_matrix(one, eids, roicat_root, server_root , filter_neurons=filter_neurons)
     n_sess, n_uid = M.shape
     if n_uid == 0:
         return {k: {'eids': [], 'n_shared': 0} for k in range(k_min, k_max + 1)}
@@ -486,12 +516,13 @@ def aligned_indices_for_subset(
     one: ONE,
     eids_subset: List[str],
     roicat_root: str | Path,
+
     server_root: str | Path | None = None
 ) -> Dict[str, np.ndarray]:
     anchor = eids_subset[0]
     others = eids_subset[1:]
     return match_tracked_indices_across_sessions(
-        one, anchor, others, roicat_root=roicat_root, server_root=server_root
+        one, anchor, others, roicat_root=roicat_root, server_root=server_root,filter_neurons=True
     )
 
 
@@ -526,6 +557,7 @@ def best_eid_subsets_for_animal(
     enforce_monotone: bool = True,
     min_trials: int = 400,
     trial_key: str = "stimOn_times",
+    filter_neurons=True,
 ) -> Dict[int, Dict[str, object]]:
     """
     Return dict: {k: {'eids': [...], 'n_shared': int}} for a subject, using
@@ -619,7 +651,7 @@ def best_eid_subsets_for_animal(
         k_min=k_min,
         k_max=k_max,
         n_starts=n_starts,
-        random_starts=random_starts,
+        random_starts=random_starts,filter_neurons=filter_neurons,
     )
 
     # 5) enforce monotone non-increasing n_shared across k (optional)
@@ -649,7 +681,8 @@ def pairwise_shared_indices_for_animal(
     server_root: Optional[Path] = None,
     min_trials: int = 400,
     trial_key: str = "stimOn_times",
-    require_nonzero: bool = True,
+    require_nonzero: bool = True, 
+    filter_neurons=True,
 ) -> Dict[str, Dict[str, np.ndarray]]:
     if one is None:
         one = ONE()
@@ -681,7 +714,8 @@ def pairwise_shared_indices_for_animal(
         e0, e1 = eids_sorted[i], eids_sorted[i+1]
         try:
             idx_map = match_tracked_indices_across_sessions(
-                one, e0, [e1], roicat_root=roicat_root, server_root=server_root
+                one, e0, [e1], roicat_root=roicat_root, server_root=server_root,
+                filter_neurons=filter_neurons,
             )
         except Exception:
             continue
