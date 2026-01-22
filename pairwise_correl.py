@@ -12,17 +12,13 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from copy import copy
 from one.api import ONE
-from trial_type_definitions import event_definitions_biasedCW, add_info_to_trials_table
+from trial_type_definitions import event_definitions_biasedCW, event_definitions_trainingCW, add_info_to_trials_table
 
 from iblatlas.atlas import AllenAtlas
 
 one = ONE()
 
 base_folder = Path("/mnt/s0/Data/Subjects")
-subject = "SP058"
-
-central_sess = "SP058/2024-07-05/001"  # central session
-central_eid = one.path2eid(central_sess)
 
 
 # %% get all SP058 eids
@@ -176,29 +172,6 @@ def get_common_roicat_UCIDs(eids, roi_info):
     return common_ucids[~nan_ix]
 
 
-# %%
-sessions_df = parse_cannonicals_sessions_file(Path(__file__).parent / "canonical_sessions.txt")
-sessions_df = sessions_df.groupby("subject").get_group("SP058").sort_values("start_time")
-sessions_df = sessions_df.loc[sessions_df["task_protocol"].str.contains("biased")]
-eids = sessions_df.index.values
-roi_info = get_roi_info(eids)
-
-# the curation step
-roi_info = roi_info.loc[roi_info["iscell"] > 0.5]
-
-# %% load data
-extracted_data = extract_data(eids, roi_info, event_definitions_biasedCW)
-
-# %% eids and their combinations
-eid_combos = list(combinations(eids, 2))
-eid_combos = pd.DataFrame(eid_combos, columns=["eid_a", "eid_b"])
-for i, row in eid_combos.iterrows():
-    t1 = datetime.fromisoformat(sessions_df.loc[row["eid_a"], "start_time"])
-    t2 = datetime.fromisoformat(sessions_df.loc[row["eid_b"], "start_time"])
-    eid_combos.loc[i, "dt"] = (t2 - t1).days
-
-
-# %%
 def get_data_indices(common_roicat_UCIDs, roi_info_session):
     # ensure that roi_info_session has the same order of fovs (numerically ascending)
     # as in the extraction loop
@@ -211,10 +184,45 @@ def get_data_indices(common_roicat_UCIDs, roi_info_session):
     return roi_info_session.set_index("roicat_UCID").loc[common_roicat_UCIDs]["index"].values
 
 
+# %% definitions and run
+
+# selecting the subject
+subject = "SP058"
+# session_type selection: biased or training
+session_type = "biased"
+
+if session_type == "biased":
+    event_definitions = event_definitions_biasedCW
+elif session_type == "training":
+    event_definitions = event_definitions_trainingCW
+
+sessions_df = parse_cannonicals_sessions_file(Path(__file__).parent / "canonical_sessions.txt")
+sessions_df = sessions_df.groupby("subject").get_group(subject).sort_values("start_time")
+
+sessions_df = sessions_df.loc[sessions_df["task_protocol"].str.contains(session_type)]  # <- here selection
+eids = sessions_df.index.values
+roi_info = get_roi_info(eids)
+
+# the curation step
+roi_info = roi_info.loc[roi_info["iscell"] > 0.5]
+# TODO add back in the curation by roicat metrics
+
+# %% load data
+extracted_data = extract_data(eids, roi_info, event_definitions)
+
+# %% eids and their combinations
+eid_combos = list(combinations(eids, 2))
+eid_combos = pd.DataFrame(eid_combos, columns=["eid_a", "eid_b"])
+for i, row in eid_combos.iterrows():
+    t1 = datetime.fromisoformat(sessions_df.loc[row["eid_a"], "start_time"])
+    t2 = datetime.fromisoformat(sessions_df.loc[row["eid_b"], "start_time"])
+    eid_combos.loc[i, "dt"] = (t2 - t1).days
+
+
 # %% pairwise correlatoins
-event_order = np.sort(list(event_definitions_biasedCW.keys()))
+event_order = np.sort(list(event_definitions.keys()))
 # selection = ["fback1", "choiceL", "choiceR"]
-event_order = ["fback1", "choiceL", "choiceR"]
+# event_order = ["fback1", "choiceL", "choiceR"]
 
 results = []
 for i, row in eid_combos.iterrows():
@@ -258,6 +266,7 @@ results = pd.concat(results, axis=0)
 # %% overall
 fig, axes = plt.subplots()
 sns.boxplot(data=results, y="p", x="dt", ax=axes)
+plt.gca().set_title(f"{subject} - {session_type} - pairwise session correlations")
 sns.despine(fig)
 
 # %% brain region resolved
@@ -272,6 +281,7 @@ for region in brain_regions:
     fig, axes = plt.subplots()
     results_ = results.groupby("brain_region").get_group(region)
     sns.boxplot(data=results_, y="p", x="dt", ax=axes, color=region_colors[region])
+    plt.gca().set_title(f"{subject} - {session_type} - {region}")
     axes.set_title(region)
     sns.despine(fig)
 
