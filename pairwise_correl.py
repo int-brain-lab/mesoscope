@@ -4,13 +4,11 @@ from tqdm import tqdm
 import pickle
 from itertools import combinations
 from datetime import datetime
-
 import numpy as np
 import pandas as pd
 import pynapple as nap
 import matplotlib.pyplot as plt
 import seaborn as sns
-from copy import copy
 from one.api import ONE
 from trial_type_definitions import event_definitions_biasedCW, event_definitions_trainingCW, add_info_to_trials_table
 
@@ -34,158 +32,121 @@ def parse_cannonicals_sessions_file(path: Path) -> pd.DataFrame:
     return df.drop(columns=["number", "lab", "projects", "url"]).set_index("id")
 
 
-def get_roi_info(eids):
-    """for the given eids, gather all the information about ROIs in one dataframe"""
+# %% new data loading approach
+def load_imaging_data(eid: str, fov: str, deconvolved: bool = True):
+    session_path = base_folder / one.eid2path(eid).session_path_short()
+    fov_collection = f"alf/{fov}"
+
+    # our uuids
+    fov_uuids = pd.read_csv(session_path / fov_collection / "mpciROIs.uuids.csv")
+
+    # roicat UCIDs
+    roicat_UCIDs = pd.read_csv(
+        session_path / f"{fov_collection}/mpciROIs.clusterUIDs.csv",
+        skip_blank_lines=False,
+        header=None,
+        names=["roicat_UCID"],
+    )
+    roi_info = pd.concat([fov_uuids, roicat_UCIDs], axis=1)
+
+    # other suite2p info: cell classifier
+    roi_info["iscell"] = np.load(session_path / fov_collection / "mpciROIs.cellClassifier.npy")
+
+    # brain region estimate
+    if (session_path / fov_collection / "mpciROIs.brainLocationIds_ccf_2017.npy").exists():
+        roi_info["region_ids"] = np.load(session_path / fov_collection / "mpciROIs.brainLocationIds_ccf_2017.npy")
+    else:
+        roi_info["region_ids"] = np.load(session_path / fov_collection / "mpciROIs.brainLocationIds_ccf_2017_estimate.npy")
 
     atlas = AllenAtlas()
-    roi_info = []
-    for eid in tqdm(eids):
-        session_path = base_folder / one.eid2path(eid).session_path_short()
+    roi_info["region_labels"] = atlas.regions.id2acronym(roi_info["region_ids"].values)
+    roi_info["fov"] = fov
 
-        # infer fov collections
-        fov_folders = list(session_path.glob("*alf/FOV*"))
-        fov_collections = ["/".join(str(folder).split("/")[-2:]) for folder in fov_folders]
+    # roicat data
+    chronic_folder = base_folder / subject / "Chronic"
+    roicat_metrics = ["cluster_intra_means", "cluster_intra_maxs", "cluster_intra_mins", "cluster_silhouette"]
 
-        roi_info_session = []
-        for fov_collection in fov_collections:
-            fov = fov_collection.split("/")[1]
-            # the session level uuids
-            fov_uuids = pd.read_csv(session_path / fov_collection / "mpciROIs.uuids.csv")
+    # get roicat data
+    file = next(chronic_folder.glob(f"*{fov}*tracking.results.pkl"))
+    with open(file, "rb") as fH:
+        roicat_output = pickle.load(fH)
 
-            # uuids that are constant across sessions - ROIcat output
-            # this can be replaced with a regular one. call once the data is available
-            roicat_uuids = pd.read_csv(
-                session_path / f"{fov_collection}/mpciROIs.clusterUIDs.csv",
-                skip_blank_lines=False,
-                header=None,
-                names=["roicat_UCID"],
-            )
-            df = pd.concat([fov_uuids, roicat_uuids], axis=1)
-
-            # other suite2p info: cell classifier
-            df["iscell"] = np.load(session_path / fov_collection / "mpciROIs.cellClassifier.npy")
-
-            # brain region
-            if (session_path / fov_collection / "mpciROIs.brainLocationIds_ccf_2017.npy").exists():
-                df["region_ids"] = np.load(session_path / fov_collection / "mpciROIs.brainLocationIds_ccf_2017.npy")
-            else:
-                df["region_ids"] = np.load(session_path / fov_collection / "mpciROIs.brainLocationIds_ccf_2017_estimate.npy")
-            df["region_labels"] = atlas.regions.id2acronym(df["region_ids"].values)
-
-            df["fov"] = fov
-            roi_info_session.append(df)
-
-        df = pd.concat(roi_info_session, axis=0)
-        df["eid"] = eid
-        roi_info.append(df)
-
-    roi_info = pd.concat(roi_info, axis=0)
-    return roi_info.reset_index()
-
-
-def get_data_all_fovs(
-    eid: str,
-    roi_info: pd.DataFrame,
-    deconvolved=True,
-):
-    """for a given eid, get all the imaging traces, combining all fovs
-    note: curation is realized by dropping rois in roi_info"""
-
-    dataset = "mpci.ROIActivityDeconvolved.npy" if deconvolved else "mpci.ROIActivityF.npy"
-    roi_info_session = roi_info.groupby("eid").get_group(eid)
-
-    suite2p_data = []
-
-    # ensure iteration over fovs in order
-    fovs = np.sort(roi_info_session["fov"].unique())
-    for fov in fovs:
-        roi_info_fov = roi_info_session.groupby("fov").get_group(fov)
-        # load
-        suite2p_data_fov = np.load(base_folder / one.eid2path(eid).session_path_short() / f"alf/{fov}/{dataset}")
-        # curation
-        ix = roi_info_fov["index"].values
-        suite2p_data_fov = suite2p_data_fov[:, ix]
-        # store
-        suite2p_data.append(suite2p_data_fov)
-
-    session_data = np.concatenate(suite2p_data, axis=1)
-    # roi_info_session = pd.concat(roi_info_session, axis=0)
-
-    # should be the same for all fovs, so we can just pick any
-    # TODO verify!!
-    times = np.load(base_folder / one.eid2path(eid).session_path_short() / f"alf/{fov}/mpci.times.npy")
-    return nap.TsdFrame(
-        t=times,
-        d=session_data,
+    cluster_uids = pd.read_csv(
+        chronic_folder / f"{fov}.clusterUIDs_all.csv",
+        header=None,
+        names=["roicat_UCID"],
     )
+    roicat_df = pd.DataFrame({metric: roicat_output["quality_metrics"][metric] for metric in roicat_metrics})
+
+    # set index to cluster labels
+    roicat_df.index = np.array(roicat_output["quality_metrics"]["cluster_labels_unique"], dtype="int32")
+    # merge with cluster_uids
+    roicat_df["roicat_UCID"] = cluster_uids
+
+    # combine roi_info with roicat metrics
+    roi_info = pd.merge(roi_info, roicat_df, on="roicat_UCID", how="left")
+
+    # fluorescence data
+    dataset = "mpci.ROIActivityDeconvolved.npy" if deconvolved else "mpci.ROIActivityF.npy"
+
+    # load all traces (suite2p) for one FOV
+    suite2p_data_fov = np.load(session_path / fov_collection / dataset)
+    times = np.load(session_path / fov_collection / "mpci.times.npy")
+    assert suite2p_data_fov.shape[1] == roi_info.shape[0]
+    # as a pynapple object, merged with the metadata
+    return nap.TsdFrame(t=times, d=suite2p_data_fov, metadata=roi_info)
 
 
-def extract_data(
-    eids: list[str],
-    roi_info: pd.DataFrame,
-    events_definitions: dict,
-) -> dict[str]:
-    """for all eids, load the imaging data, extract the responses defined by the
-    event definitions, return a dict[eid] with keys 'response' and 'session_info'"""
-    extracted_data = {}
-    for eid in eids:
-        # load imaging data
-        session_data = get_data_all_fovs(eid, roi_info, deconvolved=True)
-
-        # normalize
-        a, b = np.percentile(session_data, (20, 99))
-        session_data = (session_data - a) / (b - a)
-
-        # load behavior
-        trials_table_file = list((base_folder / one.eid2path(eid).session_path_short()).rglob("*trials.table*"))
-        assert len(trials_table_file) == 1
-        trials_df = pd.read_parquet(trials_table_file[0])
-        trials_df = add_info_to_trials_table(trials_df)
-
-        stim_avgs = {}
-        for event, definition in events_definitions.items():
-            _trials_df = trials_df.query(definition["query"])
-            timestamps = _trials_df[definition["align_event"]].values
-
-            # timestamps = timestamps[~pd.isna(timestamps)]  # there are trials with choices but no firstMovement_times ??
-
-            tensor = nap.compute_perievent_continuous(session_data, nap.Ts(timestamps), minmax=definition["window"])
-            # tensor.shape is timepoints, trials, cells
-            # time and trial average
-            if timestamps.shape[0] > 10:  # exclude trial types with too little trials
-                stim_avgs[event] = np.average(tensor, axis=(0, 1))
-            else:
-                nans = np.ones(tensor.shape[-1])
-                nans[:] = np.nan
-                stim_avgs[event] = nans
-
-        extracted_data[eid] = stim_avgs
-    return extracted_data
+# load behavior
+def load_behavior_data(eid):
+    trials_table_file = list((base_folder / one.eid2path(eid).session_path_short()).rglob("*trials.table*"))
+    assert len(trials_table_file) == 1
+    trials_df = pd.read_parquet(trials_table_file[0])
+    trials_df = add_info_to_trials_table(trials_df)
+    return trials_df
 
 
-def get_common_roicat_UCIDs(eids, roi_info):
-    """helper to get all common roicat UCIDs for a set of eids"""
-    all_ucids = [set(roi_info.groupby("eid").get_group(eid)["roicat_UCID"].values) for eid in eids]
-    # make sure that '' or np.nan is not part of this list
-    common_ucids = np.array(list(set.intersection(*all_ucids)))
-    nan_ix = np.logical_or(pd.isna(common_ucids), common_ucids == "nan")
-    return common_ucids[~nan_ix]
+def extract_event_based_responses(
+    fov_data: nap.TsdFrame,
+    trials_df: pd.DataFrame,
+    event_definitions: dict,
+) -> pd.DataFrame:
+    stim_avgs = {}
+    for event, definition in event_definitions.items():
+        _trials_df = trials_df.query(definition["query"])
+        timestamps = _trials_df[definition["align_event"]].values
+        tensor = nap.compute_perievent_continuous(
+            fov_data,
+            nap.Ts(timestamps),
+            minmax=definition["window"],
+        )
+        # tensor.shape is timepoints, trials, cells
+        # time and trial average
+        if timestamps.shape[0] > 10:  # exclude trial types with too little trials
+            stim_avgs[event] = np.average(tensor, axis=(0, 1))
+        else:
+            nans = np.ones(tensor.shape[-1])
+            nans[:] = np.nan
+            stim_avgs[event] = nans
+
+    return pd.DataFrame(stim_avgs)
 
 
-def get_data_indices(common_roicat_UCIDs, roi_info_session):
-    # ensure that roi_info_session has the same order of fovs (numerically ascending)
-    # as in the extraction loop
-    fovs = np.sort(roi_info_session["fov"].unique())
-    roi_info_session = pd.concat([roi_info_session.groupby("fov").get_group(fov) for fov in fovs])
-
-    # drop the untracked cells
-    roi_info_session = roi_info_session.loc[~pd.isna(roi_info_session["roicat_UCID"])]
-    # get the indices
-    return roi_info_session.set_index("roicat_UCID").loc[common_roicat_UCIDs]["index"].values
+def process_imaging_data(imaging_data: nap.TsdFrame) -> nap.TsdFrame:
+    # normalize
+    a, b = np.percentile(imaging_data, (20, 99))
+    imaging_data = (imaging_data - a) / (b - a)
+    return imaging_data
 
 
-# %% definitions and run
+def get_fovs(eid):
+    session_path = base_folder / one.eid2path(eid).session_path_short()
+    # infer fov collections
+    fov_folders = list(session_path.rglob("*alf/FOV_??*"))
+    return np.sort([folder.parts[-1] for folder in fov_folders])
 
+
+# %%
 # selecting the subject
 subject = "SP058"
 # session_type selection: biased or training
@@ -201,16 +162,33 @@ sessions_df = sessions_df.groupby("subject").get_group(subject).sort_values("sta
 
 sessions_df = sessions_df.loc[sessions_df["task_protocol"].str.contains(session_type)]  # <- here selection
 eids = sessions_df.index.values
-roi_info = get_roi_info(eids)
 
-# the curation step
-roi_info = roi_info.loc[roi_info["iscell"] > 0.5]
-# TODO add back in the curation by roicat metrics
+# %% load all imaging data
+imaging_data = {}
+for eid in tqdm(eids):
+    imaging_data[eid] = {}
+    fovs = get_fovs(eid)
+    for fov in fovs:
+        data = load_imaging_data(eid, fov)
+        imaging_data[eid][fov] = process_imaging_data(data)
 
-# %% load data
-extracted_data = extract_data(eids, roi_info, event_definitions)
+# %% extract all responses
+responses = {}
+for eid in tqdm(eids):
+    fovs = get_fovs(eid)
+    trials_df = load_behavior_data(eid)
+    # these are now stacked along FOVs
+    event_responses = []
+    metadata = []
+    for fov in fovs:
+        event_responses.append(extract_event_based_responses(imaging_data[eid][fov], trials_df, event_definitions))
+        metadata.append(imaging_data[eid][fov].metadata)
+    event_responses = pd.concat(event_responses)
+    metadata = pd.concat(metadata)
+    responses[eid] = (event_responses, metadata)
 
-# %% eids and their combinations
+# %% correlations - unit feature vectors, pairwise, by eid
+# pairwise eids combinations
 eid_combos = list(combinations(eids, 2))
 eid_combos = pd.DataFrame(eid_combos, columns=["eid_a", "eid_b"])
 for i, row in eid_combos.iterrows():
@@ -218,45 +196,49 @@ for i, row in eid_combos.iterrows():
     t2 = datetime.fromisoformat(sessions_df.loc[row["eid_b"], "start_time"])
     eid_combos.loc[i, "dt"] = (t2 - t1).days
 
-
-# %% pairwise correlatoins
 event_order = np.sort(list(event_definitions.keys()))
-# selection = ["fback1", "choiceL", "choiceR"]
-# event_order = ["fback1", "choiceL", "choiceR"]
 
+# %% extract
 results = []
 for i, row in eid_combos.iterrows():
-    eid_a = row["eid_a"]
-    eid_b = row["eid_b"]
+    common_roicat_UCIDs = np.array(
+        list(
+            set.intersection(
+                set(responses[row["eid_a"]][1]["roicat_UCID"].values),
+                set(responses[row["eid_b"]][1]["roicat_UCID"].values),
+            )
+        )
+    )
+    # filter out nan
+    common_roicat_UCIDs = common_roicat_UCIDs[~pd.isna(common_roicat_UCIDs)]
+    common_roicat_UCIDs = common_roicat_UCIDs[~(common_roicat_UCIDs == "nan")]
 
-    # common roicat UCIDs
-    common_roicat_UCIDs = get_common_roicat_UCIDs([eid_a, eid_b], roi_info)
+    # subselect cells
+    response_pair = []
+    for eid in [row["eid_a"], row["eid_b"]]:
+        ix = np.logical_and(
+            responses[eid][1]["roicat_UCID"].isin(common_roicat_UCIDs).values,
+            (responses[eid][1]["cluster_silhouette"] > (0.2)).values,
+        )
+        index = responses[eid][1].loc[ix]["roicat_UCID"]
+        response_pair.append(responses[eid][0].loc[ix].set_index(index))
 
-    # get the matching indices for roicat UCIDs to index into the extracted data
-    indices_a = get_data_indices(common_roicat_UCIDs, roi_info.groupby("eid").get_group(eid_a))
-    indices_b = get_data_indices(common_roicat_UCIDs, roi_info.groupby("eid").get_group(eid_b))
-    assert indices_a.shape == indices_b.shape
-
-    session_avgs_a = extracted_data[eid_a]
-    session_avgs_b = extracted_data[eid_b]
-
-    a_mat = np.concatenate([session_avgs_a[s][:, np.newaxis] for s in event_order], axis=1)[indices_a, :]
-    b_mat = np.concatenate([session_avgs_b[s][:, np.newaxis] for s in event_order], axis=1)[indices_b, :]
-
-    ps = np.zeros(a_mat.shape[0])
-    for i in range(a_mat.shape[0]):
-        valid_ix = ~np.logical_or(pd.isna(a_mat[i, :]), pd.isna(b_mat[i, :]))
-        ps[i] = np.corrcoef(a_mat[i, valid_ix], b_mat[i, valid_ix])[0, 1]
+    rhos = np.zeros(response_pair[0].values.shape[0])
+    for i, roicat_ucid in enumerate(response_pair[0].index):
+        a = response_pair[0].loc[roicat_ucid]
+        b = response_pair[1].loc[roicat_ucid]
+        valid_ix = ~np.logical_or(pd.isna(a), pd.isna(b))
+        rhos[i] = np.corrcoef(a.loc[valid_ix].values, b.loc[valid_ix].values)[0, 1]
 
     # storing the result for easier plotting
     result_df = pd.DataFrame(columns=["eid_a", "eid_b", "dt", "roicat_UCID", "p", "brain_region"])
-    result_df["roicat_UCID"] = common_roicat_UCIDs
-    result_df["p"] = ps
+    result_df["roicat_UCID"] = response_pair[0].index
+    result_df["rho"] = rhos
     result_df["brain_region"] = (
-        roi_info.groupby("eid").get_group(eid_a).set_index("roicat_UCID").loc[common_roicat_UCIDs, "region_labels"].values
+        responses[row["eid_a"]][1].set_index("roicat_UCID").loc[response_pair[0].index, "region_labels"].values
     )
-    result_df["eid_a"] = eid_a
-    result_df["eid_b"] = eid_b
+    result_df["eid_a"] = row["eid_a"]
+    result_df["eid_b"] = row["eid_b"]
     result_df["dt"] = row["dt"]
     results.append(result_df)
 
@@ -264,9 +246,23 @@ results = pd.concat(results, axis=0)
 
 
 # %% overall
+from scipy.stats import linregress
+
 fig, axes = plt.subplots()
-sns.boxplot(data=results, y="p", x="dt", ax=axes)
-plt.gca().set_title(f"{subject} - {session_type} - pairwise session correlations")
+axes.scatter(x=results["dt"], y=results["rho"], alpha=0.01)
+xs = []
+ys = []
+for dt, group in results.groupby("dt"):
+    xs.append(dt)
+    ys.append(group["rho"].mean())
+
+axes.plot(xs, ys, ".", markersize=10, color="k")
+axes.axhline(0, linestyle=":", lw=2, alpha=0.5, color="k")
+axes.set_xlabel("time between sessions (days)")
+axes.set_ylabel("spearmans ρ")
+
+linreg = linregress(xs, ys)
+plt.gca().set_title(f"{subject} - {session_type} - slope:{linreg.slope:.5f}, pval:{linreg.pvalue:.2f}")
 sns.despine(fig)
 
 # %% brain region resolved
@@ -280,10 +276,18 @@ region_colors = dict(zip(brain_regions, sns.color_palette("husl", n_colors=brain
 for region in brain_regions:
     fig, axes = plt.subplots()
     results_ = results.groupby("brain_region").get_group(region)
-    sns.boxplot(data=results_, y="p", x="dt", ax=axes, color=region_colors[region])
-    plt.gca().set_title(f"{subject} - {session_type} - {region}")
-    axes.set_title(region)
+    axes.scatter(x=results_["dt"], y=results_["rho"], alpha=0.1, color=region_colors[region])
+    xs = []
+    ys = []
+    for dt, group in results_.groupby("dt"):
+        xs.append(dt)
+        ys.append(group["rho"].mean())
+
+    axes.plot(xs, ys, ".", markersize=10, color="k")
+    axes.axhline(0, linestyle=":", lw=2, alpha=0.5, color="k")
+    axes.set_xlabel("time between sessions (days)")
+    axes.set_ylabel("spearmans ρ")
+
+    linreg = linregress(xs, ys)
+    plt.gca().set_title(f"{subject} - {session_type} - {region} - slope:{linreg.slope:.5f}, pval:{linreg.pvalue:.2f}")
     sns.despine(fig)
-
-
-# %%
