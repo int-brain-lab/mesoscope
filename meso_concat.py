@@ -35,10 +35,14 @@ import datashader.transfer_functions as tf
 import pandas as pd
 from PIL import ImageDraw, ImageFont, PngImagePlugin
 import datoviz as dv
+from itertools import combinations
+
 
 sys.path.insert(0, str(Path.home() / "Dropbox" / "scripts" / "IBL"))
 
 from dmn_bwm import get_allen_info
+from meso_chronic import get_cluster_uids_neuronal_by_fov, match_tracked_indices_pair_per_fov
+
 
 plt.ion()
 one = ONE()
@@ -106,44 +110,6 @@ peth_ila = [
 ]
 
 peth_dictm = dict(zip(tts__, peth_ila))
-
-
-def get_canonical_sessions(one: ONE | None = None):
-    """
-    Download canonical mesoscope session paths, flip backslashes to slashes,
-    and map to eids via ONE.path2eid.
-
-    Returns
-    -------
-    eids : list[str]
-        Unique eids in file order (None filtered out).
-    """
-    if one is None:
-        one = ONE()
-
-    url = "https://raw.githubusercontent.com/int-brain-lab/mesoscope/main/canonical_sessions.txt"
-    txt = requests.get(url, timeout=30).text
-
-    eids = []
-    seen = set()
-
-    for line in txt.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-
-        # flip Windows separators -> POSIX
-        line = line.replace("\\", "/")
-
-        eid = str(one.path2eid(PurePosixPath(line)))
-        if eid is None:
-            continue
-
-        if eid not in seen:
-            seen.add(eid)
-            eids.append(eid)
-
-    return eids
 
 
 def deep_in_block(trials, pleft, depth=3):
@@ -254,21 +220,22 @@ def save_trial_cuts_meso(
     filter_neurons: bool = True,
     require_all: bool = True,
     out_dir: str | Path | None = None,
+    *,
+    restrict: None | np.ndarray | dict[str, np.ndarray] = None,
+    restrict_uids: None | dict[str, np.ndarray] = None,
+    pair_tag: str | None = None,
 ):
     """
-    Cut mesoscope ROI traces into per-trial windows (no averaging, no rastermap, no binning).
+    Cut mesoscope ROI traces into per-trial windows.
 
-    IMPORTANT window semantics (matches your examples):
-      Given [pre, post] and event time t0:
-        window_start = t0 - pre
-        window_end   = t0 + post
-      where post can be negative.
-      Examples:
-        [0.15, 0.0]  -> [t0-0.15, t0]
-        [0.4, -0.1]  -> [t0-0.4,  t0-0.1]
+    Change vs previous version:
+      - If a window spans >1 time bin (n_frames > 1), we save the *average over frames*
+        so each trial cut is shape (n_trials, N, 1). If n_frames == 1, keep that 1 bin.
 
-    The cut is *inclusive* of both endpoints in frame-index space:
-      frames from nearest-frame(window_start) ... nearest-frame(window_end), inclusive.
+    Window semantics:
+      window_start = t0 - pre
+      window_end   = t0 + post   (post can be negative)
+    Inclusive endpoints in frame-index space (after rounding).
     """
     if out_dir is None:
         out_dir = Path(pth_meso, "trial_cuts", str(eid))
@@ -390,15 +357,12 @@ def save_trial_cuts_meso(
         out_path: Path,
     ) -> tuple[int, int]:
         """
-        Inclusive endpoint cutting at native frame rate.
+        Inclusive endpoint cutting at native frame rate, but we *store only one bin*:
+          - if n_frames == 1: store that single frame
+          - if n_frames  > 1: store nanmean over frames (per trial, per ROI)
 
-        window_start = t0 - pre
-        window_end   = t0 + post
-
-        Frames are selected by converting window_start/window_end to frame indices using rounding,
-        then taking idx_start..idx_end inclusive.
-
-        Writes shape (n_trials, N, n_frames).
+        Writes shape (n_trials, N, 1).
+        Returns (n_trials, 1).
         """
         pre = float(pre)
         post = float(post)
@@ -412,13 +376,6 @@ def save_trial_cuts_meso(
 
         frame0 = float(frame_times[0])
 
-        # base (ROI-independent) inclusive frame length, derived from the offsets in seconds
-        # n_frames = round((post - (-pre))/dt) + 1 = round((pre + post)/dt) + 1 when post>=-pre, but post can be negative
-        # safer: compute from times:
-        #   start_time = t0 - pre
-        #   end_time   = t0 + post
-        # length depends only on (pre, post) for fixed dt.
-        # We'll compute using a dummy t0=0 in frame space:
         start_rel = -pre
         end_rel = post
         if end_rel <= start_rel:
@@ -433,22 +390,15 @@ def save_trial_cuts_meso(
         N, T = roi_signal.shape
         n_trials = int(event_times.size)
 
-        # per-ROI shift in frames (same convention as before)
         offset_frames = np.round(offsets_s / dt).astype(np.int32)  # (N,)
-
-        # within-window offsets in frames, inclusive
         frame_offsets = (np.arange(n_frames, dtype=np.int32) + idx0_rel)[None, :]  # (1, n_frames)
 
         mm = np.lib.format.open_memmap(
-            out_path, mode="w+", dtype=np.float32, shape=(n_trials, N, n_frames)
+            out_path, mode="w+", dtype=np.float32, shape=(n_trials, N, 1)
         )
 
         for i, t0 in enumerate(event_times.astype(float, copy=False)):
-            # event frame index (base, ROI-independent)
             event_idx = int(np.round((t0 - frame0) / dt))
-
-            # for each ROI, apply time shift by subtracting offset_frames
-            # idx = event_idx + frame_offsets - offset_frames
             idx = (event_idx + frame_offsets) - offset_frames[:, None]  # (N, n_frames)
 
             valid = (idx >= 0) & (idx < T)
@@ -457,13 +407,16 @@ def save_trial_cuts_meso(
             vals = np.take_along_axis(roi_signal, idx_clip, axis=1).astype(np.float32, copy=False)
             vals[~valid] = np.nan
 
-            mm[i, :, :] = vals
+            if n_frames == 1:
+                mm[i, :, 0] = vals[:, 0]
+            else:
+                mm[i, :, 0] = np.nanmean(vals, axis=1)
 
             if (i + 1) % 100 == 0 or (i + 1) == n_trials:
                 print(f"    wrote {i+1}/{n_trials} trials to {out_path.name}")
 
         del mm
-        return n_trials, n_frames
+        return n_trials, 1
 
     saved_meta_paths: list[Path] = []
 
@@ -525,9 +478,43 @@ def save_trial_cuts_meso(
             region_colors = region_colors_all
             xyz = np.asarray(ROI["mpciROIs"]["mlapdv_estimate"], dtype=float)
 
+        # --- optional restriction (indices into current roi_signal for this FOV) ---
+        restrict_used = None
+        restrict_uids_used = None
+        if restrict is not None:
+            if isinstance(restrict, dict):
+                restrict_used = np.asarray(restrict.get(fov, np.array([], dtype=int)), dtype=int)
+            else:
+                restrict_used = np.asarray(restrict, dtype=int)
+
+            if restrict_uids is not None and isinstance(restrict_uids, dict):
+                restrict_uids_used = np.asarray(restrict_uids.get(fov, np.array([], dtype=object)), dtype=object)
+
+            if restrict_used.size == 0:
+                print(f"  restrict: 0 ROIs in {fov} -> skipping FOV")
+                del ROI, roi_signal_all, roi_signal, roi_offsets, roi_offsets_use
+                del region_ids, region_labels_all, region_labels, region_colors_all, region_colors
+                del xyz, frame_times, timeshift, roi_xyz, neuron_mask
+                gc.collect()
+                continue
+
+            mn = int(restrict_used.min())
+            mx = int(restrict_used.max())
+            N0 = int(roi_signal.shape[0])
+            if mn < 0 or mx >= N0:
+                raise IndexError(
+                    f"{eid} {fov}: restrict indices out of bounds (min={mn}, max={mx}, N={N0})."
+                )
+
+            roi_signal = roi_signal[restrict_used]
+            roi_offsets_use = roi_offsets_use[restrict_used]
+            region_labels = np.asarray(region_labels)[restrict_used]
+            region_colors = np.asarray(region_colors)[restrict_used]
+            xyz = np.asarray(xyz)[restrict_used]
+            print(f"  restrict: keeping {restrict_used.size}/{N0} ROIs")
+
         dt = float(np.median(np.diff(frame_times)))
         print("  roi_signal:", roi_signal.shape, "frame_times:", frame_times.shape, "dt:", dt)
-        print("  regions:", Counter(region_labels))
 
         peth_files: dict[str, str] = {}
         tls: dict[str, int] = {}
@@ -547,28 +534,15 @@ def save_trial_cuts_meso(
                 if require_all:
                     raise ValueError(f"Missing PETH '{keyname}' for eid={eid}, {fov} (0 trials).")
 
-                # placeholder with correct inclusive-frame length
-                pre_f = float(pre)
-                post_f = float(post)
-                dt_f = dt
-
-                start_rel = -pre_f
-                end_rel = post_f
-                if end_rel <= start_rel:
-                    raise ValueError(f"{eid} {fov} {keyname}: invalid window [{start_rel},{end_rel}].")
-
-                idx0_rel = int(np.round(start_rel / dt_f))
-                idx1_rel = int(np.round(end_rel / dt_f))
-                n_frames = max(idx1_rel - idx0_rel + 1, 1)
-
+                # placeholder (always (1,N,1) now)
                 mm = np.lib.format.open_memmap(
-                    out_path, mode="w+", dtype=np.float32, shape=(1, roi_signal.shape[0], n_frames)
+                    out_path, mode="w+", dtype=np.float32, shape=(1, roi_signal.shape[0], 1)
                 )
                 mm[:] = np.nan
                 del mm
 
                 peth_files[keyname] = out_path.name
-                peth_shapes[keyname] = (1, int(roi_signal.shape[0]), int(n_frames))
+                peth_shapes[keyname] = (1, int(roi_signal.shape[0]), 1)
                 print(f"  {keyname}: 0 trials -> placeholder {out_path.name} shape={peth_shapes[keyname]}")
                 continue
 
@@ -583,12 +557,15 @@ def save_trial_cuts_meso(
                 out_path=out_path,
             )
             peth_files[keyname] = out_path.name
-            peth_shapes[keyname] = (int(n_trials), int(roi_signal.shape[0]), int(n_frames))
+            peth_shapes[keyname] = (int(n_trials), int(roi_signal.shape[0]), int(n_frames))  # n_frames==1
 
         meta = {
             "eid": str(eid),
             "fov": str(fov),
             "filter_neurons": bool(filter_neurons),
+            "pair_tag": pair_tag,
+            "restrict_used": restrict_used,
+            "restrict_uids_used": restrict_uids_used,
             "trial_names": trial_names,
             "tls": tls,
             "peth_files": peth_files,
@@ -599,7 +576,7 @@ def save_trial_cuts_meso(
             "roi_offsets_s": roi_offsets_use.astype(np.float32, copy=False),
             "frame_times": frame_times.astype(np.float32, copy=False),
             "dt": float(dt),
-            "window_semantics": "start=t0-pre, end=t0+post, inclusive endpoints after rounding to frames",
+            "window_semantics": "start=t0-pre, end=t0+post, inclusive endpoints after rounding to frames; stored as mean over frames -> 1 bin",
         }
 
         meta_path = out_dir / f"{eid}_{fov}_meta_filter_{filter_neurons}.npy"
@@ -616,14 +593,776 @@ def save_trial_cuts_meso(
     return saved_meta_paths
 
 
+#################
+'''
+stack per session pairs, using chronic tracking of neurons
+'''
+#################
+
+
+# =============================================================================
+# 4) End-to-end: per subject -> all EID pairs -> restrict-by-chronic -> save cuts
+# =============================================================================
+
+def _eid_date(one, eid: str) -> str:
+    try:
+        meta = one.alyx.rest("sessions", "read", id=eid)
+        return str(meta["start_time"])[:10]
+    except Exception:
+        return "9999-99-99"
+
+
+def _canonical_sessions_subject_map(
+    one: ONE | None = None,
+    *,
+    rerun: bool = False,
+) -> Dict[str, List[str]]:
+    """
+    Return {subject: [eid, ...]} for canonical mesoscope sessions.
+
+    Uses a local cache under ONE cache_dir/meso to avoid repeated HTTP + Alyx calls.
+    """
+    if one is None:
+        one = ONE()
+
+    pth_meso = Path(one.cache_dir, "meso")
+    pth_meso.mkdir(parents=True, exist_ok=True)
+    cache_path = pth_meso / "canonical_sessions_subject_map.npy"
+
+    if cache_path.is_file() and not rerun:
+        return np.load(cache_path, allow_pickle=True).item()
+
+    # IMPORTANT: use RAW github content, not the HTML blob page
+    url = "https://raw.githubusercontent.com/int-brain-lab/mesoscope/main/canonical_sessions.txt"
+    txt = requests.get(url, timeout=30).text
+
+    out: Dict[str, List[str]] = {}
+    seen: set[str] = set()
+
+    for line in txt.splitlines():
+        line = line.strip()
+        if (not line) or line.startswith("#"):
+            continue
+
+        # Windows -> POSIX
+        line = line.replace("\\", "/")
+
+        eid = one.path2eid(PurePosixPath(line))
+        if eid is None:
+            continue
+        eid = str(eid)
+
+        if eid in seen:
+            continue
+        seen.add(eid)
+
+        ses = one.alyx.rest("sessions", "read", id=eid)
+        subject = str(ses["subject"])
+
+        out.setdefault(subject, []).append(eid)
+
+    np.save(cache_path, out, allow_pickle=True)
+    return out
+
+
+def compute_and_save_trial_cuts_for_all_subject_pairs(
+    one,
+    *,
+    roicat_root: str | Path = Path.home() / "chronic_csv",
+    server_root: str | Path | None = None,
+    trial_cuts_root: str | Path = Path.home() / "meso_trial_cuts_pairs",
+    filter_neurons: bool = True,
+    require_all: bool = True,
+    pair_mode: str = "all",  # "all" | "consecutive"
+    skip_if_no_shared: bool = True,
+) -> Dict[str, Dict[str, object]]:
+    """
+    For each subject from canonical_sessions:
+      - build all session pairs (or consecutive pairs)
+      - compute chronically tracked neurons per pair PER FOV
+      - run save_trial_cuts_meso for each eid, restricted per FOV to the shared neurons
+
+    Saves unambiguously under:
+      trial_cuts_root/<subject>/<eidA>__<eidB>/<eidX>/...
+
+    Returns a compact index dict describing what was saved.
+    """
+    trial_cuts_root = Path(trial_cuts_root)
+    trial_cuts_root.mkdir(parents=True, exist_ok=True)
+
+    subj2eids = _canonical_sessions_subject_map(one)
+
+    saved_index: Dict[str, Dict[str, object]] = {}
+
+    for subject, eids in sorted(subj2eids.items()):
+        eids = [e for e in eids if e and str(e).lower() != "none"]
+        if len(eids) < 2:
+            continue
+
+        # chronological
+        eids_sorted = sorted(eids, key=lambda e: (_eid_date(one, e), e))
+
+        if pair_mode == "consecutive":
+            pairs = [(eids_sorted[i], eids_sorted[i + 1]) for i in range(len(eids_sorted) - 1)]
+        elif pair_mode == "all":
+            pairs = list(combinations(eids_sorted, 2))
+        else:
+            raise ValueError("pair_mode must be 'all' or 'consecutive'")
+
+        subj_out: Dict[str, object] = {"pairs": {}}
+
+        for eid_a, eid_b in pairs:
+            pair_tag = f"{eid_a}__{eid_b}"
+            pair_dir = trial_cuts_root / subject / pair_tag
+            (pair_dir / eid_a).mkdir(parents=True, exist_ok=True)
+            (pair_dir / eid_b).mkdir(parents=True, exist_ok=True)
+
+            fov_match = match_tracked_indices_pair_per_fov(
+                one, eid_a, eid_b,
+                roicat_root=roicat_root, server_root=server_root,
+                filter_neurons=filter_neurons,
+            )
+
+            # Build per-eid restrict dicts (FOV-local), plus UID traceability
+            restrict_a: Dict[str, np.ndarray] = {}
+            restrict_b: Dict[str, np.ndarray] = {}
+            uids_by_fov: Dict[str, np.ndarray] = {}
+
+            total_shared = 0
+            for fov, m in fov_match.items():
+                restrict_a[fov] = m.idx_a
+                restrict_b[fov] = m.idx_b
+                uids_by_fov[fov] = m.shared_uids
+                total_shared += int(m.shared_uids.size)
+
+            if skip_if_no_shared and total_shared == 0:
+                continue
+
+            # Save restricted cuts for each eid
+            meta_a = save_trial_cuts_meso(
+                eid_a,
+                filter_neurons=filter_neurons,
+                require_all=require_all,
+                out_dir=(pair_dir / eid_a),
+                restrict=restrict_a,
+                restrict_uids=uids_by_fov,
+                pair_tag=pair_tag,
+            )
+            meta_b = save_trial_cuts_meso(
+                eid_b,
+                filter_neurons=filter_neurons,
+                require_all=require_all,
+                out_dir=(pair_dir / eid_b),
+                restrict=restrict_b,
+                restrict_uids=uids_by_fov,
+                pair_tag=pair_tag,
+            )
+
+            subj_out["pairs"][pair_tag] = {
+                "eid_a": eid_a,
+                "eid_b": eid_b,
+                "pair_dir": str(pair_dir),
+                "total_shared_uids_sum_over_fov": int(total_shared),
+                "meta_paths_a": [str(p) for p in meta_a],
+                "meta_paths_b": [str(p) for p in meta_b],
+            }
+
+        saved_index[subject] = subj_out
+
+    return saved_index
+
+
+# =============================================================================
+# 5) For one subject + one eid pair:
+#    trial-average, stack neurons (same order across eids), and correlate feature vectors
+# =============================================================================
+
+def _load_meta_dict(p: Path) -> dict:
+    obj = np.load(p, allow_pickle=True)
+    if isinstance(obj, np.ndarray) and obj.shape == ():
+        return obj.item()
+    if isinstance(obj, np.ndarray):
+        return obj.flat[0]
+    return obj
+
+
+def _avg_trials(X_mnt: np.ndarray, *, min_trials: int) -> Optional[np.ndarray]:
+    """Return (N,T) average over all trials, or None if insufficient."""
+    if X_mnt.ndim != 3:
+        raise ValueError(f"Expected (M,N,T), got {X_mnt.shape}")
+    if X_mnt.shape[0] < min_trials:
+        return None
+    return np.nanmean(X_mnt, axis=0).astype(np.float32, copy=False)
+
+
+def _zscore_rows(X: np.ndarray) -> np.ndarray:
+    X = np.asarray(X, dtype=np.float32)
+    mu = np.nanmean(X, axis=1, keepdims=True)
+    sd = np.nanstd(X, axis=1, keepdims=True)
+    sd = np.where(sd == 0, 1.0, sd)
+    return (X - mu) / sd
+
+
+def stack_pair_and_correlate(
+    *,
+    pair_dir: str | Path,
+    eid_a: str,
+    eid_b: str,
+    filter_neurons: bool = True,
+    min_trials: int = 10,
+    cut_to_min: bool = True,
+    zscore_before_corr: bool = True,
+    out_name: str = "pair_stack_and_corr.npy",
+) -> dict:
+    """
+    Reads the *restricted* trial-cuts saved under:
+      pair_dir/<eid>/...
+
+    For each eid:
+      - per FOV: load each ttype memmap, trial-average -> (N,T)
+      - (optional) truncate each ttype to min length shared across the *two eids* for that FOV+ttype
+      - concat ttypes -> (N,L)
+    Then:
+      - stack FOV blocks in deterministic order (FOV_00, FOV_01, ...)
+      - ensure the two stacks have identical shape and aligned neuron order
+      - compute per-neuron Pearson r between the two feature vectors
+
+    Saves a dict to pair_dir/out_name and returns it.
+    """
+    pair_dir = Path(pair_dir)
+    dir_a = pair_dir / eid_a
+    dir_b = pair_dir / eid_b
+    if (not dir_a.is_dir()) or (not dir_b.is_dir()):
+        raise FileNotFoundError(f"Missing eid subdirs in {pair_dir}: {dir_a} / {dir_b}")
+
+    metas_a = sorted(dir_a.glob(f"{eid_a}_FOV_*_meta_filter_*.npy"))
+    metas_b = sorted(dir_b.glob(f"{eid_b}_FOV_*_meta_filter_*.npy"))
+    if not metas_a or not metas_b:
+        raise RuntimeError("No meta files found for one or both eids in pair_dir.")
+
+    # index metas by fov
+    ma = { _load_meta_dict(p)["fov"]: _load_meta_dict(p) for p in metas_a }
+    mb = { _load_meta_dict(p)["fov"]: _load_meta_dict(p) for p in metas_b }
+
+    fovs = sorted(set(ma.keys()) & set(mb.keys()))
+    if not fovs:
+        raise RuntimeError("No overlapping FOVs between the two eids in this pair_dir.")
+
+    # trial types must match; take from first overlapping FOV
+    ref_ttypes = list(ma[fovs[0]].get("trial_names", []))
+    if not ref_ttypes:
+        raise RuntimeError("Missing trial_names in meta.")
+    if list(mb[fovs[0]].get("trial_names", [])) != ref_ttypes:
+        raise RuntimeError("trial_names mismatch between eids.")
+
+    blocks_a: list[np.ndarray] = []
+    blocks_b: list[np.ndarray] = []
+    uids_blocks: list[np.ndarray] = []
+    fov_blocks: list[np.ndarray] = []
+
+    for fov in fovs:
+        meta_a = ma[fov]
+        meta_b = mb[fov]
+
+        if bool(meta_a.get("filter_neurons")) != bool(filter_neurons):
+            continue
+        if bool(meta_b.get("filter_neurons")) != bool(filter_neurons):
+            continue
+
+        # For traceability / alignment checks (optional, but recommended)
+        uids_a = np.asarray(meta_a.get("restrict_uids_used", []), dtype=object)
+        uids_b = np.asarray(meta_b.get("restrict_uids_used", []), dtype=object)
+        if uids_a.size and uids_b.size and (uids_a.shape != uids_b.shape or np.any(uids_a != uids_b)):
+            raise ValueError(f"{fov}: restrict_uids_used mismatch between eids; ordering not aligned.")
+
+        segs_a: list[np.ndarray] = []
+        segs_b: list[np.ndarray] = []
+
+        # Determine truncation lengths per ttype (shared across both eids) if cut_to_min
+        if cut_to_min:
+            min_len: Dict[str, int] = {}
+            for t in ref_ttypes:
+                Ta = int(meta_a["peth_shapes"][t][2])
+                Tb = int(meta_b["peth_shapes"][t][2])
+                min_len[t] = min(Ta, Tb)
+
+        for t in ref_ttypes:
+            Xa = np.load(dir_a / meta_a["peth_files"][t], mmap_mode="r")
+            Xb = np.load(dir_b / meta_b["peth_files"][t], mmap_mode="r")
+
+            Aa = _avg_trials(Xa, min_trials=min_trials)
+            Ab = _avg_trials(Xb, min_trials=min_trials)
+            if Aa is None or Ab is None:
+                # skip this FOV entirely if insufficient trials in any segment
+                segs_a = []
+                segs_b = []
+                break
+
+            if cut_to_min:
+                Tt = int(min_len[t])
+                Aa = Aa[:, :Tt]
+                Ab = Ab[:, :Tt]
+            else:
+                # require exact match across eids
+                if Aa.shape[1] != Ab.shape[1]:
+                    segs_a = []
+                    segs_b = []
+                    break
+
+            if Aa.shape[0] != Ab.shape[0]:
+                raise ValueError(f"{fov}/{t}: N mismatch after restriction: {Aa.shape[0]} != {Ab.shape[0]}")
+
+            segs_a.append(Aa)
+            segs_b.append(Ab)
+
+            del Xa, Xb
+
+        if not segs_a:
+            continue
+
+        Pa = np.concatenate(segs_a, axis=1).astype(np.float32, copy=False)  # (N,L)
+        Pb = np.concatenate(segs_b, axis=1).astype(np.float32, copy=False)
+
+        blocks_a.append(Pa)
+        blocks_b.append(Pb)
+
+        if uids_a.size:
+            uids_blocks.append(uids_a)
+        else:
+            # fall back to placeholders if uids are absent
+            uids_blocks.append(np.array([f"{fov}:roi{i:06d}" for i in range(Pa.shape[0])], dtype=object))
+
+        fov_blocks.append(np.array([fov] * Pa.shape[0], dtype=object))
+
+        del segs_a, segs_b, Pa, Pb
+        gc.collect()
+
+    if not blocks_a:
+        raise RuntimeError("No FOV blocks survived min_trials / shape checks.")
+
+    A = np.concatenate(blocks_a, axis=0)
+    B = np.concatenate(blocks_b, axis=0)
+    if A.shape != B.shape:
+        raise RuntimeError(f"Pair stacks shape mismatch: {A.shape} vs {B.shape}")
+
+    if zscore_before_corr:
+        Ause = _zscore_rows(A)
+        Buse = _zscore_rows(B)
+    else:
+        Ause = A
+        Buse = B
+
+    # per-row Pearson r
+    A0 = Ause - np.nanmean(Ause, axis=1, keepdims=True)
+    B0 = Buse - np.nanmean(Buse, axis=1, keepdims=True)
+    num = np.nansum(A0 * B0, axis=1)
+    den = np.sqrt(np.nansum(A0 * A0, axis=1) * np.nansum(B0 * B0, axis=1))
+    den = np.where(den == 0, np.nan, den)
+    r = (num / den).astype(np.float32)
+
+    uids_all = np.concatenate(uids_blocks, axis=0)
+    fov_all = np.concatenate(fov_blocks, axis=0)
+
+    out = {
+        "pair_dir": str(pair_dir),
+        "eid_a": eid_a,
+        "eid_b": eid_b,
+        "filter_neurons": bool(filter_neurons),
+        "min_trials": int(min_trials),
+        "cut_to_min": bool(cut_to_min),
+        "zscore_before_corr": bool(zscore_before_corr),
+        "ttypes": ref_ttypes,
+        "A": A.astype(np.float32, copy=False),
+        "B": B.astype(np.float32, copy=False),
+        "uids": uids_all,
+        "FOV": fov_all,
+        "corr_per_neuron": r,
+    }
+
+    out_path = pair_dir / out_name
+    np.save(out_path, out, allow_pickle=True)
+    return out
+
+
+def chronic_pair_feature_corr_subject(
+    subject: str,
+    *,
+    one: ONE | None = None,
+    trial_cuts_root: str | Path | None = None,
+    out_dir: str | Path | None = None,
+    filter_neurons: bool = True,
+    min_trials: int = 10,
+    pair_mode: str = "all",          # "all" | "consecutive"
+    cut_to_min: bool = True,
+    zscore_before_corr: bool = True,
+    rerun: bool = False,
+    roicat_root: str | Path = Path.home() / "chronic_csv",
+    server_root: str | Path | None = None,
+) -> pd.DataFrame:
+    """
+    For a given subject (e.g. 'SP058'):
+      - enumerate canonical mesoscope sessions for that subject
+      - for every EID pair:
+          - ensure restricted per-pair trial-cuts exist (computed if missing)
+          - load trial-cuts, trial-average, build per-neuron feature vectors
+          - compute per-neuron Pearson r between sessions
+      - return a tidy DataFrame with:
+          subject, pair_tag, eid_a, eid_b, FOV, uid, area, xyz_a*, xyz_b*,
+          per-ttype features (*_a, *_b), and corr
+
+    Caching:
+      - saves/loads a subject-level parquet under out_dir
+      - uses a separate folder tree under trial_cuts_root for pairwise cuts
+      - does NOT touch the existing meso "res" cache files.
+    """
+    if one is None:
+        one = ONE()
+
+    if trial_cuts_root is None:
+        # keep pairwise chronic products separate from existing pth_meso/res stacks
+        trial_cuts_root = Path(pth_meso, "trial_cuts_pairs")
+    else:
+        trial_cuts_root = Path(trial_cuts_root)
+    trial_cuts_root.mkdir(parents=True, exist_ok=True)
+
+    if out_dir is None:
+        out_dir = Path(pth_meso, "chronic_pair_corr")
+    else:
+        out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # ---------- subject-level cache ----------
+    cache_path = out_dir / (
+        f"chronic_corr_subject={subject}"
+        f"_filter={int(filter_neurons)}"
+        f"_mintrials={int(min_trials)}"
+        f"_pairs={pair_mode}"
+        f"_cutmin={int(cut_to_min)}"
+        f"_z={int(zscore_before_corr)}.parquet"
+    )
+
+    if cache_path.is_file() and (not rerun):
+        return pd.read_parquet(cache_path)
+
+    # ---------- get EIDs for subject ----------
+    subj2eids = _canonical_sessions_subject_map(one)
+    eids = [str(e) for e in subj2eids.get(subject, [])]
+    eids = [e for e in eids if e and e.lower() != "none"]
+
+    if len(eids) < 2:
+        raise ValueError(f"{subject}: need >=2 canonical sessions, got {len(eids)}.")
+
+    # chronological order
+    eids_sorted = sorted(eids, key=lambda e: (_eid_date(one, e), e))
+
+    if pair_mode == "consecutive":
+        pairs = [(eids_sorted[i], eids_sorted[i + 1]) for i in range(len(eids_sorted) - 1)]
+    elif pair_mode == "all":
+        pairs = list(combinations(eids_sorted, 2))
+    else:
+        raise ValueError("pair_mode must be 'all' or 'consecutive'.")
+
+    # ---------- helpers ----------
+    from meso_chronic import get_cluster_uids_neuronal_by_fov  # chronic-related; stays in meso_chronic.py
+
+    def _uid_first_index_map(u: np.ndarray) -> tuple[dict[str, int], np.ndarray]:
+        u = np.asarray(u, dtype=object)
+        if u.size == 0:
+            return {}, np.empty(0, dtype=object)
+        nz = (u != "")
+        if not np.any(nz):
+            return {}, np.empty(0, dtype=object)
+        u_nz = u[nz]
+        u_unique, idx_first = np.unique(u_nz, return_index=True)
+        idx_abs = np.flatnonzero(nz)[idx_first]
+        return {str(uid): int(ix) for uid, ix in zip(u_unique, idx_abs)}, u_unique.astype(object)
+
+    def _load_meta_dict(p: Path) -> dict:
+        obj = np.load(p, allow_pickle=True)
+        if isinstance(obj, np.ndarray) and obj.shape == ():
+            return obj.item()
+        if isinstance(obj, np.ndarray):
+            return obj.flat[0]
+        return obj
+
+    def _avg_trials_1bin(X_mnt: np.ndarray) -> np.ndarray | None:
+        """
+        Expect (M,N,1). Return (N,) trial-mean, or None if M < min_trials.
+        """
+        if X_mnt.ndim != 3 or X_mnt.shape[2] != 1:
+            raise ValueError(f"Expected (M,N,1), got {X_mnt.shape}")
+        if X_mnt.shape[0] < min_trials:
+            return None
+        return np.nanmean(X_mnt[:, :, 0], axis=0).astype(np.float32, copy=False)  # (N,)
+
+    def _zscore_rows(X: np.ndarray) -> np.ndarray:
+        X = np.asarray(X, dtype=np.float32)
+        mu = np.nanmean(X, axis=1, keepdims=True)
+        sd = np.nanstd(X, axis=1, keepdims=True)
+        sd = np.where(sd == 0, 1.0, sd)
+        return (X - mu) / sd
+
+    def _rowwise_pearson(A: np.ndarray, B: np.ndarray) -> np.ndarray:
+        """
+        A,B: (N,P). Returns r: (N,).
+        """
+        A = np.asarray(A, dtype=np.float32)
+        B = np.asarray(B, dtype=np.float32)
+        A0 = A - np.nanmean(A, axis=1, keepdims=True)
+        B0 = B - np.nanmean(B, axis=1, keepdims=True)
+        num = np.nansum(A0 * B0, axis=1)
+        den = np.sqrt(np.nansum(A0 * A0, axis=1) * np.nansum(B0 * B0, axis=1))
+        den = np.where(den == 0, np.nan, den)
+        return (num / den).astype(np.float32)
+
+    def _ensure_pair_cuts(eid_a: str, eid_b: str) -> Path | None:
+        """
+        Ensure restricted trial-cuts exist for this eid pair under:
+        trial_cuts_root/<subject>/<eidA>__<eidB>/<eidX>/
+
+        Returns
+        -------
+        pair_dir : Path
+            The pair directory if cuts exist (cached or newly computed).
+        None
+            If there are zero chronically tracked neurons across all overlapping FOVs.
+
+        Notes
+        -----
+        - Uses meso_chronic.match_tracked_indices_pair_per_fov as the source of truth
+        for per-FOV aligned indices and shared UIDs.
+        - Does NOT call save_trial_cuts_meso if total_shared == 0.
+        """
+        from meso_chronic import match_tracked_indices_pair_per_fov
+
+        pair_tag = f"{eid_a}__{eid_b}"
+        pair_dir = trial_cuts_root / subject / pair_tag
+        dir_a = pair_dir / eid_a
+        dir_b = pair_dir / eid_b
+        dir_a.mkdir(parents=True, exist_ok=True)
+        dir_b.mkdir(parents=True, exist_ok=True)
+
+        have_a = any(dir_a.glob(f"{eid_a}_FOV_*_meta_filter_*.npy"))
+        have_b = any(dir_b.glob(f"{eid_b}_FOV_*_meta_filter_*.npy"))
+        if have_a and have_b:
+            print(f"[chronic]   using cached trial cuts for {pair_tag}")
+            return pair_dir
+
+        # --- compute per-FOV chronic matches in the SAME index space as save_trial_cuts_meso ---
+        fov_match = match_tracked_indices_pair_per_fov(
+            one,
+            eid_a,
+            eid_b,
+            roicat_root=roicat_root,
+            server_root=server_root,
+            filter_neurons=filter_neurons,
+        )
+
+        restrict_a: dict[str, np.ndarray] = {}
+        restrict_b: dict[str, np.ndarray] = {}
+        uids_by_fov: dict[str, np.ndarray] = {}
+
+        total_shared = 0
+        for fov, m in fov_match.items():
+            restrict_a[fov] = m.idx_a
+            restrict_b[fov] = m.idx_b
+            uids_by_fov[fov] = m.shared_uids
+            total_shared += int(m.shared_uids.size)
+
+        # progress / diagnostics
+        print(f"[chronic]   {pair_tag}: shared neurons total={total_shared} across {len(fov_match)} FOVs")
+        for fov, m in fov_match.items():
+            if m.shared_uids.size:
+                print(f"[chronic]     {fov}: {int(m.shared_uids.size)}")
+
+        if total_shared == 0:
+            print(f"[chronic]   {pair_tag}: no shared neurons -> skip pair")
+            return None
+
+        # --- compute and save restricted trial cuts for both eids ---
+        print(f"[chronic]   computing trial cuts for {pair_tag}")
+        save_trial_cuts_meso(
+            eid_a,
+            filter_neurons=filter_neurons,
+            require_all=False,
+            out_dir=dir_a,
+            restrict=restrict_a,
+            restrict_uids=uids_by_fov,
+            pair_tag=pair_tag,
+        )
+        save_trial_cuts_meso(
+            eid_b,
+            filter_neurons=filter_neurons,
+            require_all=False,
+            out_dir=dir_b,
+            restrict=restrict_b,
+            restrict_uids=uids_by_fov,
+            pair_tag=pair_tag,
+        )
+
+        return pair_dir
+
+
+    # ---------- main loop ----------
+    rows: list[dict] = []
+
+    for ip, (eid_a, eid_b) in enumerate(pairs, start=1):
+        t_pair = time.time()
+        pair_tag = f"{eid_a}__{eid_b}"
+        print(f"[chronic] ({ip}/{len(pairs)}) pair {pair_tag}")
+
+        # ensure pair cuts exist (cached or computed)
+        pair_dir = _ensure_pair_cuts(eid_a, eid_b)
+        if pair_dir is None:
+            continue
+        dir_a = pair_dir / eid_a
+        dir_b = pair_dir / eid_b
+
+        metas_a = sorted(dir_a.glob(f"{eid_a}_FOV_*_meta_filter_*.npy"))
+        metas_b = sorted(dir_b.glob(f"{eid_b}_FOV_*_meta_filter_*.npy"))
+        if (not metas_a) or (not metas_b):
+            continue
+
+        ma = {(_load_meta_dict(p)["fov"]): _load_meta_dict(p) for p in metas_a}
+        mb = {(_load_meta_dict(p)["fov"]): _load_meta_dict(p) for p in metas_b}
+
+        fovs = sorted(set(ma.keys()) & set(mb.keys()))
+        if not fovs:
+            continue
+
+        # reference ttypes from first fov
+        ref_ttypes = list(ma[fovs[0]].get("trial_names", []))
+        if not ref_ttypes:
+            continue
+        if list(mb[fovs[0]].get("trial_names", [])) != ref_ttypes:
+            raise ValueError(f"{pair_tag}: trial_names mismatch between eids (meta inconsistency).")
+
+        for fov in fovs:
+            metaA = ma[fov]
+            metaB = mb[fov]
+
+            if bool(metaA.get("filter_neurons")) != bool(filter_neurons):
+                continue
+            if bool(metaB.get("filter_neurons")) != bool(filter_neurons):
+                continue
+
+            uidsA = np.asarray(metaA.get("restrict_uids_used", []), dtype=object)
+            uidsB = np.asarray(metaB.get("restrict_uids_used", []), dtype=object)
+            if uidsA.size == 0 or uidsB.size == 0:
+                # no chronic alignment recorded => skip (or enforce you always save restrict_uids_used)
+                continue
+            if uidsA.shape != uidsB.shape or np.any(uidsA != uidsB):
+                raise ValueError(f"{pair_tag} {fov}: restrict_uids_used mismatch between eids.")
+
+            areaA = np.asarray(metaA.get("region_labels", []), dtype=object)
+            areaB = np.asarray(metaB.get("region_labels", []), dtype=object)
+            xyzA = np.asarray(metaA.get("xyz", []), dtype=np.float32)
+            xyzB = np.asarray(metaB.get("xyz", []), dtype=np.float32)
+
+            if areaA.shape[0] != uidsA.shape[0] or areaB.shape[0] != uidsA.shape[0]:
+                raise ValueError(f"{pair_tag} {fov}: N mismatch between uids and region_labels.")
+            if xyzA.shape[0] != uidsA.shape[0] or xyzB.shape[0] != uidsA.shape[0]:
+                raise ValueError(f"{pair_tag} {fov}: N mismatch between uids and xyz.")
+            xyzA = xyzA[:, :3]
+            xyzB = xyzB[:, :3]
+
+            # build per-neuron feature vectors: (N, P) with P=len(ref_ttypes)
+            featsA: list[np.ndarray] = []
+            featsB: list[np.ndarray] = []
+
+            # (optional) cut_to_min is mostly irrelevant now since each segment is 1 bin,
+            # but we keep it for robustness if older files exist.
+            for t in ref_ttypes:
+                fpA = dir_a / metaA["peth_files"][t]
+                fpB = dir_b / metaB["peth_files"][t]
+                XA = np.load(fpA, mmap_mode="r")
+                XB = np.load(fpB, mmap_mode="r")
+
+                a = _avg_trials_1bin(XA)
+                b = _avg_trials_1bin(XB)
+                if a is None or b is None:
+                    featsA = []
+                    featsB = []
+                    break
+
+                if a.shape[0] != uidsA.shape[0] or b.shape[0] != uidsA.shape[0]:
+                    raise ValueError(f"{pair_tag} {fov} {t}: N mismatch in averaged features.")
+
+                featsA.append(a)
+                featsB.append(b)
+
+            if not featsA:
+                continue
+
+            A = np.stack(featsA, axis=1).astype(np.float32, copy=False)  # (N,P)
+            B = np.stack(featsB, axis=1).astype(np.float32, copy=False)
+
+            if zscore_before_corr:
+                Ause = _zscore_rows(A)
+                Buse = _zscore_rows(B)
+            else:
+                Ause, Buse = A, B
+
+            r = _rowwise_pearson(Ause, Buse)  # (N,)
+
+            # write rows (wide: one column per ttype per session)
+            for i in range(uidsA.shape[0]):
+                d = {
+                    "subject": subject,
+                    "pair_tag": pair_tag,
+                    "eid_a": eid_a,
+                    "eid_b": eid_b,
+                    "FOV": fov,
+                    "uid": uidsA[i],
+                    "area_a": areaA[i],
+                    "area_b": areaB[i],
+                    "x_a": float(xyzA[i, 0]),
+                    "y_a": float(xyzA[i, 1]),
+                    "z_a": float(xyzA[i, 2]),
+                    "x_b": float(xyzB[i, 0]),
+                    "y_b": float(xyzB[i, 1]),
+                    "z_b": float(xyzB[i, 2]),
+                    "corr": float(r[i]) if np.isfinite(r[i]) else np.nan,
+                }
+                for j, t in enumerate(ref_ttypes):
+                    d[f"{t}_a"] = float(A[i, j]) if np.isfinite(A[i, j]) else np.nan
+                    d[f"{t}_b"] = float(B[i, j]) if np.isfinite(B[i, j]) else np.nan
+                rows.append(d)
+
+        gc.collect()
+        print(
+            f"[chronic] ({ip}/{len(pairs)}) pair {pair_tag} "
+            f"done in {time.time() - t_pair:.1f}s"
+        )
+
+    if not rows:
+        raise RuntimeError(f"{subject}: no rows produced (no usable pairs/FOVs after filtering).")
+
+    df = pd.DataFrame(rows)
+
+    # stable sort for downstream
+    df.sort_values(["pair_tag", "FOV", "uid"], inplace=True, kind="mergesort", ignore_index=True)
+
+    df.to_parquet(cache_path, index=False)
+    return df
+
+#################
+'''
+stack all sessions
+'''
+#################
+
+
+
+
 def run_all(eids):
     """
     Run save_trial_cuts_meso() for all eids in canonical sessions.
     """
      
     if eids is None:
-        eids_all = get_canonical_sessions(one=one)
-        eids = eids_all
+        a = _canonical_sessions_subject_map(one)
+        eids = np.concatenate([a[k] for k in a])
 
     print(f"Processing {len(eids)} eids...")
 
@@ -972,8 +1711,8 @@ def regional_group_meso(
     stack_dir: str | Path | None = None,
     filter_neurons: bool = True,
     cv: bool = False,
-    nclus: int = 100,
-    nclus_rm: int | None = None,
+    nclus: int = 100,                 # KMeans n_clusters (ONLY affects mapping='kmeans')
+    nclus_rm: int = 100,              # Rastermap n_clusters (RM cache + isort for ALL mappings)
     grid_upsample: int = 0,
     locality: float = 0.75,
     time_lag_window: int = 5,
@@ -984,40 +1723,24 @@ def regional_group_meso(
     """
     Mesoscope analogue of `regional_group(...)`, using stack files created by `stack_trial_cuts_meso()`.
 
-    Inputs
-    ------
-    mapping : one of ['Beryl','Cosmos','rm','lz','fr','kmeans'].
-        - 'Beryl'/'Cosmos': remap region acronyms via `br` (recommended).
-        - 'rm'            : Rastermap cluster labels + isort (cached).
-        - 'kmeans'        : KMeans labels (cached) + also attaches Rastermap isort (cached).
-        - 'fr'/'lz'       : continuous colormaps over r['fr'] or r['lz'].
+    Mapping : one of ['Beryl','Cosmos','rm','lz','fr','kmeans','PCA'].
 
-    cv : if True
-        Loads:
-          - stack_all_filter{filter}.npy   -> used for returned `r['concat']` / `r['concat_z']`
-          - stack_even_filter{filter}.npy  -> used as TRAIN features for rm/kmeans
-          - stack_odd_filter{filter}.npy   -> saved/attached as `r['concat_odd']` (and z-scored)
-        and attaches:
-          r['concat_even'], r['concat_odd'], r['concat_z_even'], r['concat_z_odd'].
-        For fitting rm/kmeans, uses concat_z_even (train). Labels are always for ALL rows (using concat_z).
-
-    Notes
-    -----
-    - Assumes the meso stack dict has at least keys:
-        'ids','xyz','eid','FOV','ttypes','len','concat','concat_z','fr','lz'
-      as produced by your `stack_trial_cuts_meso`.
-    - If your `r['ids']` are already Beryl acronyms and you do not want remapping,
-      you can pass mapping='Beryl' with br=None, and it will just echo ids.
+    Policy (updated):
+      - nclus and nclus_rm are independent.
+      - RM cache filenames include nclus_rm.
+      - KMeans cache filenames include nclus_rm (even though labels don't depend on it).
+      - r['isort'] ALWAYS exists for any mapping:
+          * if mapping=='rm': r['isort'] is the RM ordering.
+          * else: r['isort'] is attached from RM cache; computed+saved if missing/invalid.
+        (This does NOT overwrite mapping-specific r['acs']/r['cols'] unless mapping=='rm'.)
     """
     mapping = str(mapping)
+    nclus = int(nclus)
+    nclus_rm = int(nclus_rm)
 
     # ---------- paths ----------
     if stack_dir is None:
-        # same root as your save_trial_cuts_meso() defaults: <one.cache_dir>/meso/trial_cuts
-        # stack_trial_cuts_meso saves stacks in trial_cuts_dir.parent == <one.cache_dir>/meso
-        # so here stack_dir should be <one.cache_dir>/meso
         try:
-            # expects you have `pth_meso` in scope (as in your code)
             stack_dir = Path(pth_meso)
         except NameError:
             raise NameError("stack_dir is None and pth_meso is not in scope. Pass stack_dir explicitly.")
@@ -1037,8 +1760,6 @@ def regional_group_meso(
     if not stack_all_path.is_file():
         raise FileNotFoundError(f"Missing meso stack: {stack_all_path}")
 
-
-
     r = _load_dict(stack_all_path)
 
     # enforce ordered 'len'
@@ -1054,12 +1775,10 @@ def regional_group_meso(
         r_even = _load_dict(stack_even_path)
         r_odd = _load_dict(stack_odd_path)
 
-        # minimal sanity: same ordering & same N
-        N = int(r["concat"].shape[0])
-        if int(r_even["concat"].shape[0]) != N or int(r_odd["concat"].shape[0]) != N:
+        N = int(np.asarray(r["concat"]).shape[0])
+        if int(np.asarray(r_even["concat"]).shape[0]) != N or int(np.asarray(r_odd["concat"]).shape[0]) != N:
             raise ValueError("even/odd stacks do not match N of all-stack (ordering mismatch).")
 
-        # z-score rows (consistent with your stack_trial_cuts_meso semantics)
         def _zscore_rows(X: np.ndarray) -> np.ndarray:
             X = np.asarray(X, dtype=np.float32)
             mu = np.nanmean(X, axis=1, keepdims=True)
@@ -1073,129 +1792,164 @@ def regional_group_meso(
     # ---------- common bookkeeping ----------
     if "xyz" not in r:
         raise KeyError("Saved stack lacks 'xyz'.")
-    r["nums"] = np.arange(r["xyz"].shape[0], dtype=int)
+    r["nums"] = np.arange(np.asarray(r["xyz"]).shape[0], dtype=int)
 
     feat_key = "concat_z"
     if feat_key not in r:
         raise KeyError(f"Saved stack lacks '{feat_key}'.")
 
-    # order signature: stable across caches for this stack ordering
+    n_rows = int(np.asarray(r[feat_key]).shape[0])
+
     r["_order_signature"] = (
         "|".join(f"{k}:{int(r['len'][k])}" for k in r.get("ttypes", []))
-        + f"|shape:{tuple(r[feat_key].shape)}"
+        + f"|shape:{tuple(np.asarray(r[feat_key]).shape)}"
     )
 
-    nclus_rm_eff = int(nclus) if nclus_rm is None else int(nclus_rm)
-
+    # ---------- cache paths ----------
     def _cache_path(kind: str) -> Path:
-        # include only what matters for that cache
+        # RM filenames depend on nclus_rm only
         if kind == "rm":
-            base = f"meso_rm_filter{bool(filter_neurons)}_cv{bool(cv)}_n{int(nclus_rm_eff)}"
+            base = f"meso_rm_filter{bool(filter_neurons)}_cv{bool(cv)}_nclusrm{nclus_rm}"
             return cache_dir / (base + ".npy")
+
+        # KMeans filenames include nclus_rm by policy (even though labels don't depend on it)
         if kind == "kmeans":
-            base = f"meso_kmeans_filter{bool(filter_neurons)}_cv{bool(cv)}_n{int(nclus)}"
+            base = f"meso_kmeans_filter{bool(filter_neurons)}_cv{bool(cv)}_n{nclus}_nclusrm{nclus_rm}"
             return cache_dir / (base + ".npy")
+
+        if kind == "pca":
+            base = f"meso_pca_filter{bool(filter_neurons)}_cv{bool(cv)}"
+            return cache_dir / (base + ".npy")
+
         raise ValueError(kind)
 
-    def _try_load_cache(p: Path) -> dict | None:
-        if (not rerun) and p.is_file():
-            try:
-                d = np.load(p, allow_pickle=True).flat[0]
-                return d if isinstance(d, dict) else None
-            except Exception:
-                return None
-        return None
+    # ---------- helpers ----------
+    def _try_load_dict(p: Path) -> dict | None:
+        if rerun or (not p.is_file()):
+            return None
+        try:
+            d = np.load(p, allow_pickle=True).flat[0]
+            return d if isinstance(d, dict) else None
+        except Exception:
+            return None
 
-    def _tab20_repeat(labels: np.ndarray) -> np.ndarray:
+    def _tab20_color_map_for_labels(labels: np.ndarray) -> tuple[np.ndarray, dict]:
+        labels = np.asarray(labels, dtype=int).reshape(-1)
+        unique_sorted = np.sort(np.unique(labels))
         cmap = mpl.colormaps["tab20"]
-        idx = (labels.astype(int) % 20)
-        return cmap(idx)
+        u_to_idx = {u: (i % 20) for i, u in enumerate(unique_sorted)}
+        color_map = {u: cmap(u_to_idx[u]) for u in unique_sorted}
+        cols = np.array([color_map[int(c)] for c in labels], dtype=np.float32)
+        return cols, color_map
 
-    # ---------- mapping ----------
-    if mapping == "rm":
-        rm_cache_path = _cache_path("rm")
-        cached = _try_load_cache(rm_cache_path)
+    def _load_rm_cache(p: Path) -> tuple[np.ndarray | None, np.ndarray | None]:
+        cached = _try_load_dict(p)
+        if cached is None:
+            return None, None
+        try:
+            if not (
+                cached.get("order_sig") == r["_order_signature"]
+                and cached.get("nclus_rm") == nclus_rm
+                and "rm_labels" in cached
+                and "isort" in cached
+            ):
+                return None, None
 
-        labels = None
-        isort = None
-        if cached is not None and (
-            cached.get("order_sig") == r["_order_signature"]
-            and cached.get("nclus_rm") == int(nclus_rm_eff)
-            and "rm_labels" in cached
-            and "isort" in cached
-        ):
             labels = np.asarray(cached["rm_labels"], dtype=int).reshape(-1)
             isort = np.asarray(cached["isort"], dtype=int).reshape(-1)
-            if labels.shape[0] != r[feat_key].shape[0] or isort.shape[0] != r[feat_key].shape[0]:
-                labels, isort = None, None
+            if labels.shape[0] != n_rows or isort.shape[0] != n_rows:
+                return None, None
+            return labels, isort
+        except Exception:
+            return None, None
 
+    def _compute_and_save_rm(p: Path) -> tuple[np.ndarray, np.ndarray]:
+        feat_fit = "concat_z_even" if cv else feat_key
+        if feat_fit not in r:
+            raise KeyError(f"Feature '{feat_fit}' missing; need it for Rastermap fit.")
+
+        model = Rastermap(
+            n_PCs=200,
+            n_clusters=nclus_rm,
+            grid_upsample=grid_upsample,
+            locality=locality,
+            time_lag_window=time_lag_window,
+            bin_size=1,
+            symmetric=symmetric,
+        ).fit(np.asarray(r[feat_fit]))
+
+        labels = np.asarray(model.embedding_clust, dtype=int)
+        if labels.ndim > 1:
+            labels = labels[:, 0]
+        labels = labels.reshape(-1)
+
+        isort = np.asarray(model.isort, dtype=int).reshape(-1)
+
+        if labels.shape[0] != n_rows or isort.shape[0] != n_rows:
+            raise ValueError("Rastermap outputs do not match all-stack length.")
+
+        np.save(
+            p,
+            {
+                "rm_labels": labels,
+                "isort": isort,
+                "order_sig": r["_order_signature"],
+                "nclus_rm": nclus_rm,
+            },
+            allow_pickle=True,
+        )
+        return labels, isort
+
+    def _ensure_rm_isort_attached() -> None:
+        """Always attach r['isort'] from RM cache; compute+save if missing/invalid."""
+        rm_cache_path = _cache_path("rm")
+        labels_rm, isort_rm = _load_rm_cache(rm_cache_path)
+        if labels_rm is None or isort_rm is None:
+            labels_rm, isort_rm = _compute_and_save_rm(rm_cache_path)
+        r["isort"] = isort_rm  # do not overwrite r['acs']/r['cols'] here
+
+    # ---------- mapping branches ----------
+    if mapping == "rm":
+        rm_cache_path = _cache_path("rm")
+        labels, isort = _load_rm_cache(rm_cache_path)
         if labels is None or isort is None:
-            feat_fit = "concat_z_even" if cv else feat_key
-            if feat_fit not in r:
-                raise KeyError(f"Feature '{feat_fit}' missing; need it for rm fit.")
+            labels, isort = _compute_and_save_rm(rm_cache_path)
 
-            model = Rastermap(
-                n_PCs=200,
-                n_clusters=int(nclus_rm_eff),
-                grid_upsample=grid_upsample,
-                locality=locality,
-                time_lag_window=time_lag_window,
-                bin_size=1,
-                symmetric=symmetric,
-            ).fit(r[feat_fit])
-
-            labels = np.asarray(model.embedding_clust, dtype=int)
-            if labels.ndim > 1:
-                labels = labels[:, 0]
-            isort = np.asarray(model.isort, dtype=int).reshape(-1)
-
-            if labels.shape[0] != r[feat_key].shape[0] or isort.shape[0] != r[feat_key].shape[0]:
-                raise ValueError("Rastermap outputs do not match all-stack length.")
-
-            np.save(
-                rm_cache_path,
-                {
-                    "rm_labels": labels,
-                    "isort": isort,
-                    "order_sig": r["_order_signature"],
-                    "nclus_rm": int(nclus_rm_eff),
-                },
-                allow_pickle=True,
-            )
-
-        cols = _tab20_repeat(labels)
-        regs = np.unique(labels)
-        color_map = {reg: cols[labels == reg][0] for reg in regs}
-        r["els"] = [Line2D([0], [0], color=color_map[reg], lw=4, label=f"{reg}") for reg in regs]
+        cols, color_map = _tab20_color_map_for_labels(labels)
+        r["els"] = [Line2D([0], [0], color=color_map[u], lw=4, label=f"{u}") for u in np.sort(np.unique(labels))]
         r["acs"] = labels
         r["cols"] = cols
         r["isort"] = isort
 
     elif mapping == "kmeans":
         km_cache_path = _cache_path("kmeans")
-        cached = _try_load_cache(km_cache_path)
+        cached = _try_load_dict(km_cache_path)
 
-        clusters = None
         feat_fit = "concat_z_even" if cv else feat_key
         if feat_fit not in r:
             raise KeyError(f"Feature '{feat_fit}' missing; need it for kmeans fit.")
 
-        if cached is not None and (
-            cached.get("order_sig") == r["_order_signature"]
-            and cached.get("feat_fit") == feat_fit
-            and cached.get("nclus") == int(nclus)
-            and "kmeans_labels" in cached
-        ):
-            clusters = np.asarray(cached["kmeans_labels"], dtype=int).reshape(-1)
-            if clusters.shape[0] != r[feat_key].shape[0]:
+        clusters = None
+        if cached is not None:
+            try:
+                if (
+                    cached.get("order_sig") == r["_order_signature"]
+                    and cached.get("feat_fit") == feat_fit
+                    and cached.get("nclus") == nclus
+                    and "kmeans_labels" in cached
+                ):
+                    clusters = np.asarray(cached["kmeans_labels"], dtype=int).reshape(-1)
+                    if clusters.shape[0] != n_rows:
+                        clusters = None
+            except Exception:
                 clusters = None
 
         if clusters is None:
-            km = KMeans(n_clusters=int(nclus), random_state=0)
-            km.fit(r[feat_fit])
-            clusters = km.predict(r[feat_key]).astype(int)
+            km = KMeans(n_clusters=nclus, random_state=0)
+            km.fit(np.asarray(r[feat_fit]))
+            clusters = km.predict(np.asarray(r[feat_key])).astype(int).reshape(-1)
 
-            if clusters.shape[0] != r[feat_key].shape[0]:
+            if clusters.shape[0] != n_rows:
                 raise ValueError("KMeans labels do not match all-stack length.")
 
             np.save(
@@ -1204,59 +1958,71 @@ def regional_group_meso(
                     "kmeans_labels": clusters,
                     "order_sig": r["_order_signature"],
                     "feat_fit": feat_fit,
-                    "nclus": int(nclus),
+                    "nclus": nclus,
                 },
                 allow_pickle=True,
             )
 
-        cols = _tab20_repeat(clusters)
-        regs = np.unique(clusters)
-        color_map = {reg: cols[clusters == reg][0] for reg in regs}
-        r["els"] = [Line2D([0], [0], color=color_map[reg], lw=4, label=f"{reg + 1}") for reg in regs]
+        cols, color_map = _tab20_color_map_for_labels(clusters)
+        r["els"] = [Line2D([0], [0], color=color_map[u], lw=4, label=f"{u + 1}") for u in np.sort(np.unique(clusters))]
         r["acs"] = clusters
         r["cols"] = cols
 
-        # attach Rastermap ordering too (cached in the rm cache, computed if missing)
-        rm_cache_path = _cache_path("rm")
-        cached_rm = _try_load_cache(rm_cache_path)
-        isort = None
-        if cached_rm is not None and (
-            cached_rm.get("order_sig") == r["_order_signature"]
-            and cached_rm.get("nclus_rm") == int(nclus_rm_eff)
-            and "isort" in cached_rm
-        ):
-            isort = np.asarray(cached_rm["isort"], dtype=int).reshape(-1)
-            if isort.shape[0] != r[feat_key].shape[0]:
-                isort = None
+        # always attach RM ordering
+        _ensure_rm_isort_attached()
 
-        if isort is None:
-            model = Rastermap(
-                n_PCs=200,
-                n_clusters=int(nclus_rm_eff),
-                grid_upsample=grid_upsample,
-                locality=locality,
-                time_lag_window=time_lag_window,
-                bin_size=1,
-                symmetric=symmetric,
-            ).fit(r[feat_fit])
+    elif mapping == "PCA":
+        from sklearn.decomposition import PCA
 
-            isort = np.asarray(model.isort, dtype=int).reshape(-1)
-            labels_rm = np.asarray(model.embedding_clust, dtype=int)
-            if labels_rm.ndim > 1:
-                labels_rm = labels_rm[:, 0]
+        pca_cache_path = _cache_path("pca")
+        cached = _try_load_dict(pca_cache_path)
+
+        X = np.asarray(r[feat_key], dtype=np.float32)
+        if X.ndim != 2:
+            raise ValueError(f"{feat_key} must be 2D (cells × features); got {X.shape}.")
+
+        scores = None
+        evr = None
+        if cached is not None:
+            try:
+                if cached.get("order_sig") == r["_order_signature"] and cached.get("feat_key") == feat_key and "scores" in cached:
+                    scores = np.asarray(cached["scores"], dtype=np.float32)
+                    if scores.shape != (n_rows, 3):
+                        scores = None
+                    evr = cached.get("explained_variance_ratio", None)
+            except Exception:
+                scores = None
+                evr = None
+
+        if scores is None:
+            pca = PCA(n_components=3, svd_solver="randomized", random_state=0)
+            scores = pca.fit_transform(X).astype(np.float32, copy=False)
+            evr = np.asarray(pca.explained_variance_ratio_, dtype=np.float32)
 
             np.save(
-                rm_cache_path,
+                pca_cache_path,
                 {
-                    "rm_labels": labels_rm,
-                    "isort": isort,
+                    "scores": scores,
                     "order_sig": r["_order_signature"],
-                    "nclus_rm": int(nclus_rm_eff),
+                    "feat_key": feat_key,
+                    "explained_variance_ratio": evr,
                 },
                 allow_pickle=True,
             )
 
-        r["isort"] = isort
+        lo = np.nanpercentile(scores, 1.0, axis=0)
+        hi = np.nanpercentile(scores, 99.0, axis=0)
+        denom = np.where((hi - lo) > 0, (hi - lo), 1.0)
+        rgb = np.clip((scores - lo) / denom, 0.0, 1.0).astype(np.float32, copy=False)
+        rgba = np.concatenate([rgb, np.ones((n_rows, 1), dtype=np.float32)], axis=1)
+
+        r["acs"] = np.zeros((n_rows,), dtype=int)
+        r["cols"] = rgba
+        r["els"] = []
+        r["pca3"] = scores
+        r["pca_explained_variance_ratio"] = evr
+
+        _ensure_rm_isort_attached()
 
     elif mapping == "fr":
         if "fr" not in r:
@@ -1267,6 +2033,8 @@ def regional_group_meso(
         r["acs"] = np.asarray(r.get("ids", []), dtype=object)
         r["cols"] = cmap(norm(scaled))
 
+        _ensure_rm_isort_attached()
+
     elif mapping == "lz":
         if "lz" not in r:
             raise KeyError("Saved stack lacks 'lz'.")
@@ -1276,23 +2044,21 @@ def regional_group_meso(
         r["acs"] = np.asarray(r.get("ids", []), dtype=object)
         r["cols"] = cmap(norm(scaled))
 
+        _ensure_rm_isort_attached()
+
     elif mapping in ("Beryl", "Cosmos"):
         acs_in = np.asarray(r.get("ids", []), dtype=object)
 
-        # If `br` is provided, remap acronyms via id space.
         if br is not None:
-            # acronym -> id -> acronym(mapping=...)
             ids_num = br.acronym2id(acs_in)
             acs = np.asarray(br.id2acronym(ids_num, mapping=mapping), dtype=object)
         else:
-            # fall back: just echo ids (common if ids already Beryl acronyms)
             acs = acs_in
 
         if pal is None:
-            raise ValueError("For mapping in {'Beryl','Cosmos'} you must pass a palette dict `pal` (acronym->color).")
+            raise ValueError("For mapping in {'Beryl','Cosmos'} you must have palette dict `pal` (acronym->color).")
 
         r["acs"] = acs
-        # unknown regions -> gray
         r["cols"] = np.array([pal.get(a, (0.5, 0.5, 0.5, 1.0)) for a in acs], dtype=object)
 
         regsC = Counter(acs)
@@ -1301,22 +2067,51 @@ def regional_group_meso(
             for reg in regsC
         ]
 
-    else:
-        raise ValueError("mapping must be one of ['Beryl','Cosmos','rm','lz','fr','kmeans'].")
+        _ensure_rm_isort_attached()
 
+    else:
+        raise ValueError("mapping must be one of ['Beryl','Cosmos','rm','lz','fr','kmeans','PCA'].")
+
+    # Always attach Beryl acronyms as r['Beryl'] for convenience
     acs_in = np.asarray(r.get("ids", []), dtype=object)
-
-    # If `br` is provided, remap acronyms via id space.
     if br is not None:
-        # acronym -> id -> acronym(mapping=...)
         ids_num = br.acronym2id(acs_in)
-        r['Beryl'] = np.asarray(br.id2acronym(ids_num, mapping='Beryl'), dtype=object)
+        r["Beryl"] = np.asarray(br.id2acronym(ids_num, mapping="Beryl"), dtype=object)
     else:
-        # fall back: just echo ids (common if ids already Beryl acronyms)
-        r['Beryl'] = acs_in
-     
+        r["Beryl"] = acs_in
+
+    # Final guarantee: r['isort'] exists even if a future mapping branch forgets to call _ensure_rm_isort_attached()
+    if "isort" not in r:
+        _ensure_rm_isort_attached()
 
     return r
+
+
+
+
+
+######################################################
+###########  plotting
+######################################################
+
+
+def _override_cols_tab20(r, *, key_labels: str = "acs", key_cols: str = "cols") -> None:
+    """
+    In-place override of r[key_cols] with repeating tab20 colors keyed by r[key_labels] categories.
+    Produces RGBA float32 in [0,1].
+    """
+    if key_labels not in r:
+        raise KeyError(f"r lacks '{key_labels}'")
+    labels = np.asarray(r[key_labels], dtype=object)
+
+    # stable category order by first occurrence
+    _, first_idx = np.unique(labels, return_index=True)
+    cats = labels[np.sort(first_idx)]
+
+    cmap = mpl.colormaps["tab20"]
+    cat2rgba = {cat: np.array(cmap(i % 20), dtype=np.float32) for i, cat in enumerate(cats)}
+    r[key_cols] = np.stack([cat2rgba[l] for l in labels], axis=0).astype(np.float32, copy=False)
+
 
 
 def plot_rastermap_meso(
@@ -1785,227 +2580,57 @@ def plot_cluster_mean_PETHs_meso(
     plt.show()
 
 
-def plot_xy_datashader(
-    mapping: str = "kmeans",
-    nclus: int = 20,
-    feat: str | None = None,
-    cv: bool = False,
-    agg: str = "count",
-    width: int = 900,
-    height: int = 900,
-    xlim=None,
-    ylim=None,
-    background: str = "white",
-    alpha: int = 255,
-    color_key: dict | None = None,
-    cmap=None,
-    how: str = "eq_hist",
-    export_png: str | None = None,
-):
-    """
-    Fast 2D rendering of many points using datashader from a regional_group-style dict.
-
-    Expects r to contain at least:
-      r['xyz'] : (N,3) or (N,>=2) array (x,y, z...)
-    And optionally (depending on mapping):
-      r['acs']   : (N,) cluster labels (ints or strings)
-      r['ids']   : (N,) region labels (strings)
-      r['cols']  : (N,) per-point colors (hex strings or RGBA tuples)
-      r[feat]    : (N,) numeric values for continuous shading
-
-    Parameters
-    ----------
-    mapping:
-      - "none" / "count": density image (counts)
-      - "acs": categorical by r['acs']
-      - "ids": categorical by r['ids'] (or region labels)
-      - "cols": categorical using r['acs'] (or r['ids']) but colored by r['cols']
-      - "feat": continuous color by r[feat] (requires feat)
-    agg:
-      - "count" (default), "mean", "sum", "max", "min" (used only for continuous when mapping='feat')
-    how:
-      - datashader transfer function for normalization: "eq_hist", "log", "cbrt", or None
-
-    Returns
-    -------
-    img : datashader.transfer_functions.Image (PIL-like)
-    """
-
-    r = regional_group_meso(
-            mapping=mapping,               # keep same semantics as your pipeline
-            cv=cv,
-            nclus=nclus,
-        )
-
-    xyz = np.asarray(r["xyz"])
-    if xyz.ndim != 2 or xyz.shape[1] < 2:
-        raise ValueError(f"r['xyz'] must be (N,>=2), got {xyz.shape}")
-
-    x = xyz[:, 0].astype(np.float32, copy=False)
-    y = xyz[:, 1].astype(np.float32, copy=False)
-
-    df = pd.DataFrame({"x": x, "y": y})
-
-    # ---- choose category / value columns ----
-    mode = mapping.lower()
-
-    cat_col = None
-    val_col = None
-
-    if mode in ("none", "count"):
-        pass
-
-    elif mode == "acs":
-        if "acs" not in r:
-            raise KeyError("mapping='acs' requires r['acs']")
-        df["cat"] = pd.Categorical(np.asarray(r["acs"]).astype(str))
-        cat_col = "cat"
-
-    elif mode == "ids":
-        if "ids" not in r:
-            raise KeyError("mapping='ids' requires r['ids']")
-        df["cat"] = pd.Categorical(np.asarray(r["ids"]).astype(str))
-        cat_col = "cat"
-
-    elif mode == "cols":
-        # use labels from acs if present else ids; colors come from r['cols']
-        if "cols" not in r:
-            raise KeyError("mapping='cols' requires r['cols']")
-        if "acs" in r:
-            labels = np.asarray(r["acs"]).astype(str)
-        elif "ids" in r:
-            labels = np.asarray(r["ids"]).astype(str)
-        else:
-            raise KeyError("mapping='cols' requires r['acs'] or r['ids'] to define categories")
-
-        cols = np.asarray(r["cols"])
-        if cols.shape[0] != labels.shape[0]:
-            raise ValueError(f"r['cols'] length {cols.shape[0]} != labels length {labels.shape[0]}")
-
-        df["cat"] = pd.Categorical(labels)
-        cat_col = "cat"
-
-        # build color_key from first occurrence per category if not provided
-        if color_key is None:
-            color_key = {}
-            for lab, col in zip(labels, cols):
-                if lab not in color_key:
-                    # accept hex strings; if RGBA tuples, convert to hex-ish via matplotlib if available
-                    if isinstance(col, str):
-                        color_key[lab] = col
-                    else:
-                        try:
-                            from matplotlib.colors import to_hex
-                            color_key[lab] = to_hex(col)
-                        except Exception:
-                            # fall back: datashader may accept tuples
-                            color_key[lab] = col
-
-    elif mode == "feat":
-        if feat is None:
-            raise ValueError("mapping='feat' requires feat='name_in_r'")
-        if feat not in r:
-            raise KeyError(f"feat='{feat}' not in r")
-        v = np.asarray(r[feat]).astype(np.float32, copy=False)
-        if v.ndim != 1 or v.shape[0] != df.shape[0]:
-            raise ValueError(f"r[{feat}] must be (N,), got {v.shape}")
-        df["v"] = v
-        val_col = "v"
-
-    else:
-        raise ValueError("mapping must be one of: 'count','acs','ids','cols','feat'")
-
-    # ---- canvas ----
-    cvs = ds.Canvas(
-        plot_width=int(width),
-        plot_height=int(height),
-        x_range=xlim,
-        y_range=ylim,
-    )
-
-    # ---- aggregate ----
-    if cat_col is not None:
-        agg_img = cvs.points(df, "x", "y", ds.count_cat(cat_col))
-        img = tf.shade(agg_img, color_key=color_key, how=how, min_alpha=0, alpha=alpha)
-        img = tf.set_background(img, background)
-    else:
-        if val_col is None:
-            agg_img = cvs.points(df, "x", "y", ds.count())
-            img = tf.shade(agg_img, how=how, cmap=cmap, alpha=alpha)
-            img = tf.set_background(img, background)
-        else:
-            # continuous aggregation
-            agg_fun = agg.lower()
-            if agg_fun == "mean":
-                red = ds.mean(val_col)
-            elif agg_fun == "sum":
-                red = ds.sum(val_col)
-            elif agg_fun == "max":
-                red = ds.max(val_col)
-            elif agg_fun == "min":
-                red = ds.min(val_col)
-            elif agg_fun == "count":
-                red = ds.count()
-            else:
-                raise ValueError("agg must be one of: count, mean, sum, max, min")
-            agg_img = cvs.points(df, "x", "y", red)
-            img = tf.shade(agg_img, how=how, cmap=cmap, alpha=alpha)
-            img = tf.set_background(img, background)
-
-    if export_png is not None:
-        img.to_pil().save(export_png)
-
-
-
-
-def plot_xy_meso_png(
+def plot_xy_meso(
     mapping: str = "kmeans",
     *,
+    # ---- shared loading/behavior ----
+    tab20_colors: bool = False,
     nclus: int = 100,
     cv: bool = False,
-    savepath: str | Path | None = None,   # default handled below
-    dpi: int | None = None,
     xcol: int = 0,
     ycol: int = 1,
     to_mm: bool = True,
-    width: int = 3000,
-    height: int = 2500,
-    background: str = "white",
-    how: str = "eq_hist",
-    point_size: int = 1,
-    x_range=None,
-    y_range=None,
     stack_dir=None,
     cache_dir=None,
     filter_neurons: bool = True,
+    background: str = "white",
+    # ---- datoviz (always runs) ----
+    dv_point_size: float = 3.0,
+    dv_width: int = 1200,
+    dv_height: int = 900,
+    # ---- optional PNG save (datashader) ----
+    save_png: bool = False,                 # NEW: optional static save
+    savepath: str | Path | None = None,     # default handled below (only if save_png)
+    dpi: int | None = None,
+    png_width: int = 3000,
+    png_height: int = 2500,
+    how: str = "eq_hist",
+    png_point_size: int = 1,                # spread px
+    x_range=None,
+    y_range=None,
     title: str | None = None,
     title_color=(0, 0, 0),
     title_xy=(20, 20),
     title_fontsize: int = 28,
 ):
     """
-    Save a static PNG of mesoscope XY locations rasterized with Datashader.
+    Mesoscope XY visualization with:
+      1) Datoviz interactive scatter ALWAYS shown.
+      2) Optional static PNG save via Datashader (save_png=True).
 
-    Default save location:
+    Data loading and preprocessing are shared between both outputs:
+      - single call to regional_group_meso(...)
+      - optional _override_cols_tab20(r)
+      - same x/y extraction and scaling
+      - same colors taken from r['cols'] (RGBA floats in [0,1])
+
+    Default PNG save location (if save_png and savepath is None):
         pth_meso / 'figs' / f'xy_{mapping}_nclus{nclus}_cv{cv}.png'
     """
+    from pathlib import Path
+    import numpy as np
 
-    # ---------- default save path ----------
-    if savepath is None:
-        try:
-            base = Path(pth_meso) / "figs"
-        except NameError:
-            raise NameError(
-                "pth_meso is not defined. Either define pth_meso or pass savepath explicitly."
-            )
-
-        base.mkdir(parents=True, exist_ok=True)
-        savepath = base / f"xy_{mapping}_nclus{int(nclus)}_cv{bool(cv)}.png"
-    else:
-        savepath = Path(savepath)
-
-
-    # ---------- load ----------
+    # ---------- load once ----------
     r = regional_group_meso(
         mapping,
         stack_dir=stack_dir,
@@ -2019,155 +2644,159 @@ def plot_xy_meso_png(
         if k not in r:
             raise KeyError(f"regional_group_meso output must contain key '{k}'.")
 
+    if tab20_colors:
+        _override_cols_tab20(r)
+
     xyz = np.asarray(r["xyz"])
     scale = 1000.0 if to_mm else 1.0
-    x = (xyz[:, xcol] / scale).astype(np.float32, copy=False)
-    y = (xyz[:, ycol] / scale).astype(np.float32, copy=False)
+
+    # Datoviz build you used requires float64 for axes.normalize
+    x64 = (xyz[:, xcol] / scale).astype(np.float64, copy=False)
+    y64 = (xyz[:, ycol] / scale).astype(np.float64, copy=False)
+
+    # Keep float32 copies too (useful for datashader / dataframe; and cheaper)
+    x32 = x64.astype(np.float32, copy=False)
+    y32 = y64.astype(np.float32, copy=False)
 
     labels = np.asarray(r["acs"])
     cols = np.asarray(r["cols"], dtype=np.float32)
-    if cols.shape[1] != 4:
-        raise ValueError("r['cols'] must be (N,4) RGBA.")
+    if cols.ndim != 2 or cols.shape[1] != 4:
+        raise ValueError("r['cols'] must be (N,4) RGBA floats.")
 
-    N = int(x.shape[0])
+    # RGBA uint8 for Datoviz
+    color_u8 = np.clip(np.round(cols * 255.0), 0, 255).astype(np.uint8, copy=False)
+    color_u8[:, 3] = 255
+
+    N = int(x64.shape[0])
 
     if title is None:
-        title = f"mapping={mapping}   nclus={nclus}   cv={cv}   N={N}"
+        title = f"mapping={mapping}   nclus={int(nclus)}   cv={bool(cv)}   N={N}"
 
-    if x_range is None:
-        x_range = (float(np.nanmin(x)), float(np.nanmax(x)))
-    if y_range is None:
-        y_range = (float(np.nanmin(y)), float(np.nanmax(y)))
+    # Common bounds for both outputs (unless overridden for PNG)
+    xlim = (float(np.nanmin(x64)), float(np.nanmax(x64)))
+    ylim = (float(np.nanmin(y64)), float(np.nanmax(y64)))
 
-    # ---------- color key (fast, first occurrence per label) ----------
-    s = pd.Series(labels)
-    first_idx = s.groupby(s, sort=False).head(1).index.to_numpy()
-    uniq = s.iloc[first_idx].to_numpy()
-
-    color_key = {}
-    for idx, lab in zip(first_idx, uniq):
-        rgba8 = np.clip(np.round(cols[int(idx)] * 255), 0, 255).astype(np.uint8)
-        color_key[lab] = "#{:02x}{:02x}{:02x}".format(*rgba8[:3])
-
-    df = pd.DataFrame(
-        dict(
-            x=x,
-            y=y,
-            label=pd.Categorical(labels, categories=pd.Index(uniq)),
-        )
-    )
-
-    # ---------- rasterize ----------
-    cvs = ds.Canvas(
-        plot_width=int(width),
-        plot_height=int(height),
-        x_range=x_range,
-        y_range=y_range,
-    )
-
-    agg = cvs.points(df, "x", "y", agg=ds.count_cat("label"))
-    img = tf.shade(agg, color_key=color_key, how=how)
-
-    # point size (spread)
-    if point_size > 1:
-        img = tf.spread(img, px=int(point_size))
-
-    if background is not None:
-        img = tf.set_background(img, background)
-
-    # ---------- title annotation via PIL ----------
-    pil = img.to_pil()
-    draw = ImageDraw.Draw(pil)
-
+    # =========================
+    # 1) Datoviz interactive (ALWAYS)
+    # =========================
     try:
-        font = ImageFont.truetype("DejaVuSans.ttf", title_fontsize)
-    except Exception:
-        font = ImageFont.load_default()
+        import datoviz as dv
+    except Exception as e:
+        raise ImportError(
+            "Datoviz is required for plot_xy_meso (datoviz always runs here). "
+            "Install with: pip install datoviz"
+        ) from e
 
-    draw.text(tuple(title_xy), title, fill=title_color, font=font)
-
-    # ---------- save ----------
-    if dpi is None:
-        pil.save(savepath, format="PNG", optimize=True)
-    else:
-        meta = PngImagePlugin.PngInfo()
-        meta.add_text("dpi", str(int(dpi)))
-        pil.save(
-            savepath,
-            format="PNG",
-            optimize=True,
-            dpi=(int(dpi), int(dpi)),
-            pnginfo=meta,
-        )
-
-    print(f"Saved PNG → {savepath}")
-
-
-
-import numpy as np
-import datoviz as dv
-
-
-def plot_xy_datoviz(
-    mapping: str = "kmeans",
-    *,
-    nclus: int = 100,
-    cv: bool = False,
-    xcol: int = 0,
-    ycol: int = 1,
-    to_mm: bool = True,
-    stack_dir=None,
-    cache_dir=None,
-    filter_neurons: bool = True,
-    point_size: float = 3.0,
-    width: int = 1200,
-    height: int = 900,
-    background: str = "white",
-):
-    r = regional_group_meso(
-        mapping,
-        stack_dir=stack_dir,
-        cache_dir=cache_dir,
-        filter_neurons=filter_neurons,
-        cv=cv,
-        nclus=nclus,
-    )
-
-    xyz = np.asarray(r["xyz"], dtype=np.float32)
-    scale = 1000.0 if to_mm else 1.0
-
-    # IMPORTANT: axes.normalize requires float64 in this datoviz build
-    x = (xyz[:, xcol] / scale).astype(np.float64, copy=False)
-    y = (xyz[:, ycol] / scale).astype(np.float64, copy=False)
-
-    col = np.asarray(r["cols"], dtype=np.float32)
-    if col.ndim != 2 or col.shape[1] != 4:
-        raise ValueError("r['cols'] must be RGBA (N,4).")
-
-    color = np.clip(np.round(col * 255.0), 0, 255).astype(np.uint8, copy=False)
-    color[:, 3] = 255  # opaque
-
-    n = x.shape[0]
-    size = np.full(n, float(point_size), dtype=np.float32)
-
-    xlim = (float(np.nanmin(x)), float(np.nanmax(x)))
-    ylim = (float(np.nanmin(y)), float(np.nanmax(y)))
-
-    app = dv.App(background=background)
-    fig = app.figure(int(width), int(height))
+    app = dv.App(background=str(background))
+    fig = app.figure(int(dv_width), int(dv_height))
     panel = fig.panel()
     axes = panel.axes(xlim, ylim)
 
-    pos_ndc = axes.normalize(x, y)  # float64 input required
+    pos_ndc = axes.normalize(x64, y64)  # float64 input required in this build
+
+    size = np.full(N, float(dv_point_size), dtype=np.float32)
 
     visual = app.point(
         position=pos_ndc,
-        color=color,
+        color=color_u8,
         size=size,
     )
     panel.add(visual)
 
+    # =========================
+    # 2) Optional PNG save (Datashader)
+    # =========================
+    if save_png:
+        import pandas as pd
+        import datashader as ds
+        import datashader.transfer_functions as tf
+        from PIL import ImageDraw, ImageFont
+        from PIL.PngImagePlugin import PngInfo
+
+        # ---------- default save path ----------
+        if savepath is None:
+            try:
+                base = Path(pth_meso) / "figs"
+            except NameError:
+                raise NameError(
+                    "pth_meso is not defined. Either define pth_meso or pass savepath explicitly."
+                )
+            base.mkdir(parents=True, exist_ok=True)
+            savepath = base / f"xy_{mapping}_nclus{int(nclus)}_cv{bool(cv)}.png"
+        else:
+            savepath = Path(savepath)
+
+        if x_range is None:
+            x_range = (float(np.nanmin(x32)), float(np.nanmax(x32)))
+        if y_range is None:
+            y_range = (float(np.nanmin(y32)), float(np.nanmax(y32)))
+
+        # ---------- color key (first occurrence per label; stable w.r.t. original order) ----------
+        s = pd.Series(labels)
+        first_idx = s.groupby(s, sort=False).head(1).index.to_numpy()
+        uniq = s.iloc[first_idx].to_numpy()
+
+        color_key = {}
+        for idx, lab in zip(first_idx, uniq):
+            rgba8 = np.clip(np.round(cols[int(idx)] * 255.0), 0, 255).astype(np.uint8)
+            color_key[lab] = "#{:02x}{:02x}{:02x}".format(*rgba8[:3])
+
+        df = pd.DataFrame(
+            dict(
+                x=x32,
+                y=y32,
+                label=pd.Categorical(labels, categories=pd.Index(uniq)),
+            )
+        )
+
+        # ---------- rasterize ----------
+        cvs = ds.Canvas(
+            plot_width=int(png_width),
+            plot_height=int(png_height),
+            x_range=x_range,
+            y_range=y_range,
+        )
+
+        agg = cvs.points(df, "x", "y", agg=ds.count_cat("label"))
+        img = tf.shade(agg, color_key=color_key, how=str(how))
+
+        if int(png_point_size) > 1:
+            img = tf.spread(img, px=int(png_point_size))
+
+        if background is not None:
+            img = tf.set_background(img, background)
+
+        # ---------- title annotation via PIL ----------
+        pil = img.to_pil()
+        draw = ImageDraw.Draw(pil)
+
+        try:
+            font = ImageFont.truetype("DejaVuSans.ttf", int(title_fontsize))
+        except Exception:
+            font = ImageFont.load_default()
+
+        draw.text(tuple(title_xy), str(title), fill=title_color, font=font)
+
+        # ---------- save ----------
+        if dpi is None:
+            pil.save(savepath, format="PNG", optimize=True)
+        else:
+            meta = PngInfo()
+            meta.add_text("dpi", str(int(dpi)))
+            pil.save(
+                savepath,
+                format="PNG",
+                optimize=True,
+                dpi=(int(dpi), int(dpi)),
+                pnginfo=meta,
+            )
+
+        print(f"Saved PNG → {savepath}")
+
+    # Run Datoviz last so the window appears and stays interactive;
+    # PNG work (if any) is done before run().
     app.run()
     app.destroy()
+
 
 
