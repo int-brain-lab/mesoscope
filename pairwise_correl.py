@@ -216,26 +216,43 @@ for i, row in eid_combos.iterrows():
     # subselect cells
     response_pair = []
     for eid in [row["eid_a"], row["eid_b"]]:
-        ix = np.logical_and(
-            responses[eid][1]["roicat_UCID"].isin(common_roicat_UCIDs).values,
-            (responses[eid][1]["cluster_silhouette"] > (0.2)).values,
-        )
+        criteria = [
+            responses[eid][1]["iscell"] > 0.5,
+            responses[eid][1]["roicat_UCID"].isin(common_roicat_UCIDs),
+            responses[eid][1]["cluster_silhouette"] > 0.2,
+        ]
+
+        ix = np.prod(pd.concat(criteria, axis=1).values, axis=1).astype("bool")
         index = responses[eid][1].loc[ix]["roicat_UCID"]
         response_pair.append(responses[eid][0].loc[ix].set_index(index))
 
-    rhos = np.zeros(response_pair[0].values.shape[0])
-    for i, roicat_ucid in enumerate(response_pair[0].index):
+    # we need to filter here again as it happens that iscell criterion fails in only one of the
+    # two sessions
+    common_roicat_UCIDs = np.array(
+        list(
+            set.intersection(
+                set(response_pair[0].index.values),
+                set(response_pair[1].index.values),
+            )
+        )
+    )
+
+    rhos = np.zeros(common_roicat_UCIDs.shape[0])
+    sel = ["fback1", "fback0", "choiceL", "choiceR"]
+    for i, roicat_ucid in enumerate(common_roicat_UCIDs):
         a = response_pair[0].loc[roicat_ucid]
         b = response_pair[1].loc[roicat_ucid]
+        # a = a.loc[sel]
+        # b = b.loc[sel]
         valid_ix = ~np.logical_or(pd.isna(a), pd.isna(b))
         rhos[i] = np.corrcoef(a.loc[valid_ix].values, b.loc[valid_ix].values)[0, 1]
 
     # storing the result for easier plotting
     result_df = pd.DataFrame(columns=["eid_a", "eid_b", "dt", "roicat_UCID", "p", "brain_region"])
-    result_df["roicat_UCID"] = response_pair[0].index
+    result_df["roicat_UCID"] = common_roicat_UCIDs
     result_df["rho"] = rhos
     result_df["brain_region"] = (
-        responses[row["eid_a"]][1].set_index("roicat_UCID").loc[response_pair[0].index, "region_labels"].values
+        responses[row["eid_a"]][1].set_index("roicat_UCID").loc[common_roicat_UCIDs, "region_labels"].values
     )
     result_df["eid_a"] = row["eid_a"]
     result_df["eid_b"] = row["eid_b"]
@@ -291,3 +308,5 @@ for region in brain_regions:
     linreg = linregress(xs, ys)
     plt.gca().set_title(f"{subject} - {session_type} - {region} - slope:{linreg.slope:.5f}, pval:{linreg.pvalue:.2f}")
     sns.despine(fig)
+
+# %%
