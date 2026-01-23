@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from one.api import ONE
 from trial_type_definitions import event_definitions_biasedCW, event_definitions_trainingCW, add_info_to_trials_table
+from scipy.stats import linregress
 
 from iblatlas.atlas import AllenAtlas
 
@@ -170,6 +171,9 @@ sessions_df = sessions_df.groupby("subject").get_group(subject).sort_values("sta
 sessions_df = sessions_df.loc[sessions_df["task_protocol"].str.contains(session_type)]  # <- here selection
 eids = sessions_df.index.values
 
+# center_eid = "20ebc2b9-5b4c-42cd-8e4b-65ddb427b7ff"  # cosyne distance
+# add odd even trials as internal control
+
 # %% load all imaging data
 imaging_data = {}
 for eid in tqdm(eids):
@@ -205,50 +209,36 @@ for i, row in eid_combos.iterrows():
 
 event_order = np.sort(list(event_definitions.keys()))
 
+
+# %%
+def get_common_roicat_UCIDs(eids: list[str], responses: dict):
+    common_roicat_UCIDs = np.array(list(set.intersection(*[set(responses[eid][1]["roicat_UCID"].values) for eid in eids])))
+    common_roicat_UCIDs = common_roicat_UCIDs[~pd.isna(common_roicat_UCIDs)]
+    common_roicat_UCIDs = common_roicat_UCIDs[~(common_roicat_UCIDs == "nan")]
+
+    # do the quality control here
+    refined_ids = []
+    for eid in eids:
+        subset = responses[eid][1].set_index("roicat_UCID").loc[common_roicat_UCIDs]
+        refined_ids.append(set(subset.query("iscell > 0.5 & cluster_silhouette > 0.2").index))
+        # refined_ids.append(set(subset.query("iscell > 0.5 & cluster_silhouette > 0.2").index))
+
+    return np.array(list(set.intersection(*refined_ids)))
+
+
 # %% extraction run for all
 results = []
 for i, row in eid_combos.iterrows():
-    common_roicat_UCIDs = np.array(
-        list(
-            set.intersection(
-                set(responses[row["eid_a"]][1]["roicat_UCID"].values),
-                set(responses[row["eid_b"]][1]["roicat_UCID"].values),
-            )
-        )
-    )
-    # filter out nan
-    common_roicat_UCIDs = common_roicat_UCIDs[~pd.isna(common_roicat_UCIDs)]
-    common_roicat_UCIDs = common_roicat_UCIDs[~(common_roicat_UCIDs == "nan")]
-    # TODO we could filter here for suite2p iscell metric instead of further
-    # below
+    common_roicat_UCIDs = get_common_roicat_UCIDs([row["eid_a"], row["eid_b"]], responses)
 
     # subselect cells
     response_pair = []
     for eid in [row["eid_a"], row["eid_b"]]:
-        criteria = [
-            responses[eid][1]["iscell"] > 0.5,
-            responses[eid][1]["roicat_UCID"].isin(common_roicat_UCIDs),
-            responses[eid][1]["cluster_silhouette"] > 0.2,
-        ]
-
-        ix = np.prod(pd.concat(criteria, axis=1).values, axis=1).astype("bool")
-        index = responses[eid][1].loc[ix]["roicat_UCID"]
-        response_pair.append(responses[eid][0].loc[ix].set_index(index))
-
-    # we need to filter here again as it happens that iscell criterion fails in only one of the
-    # two sessions
-    common_roicat_UCIDs = np.array(
-        list(
-            set.intersection(
-                set(response_pair[0].index.values),
-                set(response_pair[1].index.values),
-            )
-        )
-    )
+        response_pair.append(responses[eid][0].set_index(responses[eid][1]["roicat_UCID"]).loc[common_roicat_UCIDs])
 
     rhos = np.zeros(common_roicat_UCIDs.shape[0])
     rhos_feature_shuffle = np.zeros(common_roicat_UCIDs.shape[0])
-    # sel = ["fback1", "fback0", "choiceL", "choiceR"]
+    sel = ["fback1", "fback0", "choiceL", "choiceR"]
     for i, roicat_ucid in enumerate(common_roicat_UCIDs):
         a = response_pair[0].loc[roicat_ucid]
         b = response_pair[1].loc[roicat_ucid]
@@ -321,9 +311,7 @@ results = pd.concat(results, axis=0)
 results["dt"] = results["dt"].astype("int")
 
 
-# %%
-from scipy.stats import linregress
-
+# %% All cells combined
 plots_folder = Path(__file__).parent / "local" / "plots"
 
 results_ = pd.melt(
@@ -332,6 +320,34 @@ results_ = pd.melt(
     value_vars=["rho", "rho_feature_shuffle", "rho_neuron_shuffle", "rho_region_shuffle"],
 )
 
+hue_colors = dict(
+    zip(
+        ["rho", "rho_feature_shuffle", "rho_neuron_shuffle", "rho_region_shuffle"],
+        [
+            "#5854CD",
+            "#B6B6B6",
+            "#7B7B7B",
+            "#626262",
+        ],
+    )
+)
+
+fig, axes = plt.subplots()
+max_day = results["dt"].max() + 1
+sns.barplot(data=results_, y="value", x="dt", hue="variable", palette=hue_colors, order=np.arange(1, max_day), ax=axes)
+axes.axhline(0, linestyle=":", lw=2, alpha=0.5, color="k")
+axes.set_xlabel("time between sessions (days)")
+axes.set_ylabel("spearmans ρ")
+xs = results_.groupby("variable").get_group("rho")["dt"]
+ys = results_.groupby("variable").get_group("rho")["value"]
+linreg = linregress(xs, ys)
+plt.gca().set_title(f"{subject} - {session_type} - all cells\nslope:{linreg.slope:.2e} - p:{linreg.pvalue:.2e}")
+
+sns.despine(fig)
+fig.savefig(plots_folder / f"{subject} - {session_type} - {'all cells'}.png")
+
+
+# %%
 n = 500
 counts = results_["brain_region"].value_counts()
 brain_regions = counts[counts > n].index
@@ -366,55 +382,5 @@ for brain_region in brain_regions:
 
     sns.despine(fig)
     fig.savefig(plots_folder / f"{subject} - {session_type} - {brain_region.replace('/', '-')}.png")
-
-# %% overall
-from scipy.stats import linregress
-
-fig, axes = plt.subplots()
-axes.scatter(x=results["dt"], y=results["rho"], alpha=0.01)
-xs = []
-ys = []
-for dt, group in results.groupby("dt"):
-    xs.append(dt)
-    ys.append(group["rho"].mean())
-
-axes.plot(xs, ys, ".", markersize=10, color="k")
-axes.axhline(0, linestyle=":", lw=2, alpha=0.5, color="k")
-axes.set_xlabel("time between sessions (days)")
-axes.set_ylabel("spearmans ρ")
-
-linreg = linregress(xs, ys)
-plt.gca().set_title(f"{subject} - {session_type} - slope:{linreg.slope:.5f}, pval:{linreg.pvalue:.2f}")
-sns.despine(fig)
-plots_folder = Path(__file__).parent / "local" / "plots"
-fig.savefig(plots_folder / f"{subject} - {session_type} - all cells.png")
-
-# %% brain region resolved
-# filter into brain regions that have actual numbers
-n = 500
-counts = results["brain_region"].value_counts()
-brain_regions = counts[counts > n].index
-
-region_colors = dict(zip(brain_regions, sns.color_palette("husl", n_colors=brain_regions.shape[0])))
-
-for region in brain_regions:
-    fig, axes = plt.subplots()
-    results_ = results.groupby("brain_region").get_group(region)
-    axes.scatter(x=results_["dt"], y=results_["rho"], alpha=0.1, color=region_colors[region])
-    xs = []
-    ys = []
-    for dt, group in results_.groupby("dt"):
-        xs.append(dt)
-        ys.append(group["rho"].mean())
-
-    axes.plot(xs, ys, ".", markersize=10, color="k")
-    axes.axhline(0, linestyle=":", lw=2, alpha=0.5, color="k")
-    axes.set_xlabel("time between sessions (days)")
-    axes.set_ylabel("spearmans ρ")
-
-    linreg = linregress(xs, ys)
-    plt.gca().set_title(f"{subject} - {session_type} - {region} - slope:{linreg.slope:.5f}, pval:{linreg.pvalue:.2f}")
-    sns.despine(fig)
-    fig.savefig(plots_folder / f"{subject} - {session_type} - {region.replace('/', '-')}.png")
 
 # %%
