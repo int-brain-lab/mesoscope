@@ -952,13 +952,17 @@ def stack_pair_and_correlate(
         Ause = A
         Buse = B
 
-    # per-row Pearson r
-    A0 = Ause - np.nanmean(Ause, axis=1, keepdims=True)
-    B0 = Buse - np.nanmean(Buse, axis=1, keepdims=True)
-    num = np.nansum(A0 * B0, axis=1)
-    den = np.sqrt(np.nansum(A0 * A0, axis=1) * np.nansum(B0 * B0, axis=1))
+    # per-row cosine similarity mapped to [0,1]
+    mask = np.isfinite(Ause) & np.isfinite(Buse)
+    A0 = np.where(mask, Ause, 0.0).astype(np.float32, copy=False)
+    B0 = np.where(mask, Buse, 0.0).astype(np.float32, copy=False)
+
+    num = np.sum(A0 * B0, axis=1)
+    den = np.sqrt(np.sum(A0 * A0, axis=1) * np.sum(B0 * B0, axis=1))
     den = np.where(den == 0, np.nan, den)
-    r = (num / den).astype(np.float32)
+
+    cos = num / den
+    r = (0.5 * (cos + 1.0)).astype(np.float32)  # in [0,1]
 
     uids_all = np.concatenate(uids_blocks, axis=0)
     fov_all = np.concatenate(fov_blocks, axis=0)
@@ -1102,18 +1106,27 @@ def chronic_pair_feature_corr_subject(
         sd = np.where(sd == 0, 1.0, sd)
         return (X - mu) / sd
 
-    def _rowwise_pearson(A: np.ndarray, B: np.ndarray) -> np.ndarray:
+    def _rowwise_cosine_sim01(A: np.ndarray, B: np.ndarray) -> np.ndarray:
         """
-        A,B: (N,P). Returns r: (N,).
+        A,B: (N,P). Returns cosine similarity mapped to [0,1] per row:
+            cos = <a,b> / (||a|| ||b||)   in [-1,1]
+            sim01 = 0.5 * (cos + 1)       in [0,1]
+        NaNs are ignored pairwise (mask per entry).
         """
         A = np.asarray(A, dtype=np.float32)
         B = np.asarray(B, dtype=np.float32)
-        A0 = A - np.nanmean(A, axis=1, keepdims=True)
-        B0 = B - np.nanmean(B, axis=1, keepdims=True)
-        num = np.nansum(A0 * B0, axis=1)
-        den = np.sqrt(np.nansum(A0 * A0, axis=1) * np.nansum(B0 * B0, axis=1))
+
+        mask = np.isfinite(A) & np.isfinite(B)
+        A0 = np.where(mask, A, 0.0).astype(np.float32, copy=False)
+        B0 = np.where(mask, B, 0.0).astype(np.float32, copy=False)
+
+        num = np.sum(A0 * B0, axis=1)
+        den = np.sqrt(np.sum(A0 * A0, axis=1) * np.sum(B0 * B0, axis=1))
         den = np.where(den == 0, np.nan, den)
-        return (num / den).astype(np.float32)
+
+        cos = num / den
+        sim01 = 0.5 * (cos + 1.0)
+        return sim01.astype(np.float32)
 
     def _ensure_pair_cuts(eid_a: str, eid_b: str) -> Path | None:
         """
@@ -1303,7 +1316,7 @@ def chronic_pair_feature_corr_subject(
             else:
                 Ause, Buse = A, B
 
-            r = _rowwise_pearson(Ause, Buse)  # (N,)
+            r = _rowwise_cosine_sim01(Ause, Buse)  # (N,) in [0,1]
 
             # write rows (wide: one column per ttype per session)
             for i in range(uidsA.shape[0]):
@@ -1321,7 +1334,7 @@ def chronic_pair_feature_corr_subject(
                     "z_a": float(xyzA[i, 2]),
                     "x_b": float(xyzB[i, 0]),
                     "y_b": float(xyzB[i, 1]),
-                    "z_b": float(xyzB[i, 2]),
+                    "z_b": floasave_trial_cuts_mesot(xyzB[i, 2]),
                     "corr": float(r[i]) if np.isfinite(r[i]) else np.nan,
                 }
                 for j, t in enumerate(ref_ttypes):
@@ -1346,9 +1359,225 @@ def chronic_pair_feature_corr_subject(
     df.to_parquet(cache_path, index=False)
     return df
 
+###################
+'''
+plotting pairwise correlations
+'''
+###################
+
+def _eid_date_from_path(one: ONE, eid: str) -> pd.Timestamp:
+    """
+    Fast local extraction of session date from ONE eid path.
+    Returns pandas.Timestamp (date only).
+    """
+    p = Path(one.eid2path(eid))
+    # expect .../<subject>/<YYYY-MM-DD>/<NNN>
+    for part in p.parts:
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", part):
+            return pd.to_datetime(part)
+    raise ValueError(f"Could not parse date from eid path: {p}")
+
+
+def plot_chronic_corr_vs_time_subject(
+    subject: str = "SP058",
+    eid_c: str = "20ebc2b9-5b4c-42cd-8e4b-65ddb427b7ff",
+    *,
+    one: ONE | None = None,
+    pair_mode: str = "all",   # "consecutive" | "all"
+    rerun: bool = False,
+    per_reg: bool = False,
+    reg_col: str = "area_a",          # "area_a" | "area_b"
+    agg: str = "mean",                # "mean" | "median"
+    min_neurons: int = 50,
+    # NEW: shuffle control
+    shuf: bool = True,
+    shuf_seed: int = 0,
+    ax: plt.Axes | None = None,
+    title: str | None = None,
+) -> tuple[pd.DataFrame, plt.Axes]:
+    """
+    Load (cached) df = chronic_pair_feature_corr_subject(subject, ...) or recompute if needed,
+    then plot one point per (eid_c, eid_other) pair:
+        y = average corr across all neurons for that pair
+        x = days relative to eid_c (negative = earlier sessions, positive = later)
+
+    Shuffle control (if shuf=True):
+      For each pair-group, compute the same similarity after independently permuting the neuron order
+      (rows) in the A and B feature matrices within that group, then recomputing per-row cosine sim01.
+
+    If per_reg=True, plot separate series per region (reg_col), averaging within (pair, region).
+    Returns (out, ax) where out includes corr_avg, n_neurons, and optionally corr_shuf_avg.
+    """
+    if one is None:
+        one = ONE()
+
+    if agg not in ("mean", "median"):
+        raise ValueError("agg must be 'mean' or 'median'")
+    if per_reg and reg_col not in ("area_a", "area_b"):
+        raise ValueError("reg_col must be 'area_a' or 'area_b'")
+
+    # (1) Load df from cache (inside chronic_pair_feature_corr_subject) or recompute if missing
+    df = chronic_pair_feature_corr_subject(
+        subject,
+        one=one,
+        pair_mode=pair_mode,
+        rerun=rerun,
+    )
+
+    # ---- helper: choose numeric feature pairs (_a/_b) for recomputing similarity ----
+    def _get_feature_pairs(dfin: pd.DataFrame) -> tuple[list[str], list[str]]:
+        cols_a = [c for c in dfin.columns if c.endswith("_a")]
+        exclude_bases = {
+            "eid", "area", "subject", "pair_tag", "FOV", "uid",
+            "x", "y", "z",
+        }
+        bases = []
+        ca_list, cb_list = [], []
+        for ca in cols_a:
+            base = ca[:-2]
+            if base in exclude_bases:
+                continue
+            cb = base + "_b"
+            if cb not in dfin.columns:
+                continue
+            # require numeric-convertible (at least some finite entries)
+            a_num = pd.to_numeric(dfin[ca], errors="coerce")
+            b_num = pd.to_numeric(dfin[cb], errors="coerce")
+            if np.isfinite(a_num.to_numpy()).any() and np.isfinite(b_num.to_numpy()).any():
+                bases.append(base)
+                ca_list.append(ca)
+                cb_list.append(cb)
+        if not ca_list:
+            raise ValueError("No numeric feature pairs found for shuffle control.")
+        return ca_list, cb_list
+
+    # ---- helper: cosine similarity mapped to [0,1] row-wise ----
+    def _rowwise_cos_sim01(A: np.ndarray, B: np.ndarray) -> np.ndarray:
+        A = np.asarray(A, float)
+        B = np.asarray(B, float)
+        mask = np.isfinite(A) & np.isfinite(B)
+        A0 = np.where(mask, A, 0.0)
+        B0 = np.where(mask, B, 0.0)
+        num = np.sum(A0 * B0, axis=1)
+        den = np.sqrt(np.sum(A0 * A0, axis=1) * np.sum(B0 * B0, axis=1))
+        den = np.where(den == 0, np.nan, den)
+        cos = num / den
+        return 0.5 * (cos + 1.0)
+
+    # (2) Build eid -> start_time map via Alyx (cached locally within this function call)
+    eids = pd.unique(pd.concat([df["eid_a"], df["eid_b"]], ignore_index=True))
+    eid2t = {str(eid): _eid_date_from_path(one, str(eid)) for eid in eids}
+
+    if str(eid_c) not in eid2t:
+        raise ValueError(f"eid_c not present in df / not resolvable: {eid_c}")
+
+    t_c = eid2t[str(eid_c)]
+
+    # (3) Filter to pairs involving center eid
+    d0 = df[(df["eid_a"] == eid_c) | (df["eid_b"] == eid_c)].copy()
+    if d0.empty:
+        raise ValueError(f"No rows for center eid_c={eid_c} in subject={subject}")
+
+    d0["eid_other"] = np.where(d0["eid_a"] == eid_c, d0["eid_b"], d0["eid_a"])
+    d0["t_other"] = d0["eid_other"].map(eid2t)
+    d0 = d0[np.isfinite((d0["t_other"] - t_c).dt.total_seconds())]
+    d0["dt_days"] = (d0["t_other"] - t_c).dt.total_seconds() / (3600 * 24)
+
+    # (4) Aggregate to one point per pair (or per pair+region)
+    group_cols = ["eid_other", "dt_days", "pair_tag"]
+    if per_reg:
+        if reg_col not in d0.columns:
+            raise ValueError(f"reg_col '{reg_col}' not in df columns.")
+        group_cols.append(reg_col)
+
+    g = d0.groupby(group_cols, dropna=False)
+    corr_avg = g["corr"].mean() if agg == "mean" else g["corr"].median()
+    n_neu = g["corr"].size()
+
+    out = (
+        pd.concat([corr_avg.rename("corr_avg"), n_neu.rename("n_neurons")], axis=1)
+        .reset_index()
+        .query("n_neurons >= @min_neurons")
+        .sort_values("dt_days", kind="mergesort")
+    )
+
+    # ---- NEW: shuffle control per group (cheap, uses existing per-row features) ----
+    if shuf:
+        ca_list, cb_list = _get_feature_pairs(d0)
+        rng = np.random.default_rng(int(shuf_seed))
+
+        # compute shuffled aggregate per group, aligned to `out`
+        shuf_vals = []
+        for _, row in out.iterrows():
+            # filter rows belonging to this group
+            m = np.ones(len(d0), dtype=bool)
+            for c in group_cols:
+                m &= (d0[c].to_numpy() == row[c])
+            dd = d0.loc[m]
+            if dd.empty:
+                shuf_vals.append(np.nan)
+                continue
+
+            A = dd[ca_list].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+            B = dd[cb_list].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+
+            n = A.shape[0]
+            if n < int(min_neurons):
+                shuf_vals.append(np.nan)
+                continue
+
+            # independently permute neuron order within A and within B (break matching)
+            ia = rng.permutation(n)
+            ib = rng.permutation(n)
+
+            sim = _rowwise_cos_sim01(A[ia], B[ib])
+
+            if agg == "mean":
+                shuf_vals.append(float(np.nanmean(sim)))
+            else:
+                shuf_vals.append(float(np.nanmedian(sim)))
+
+        out["corr_shuf_avg"] = np.asarray(shuf_vals, float)
+
+    # (5) Plot
+    if ax is None:
+        _, ax = plt.subplots(figsize=(6, 3))
+
+    if not per_reg:
+        ax.scatter(out["dt_days"], out["corr_avg"], label="data")
+        if shuf and "corr_shuf_avg" in out.columns:
+            ax.scatter(out["dt_days"], out["corr_shuf_avg"], label="shuffle", alpha=0.6)
+            ax.legend(frameon=False, loc="best")
+    else:
+        for reg, dd in out.groupby(reg_col, sort=False):
+            ax.scatter(dd["dt_days"], dd["corr_avg"], label=str(reg))
+        ax.legend(title=reg_col, bbox_to_anchor=(1.02, 1), loc="upper left", borderaxespad=0)
+
+        # optional: shuffle per_reg (overlay, same color cycle not guaranteed; keep simple)
+        if shuf and "corr_shuf_avg" in out.columns:
+            for reg, dd in out.groupby(reg_col, sort=False):
+                ax.scatter(dd["dt_days"], dd["corr_shuf_avg"], alpha=0.35)
+
+    ax.axvline(0.0)
+    ax.set_xlabel("Days relative to center eid")
+    ax.set_ylabel(f"{agg} corr across neurons")
+    if title is None:
+        title = f"{subject}: corr vs time (center eid)"
+        if per_reg:
+            title += f" | per_reg ({reg_col})"
+        if shuf:
+            title += " | +shuffle"
+    ax.set_title(title)
+
+
+
+
+
+
+
 #################
 '''
-stack all sessions
+stack all sessions (or single)
 '''
 #################
 
@@ -1380,16 +1609,27 @@ def stack_trial_cuts_meso(
     trial_cuts_dir: str | Path | None = None,
     filter_neurons: bool = True,
     min_trials: int = 10,
-    cut_to_min: bool = True,   # NEW
+    single_eid: str | list[str] | None = None,  # NEW
 ):
     """
-    If cut_to_min=True:
-      - include entries even if some PETH segments have fewer time bins than others
-      - determine min T per ttype across all usable entries
-      - truncate every segment to that min before concatenation (so all match)
+    Build stacked ROI feature matrices from per-EID trial-cut PETH files.
 
-    If cut_to_min=False:
-      - keep old behavior: require exact match to reference lengths (mismatch entries skipped)
+    Changes vs previous version
+    ---------------------------
+    - single_eid:
+        * None / [] -> process all eids
+        * str or [str] -> process only that eid and include eid in output filenames
+    - Removed all cut_to_min / length-matching logic.
+    - For each PETH type (ttype), after averaging across trials (all/even/odd),
+      average across the time axis so each ttype contributes exactly 1 value per ROI.
+      Resulting feature length L == number of ttypes.
+
+    NEW POLICY
+    ----------
+    - EID-level min_trials enforcement:
+        If *any* PETH type for an EID has M < min_trials in *any* FOV/meta entry,
+        skip the whole EID (all its entries).
+        If single_eid is set, print the violating PETH(s) and return early (no files saved).
     """
     start_time = time.time()
 
@@ -1403,9 +1643,23 @@ def stack_trial_cuts_meso(
         raise FileNotFoundError(f"trial_cuts_dir not found: {trial_cuts_dir}")
 
     out_dir = trial_cuts_dir.parent
-    out_all = out_dir / f"stack_all_filter{filter_neurons}.npy"
-    out_even = out_dir / f"stack_even_filter{filter_neurons}.npy"
-    out_odd = out_dir / f"stack_odd_filter{filter_neurons}.npy"
+
+    # normalize single_eid
+    if single_eid is None:
+        single_eids: list[str] = []
+    elif isinstance(single_eid, str):
+        single_eids = [single_eid]
+    else:
+        single_eids = list(single_eid)
+
+    single_mode = (len(single_eids) == 1)
+    # tr_nums only has a clear meaning for a single session (single eid)
+    allow_tr_nums = single_mode
+
+    eid_tag = f"_{single_eids[0]}" if single_mode else ""
+    out_all = out_dir / f"stack_all{eid_tag}_filter{filter_neurons}.npy"
+    out_even = out_dir / f"stack_even{eid_tag}_filter{filter_neurons}.npy"
+    out_odd = out_dir / f"stack_odd{eid_tag}_filter{filter_neurons}.npy"
 
     # ---------------- helpers ----------------
     def _zscore_rows(X: np.ndarray) -> np.ndarray:
@@ -1416,10 +1670,14 @@ def stack_trial_cuts_meso(
         return (X - mu) / sd
 
     def _avg_trials_mode(X_mnt: np.ndarray, mode: str) -> np.ndarray | None:
+        """
+        X_mnt: (M, N, T)
+        returns: (N, T) mean across selected trials, or None if insufficient trials
+        """
         if X_mnt.ndim != 3:
             raise ValueError(f"Expected (M,N,T), got {X_mnt.shape}")
-        M = X_mnt.shape[0]
-        if M < min_trials:
+        M = int(X_mnt.shape[0])
+        if M < int(min_trials):
             return None
         if mode == "all":
             sel = slice(None)
@@ -1443,17 +1701,30 @@ def stack_trial_cuts_meso(
             return obj.flat[0]
         return obj
 
+    def _reduce_time_to_scalar(A: np.ndarray) -> np.ndarray | None:
+        """
+        A: (N, T)
+        returns: (N, 1) scalar per ROI (mean across time); None if T < 1
+        """
+        if A.ndim != 2:
+            raise ValueError(f"Expected (N,T), got {A.shape}")
+        if A.shape[1] < 1:
+            return None
+        return np.nanmean(A, axis=1, keepdims=True).astype(np.float32, copy=False)  # (N,1)
+
     # ---------------- discover EIDs ----------------
     eid_dirs = sorted([p for p in trial_cuts_dir.iterdir() if p.is_dir()])
     if not eid_dirs:
         raise RuntimeError(f"No eid subfolders found in {trial_cuts_dir}")
 
-    # ---------------- pass 1: find entries + (optionally) min lengths ----------------
-    ref_ttypes = None
-    entries: list[tuple[str, str, Path]] = []
+    if single_mode:
+        eid_dirs = [p for p in eid_dirs if p.name == single_eids[0]]
+        if not eid_dirs:
+            raise RuntimeError(f"single_eid={single_eids[0]!r} not found in {trial_cuts_dir}")
 
-    # track min T per ttype across entries (only used when cut_to_min=True)
-    min_len: dict[str, int] | None = {} if cut_to_min else None
+    # ---------------- pass 1: find valid entries ----------------
+    ref_ttypes = None
+    entries: list[tuple[str, str, Path]] = []  # (eid, fov, meta_path)
 
     for eid_path in eid_dirs:
         eid = eid_path.name
@@ -1476,160 +1747,181 @@ def stack_trial_cuts_meso(
 
             if ref_ttypes is None:
                 ref_ttypes = ttypes
-                if cut_to_min:
-                    for t in ref_ttypes:
-                        if "peth_shapes" not in meta or t not in meta["peth_shapes"]:
-                            print(f"[skip] {eid}/{mp.name}: missing peth_shapes for {t}")
-                            ref_ttypes = None
-                            break
-                        min_len[t] = int(meta["peth_shapes"][t][2])
-                if ref_ttypes is None:
-                    continue
             else:
                 if ttypes != ref_ttypes:
                     print(f"[skip] {eid}/{mp.name}: ttypes mismatch vs reference")
                     continue
 
-            # require peth_shapes for speed/consistency
-            if "peth_shapes" not in meta:
-                print(f"[skip] {eid}/{mp.name}: missing peth_shapes")
+            if "peth_files" not in meta:
+                print(f"[skip] {eid}/{mp.name}: missing peth_files")
                 continue
 
-            if cut_to_min:
-                ok = True
-                for t in ref_ttypes:
-                    if t not in meta["peth_shapes"]:
-                        print(f"[skip] {eid}/{mp.name}: missing peth_shapes for {t}")
-                        ok = False
-                        break
-                    Tt = int(meta["peth_shapes"][t][2])
-                    # update min
-                    if Tt < min_len[t]:
-                        min_len[t] = Tt
-                if not ok:
-                    continue
-                entries.append((eid, meta["fov"], mp))
+            ok = True
+            for t in ref_ttypes:
+                if t not in meta["peth_files"]:
+                    print(f"[skip] {eid}/{mp.name}: missing peth_files entry for {t}")
+                    ok = False
+                    break
+            if not ok:
+                continue
 
-            else:
-                # old behavior: establish ref_len from first entry, then require exact match
-                # (kept close to your current logic)
-                if "ref_len" not in locals():
-                    ref_len = {t: int(meta["peth_shapes"][t][2]) for t in ref_ttypes}
-                ok = True
-                for t in ref_ttypes:
-                    if t not in meta["peth_shapes"]:
-                        print(f"[skip] {eid}/{mp.name}: missing peth_shapes for {t}")
-                        ok = False
-                        break
-                    Tt = int(meta["peth_shapes"][t][2])
-                    if Tt != ref_len[t]:
-                        print(f"[skip] {eid}/{mp.name}: length mismatch for {t}: {Tt} != {ref_len[t]}")
-                        ok = False
-                        break
-                if not ok:
-                    continue
-                entries.append((eid, meta["fov"], mp))
+            entries.append((eid, meta.get("fov", ""), mp))
 
     if ref_ttypes is None or not entries:
         raise RuntimeError(
             f"No valid meta files found for filter_neurons={filter_neurons} in {trial_cuts_dir}."
         )
 
-    if cut_to_min:
-        ref_len = dict(min_len)  # redefine effective lengths as minima
-        print("[info] cut_to_min=True; using per-ttype min lengths:")
-        for t in ref_ttypes:
-            print(f"  {t}: {ref_len[t]}")
-    else:
-        print("[info] cut_to_min=False; requiring exact per-ttype lengths (skip mismatches).")
+    L = int(len(ref_ttypes))
+    print(f"[info] combining {len(entries)} FOV entries; L={L} (1 scalar per {len(ref_ttypes)} ttypes)")
 
-    L = int(sum(ref_len[t] for t in ref_ttypes))
-    print(f"[info] combining {len(entries)} FOV entries; L={L} (sum over {len(ref_ttypes)} ttypes)")
+    # ---------------- group entries by eid ----------------
+    from collections import defaultdict
+    entries_by_eid: dict[str, list[tuple[str, str, Path]]] = defaultdict(list)
+    for eid, fov, mp in entries:
+        entries_by_eid[eid].append((eid, fov, mp))
 
-    # ---------------- pass 2: load, average, truncate (if needed), concat ----------------
+    # ---------------- pass 2: EID-level min_trials screening, then build stacks ----------------
     blocks_all, blocks_even, blocks_odd = [], [], []
     ids_blocks, xyz_blocks, eid_blocks, fov_blocks = [], [], [], []
 
-    for eid, fov, mp in entries:
-        eid_path = trial_cuts_dir / eid
-        meta = _load_meta(mp)
+    # session-level trial counts (only meaningful in single_mode)
+    tr_nums_all = {t: None for t in ref_ttypes}
+    tr_nums_even = {t: None for t in ref_ttypes}
+    tr_nums_odd = {t: None for t in ref_ttypes}
 
-        ids = np.asarray(meta.get("region_labels", []), dtype=object)
-        xyz = np.asarray(meta.get("xyz", []), dtype=np.float32)
+    for eid, eid_entries in entries_by_eid.items():
+        # --------- EID-level min_trials check (fail => skip entire eid) ---------
+        viol: dict[str, int] = {}  # ttype -> minimal M observed (for reporting)
+        for _eid, fov, mp in eid_entries:
+            meta = _load_meta(mp)
+            eid_path = trial_cuts_dir / eid
+            for t in ref_ttypes:
+                fp = eid_path / meta["peth_files"][t]
+                try:
+                    X = np.load(fp, mmap_mode="r")
+                except Exception:
+                    # loading failures already handled later; here just mark as violation-like
+                    viol[t] = min(viol.get(t, 10**9), -1)
+                    continue
+                if X.ndim != 3:
+                    viol[t] = min(viol.get(t, 10**9), -1)
+                    continue
+                M = int(X.shape[0])
+                if M < int(min_trials):
+                    viol[t] = min(viol.get(t, 10**9), M)
+                del X
 
-        if ids.size == 0 or xyz.size == 0:
-            print(f"[skip] {eid}/{fov}: missing region_labels or xyz")
+        if viol:
+            # If single eid requested, report and return empty (no saving)
+            if single_mode:
+                for t, m in sorted(viol.items()):
+                    if m >= 0:
+                        print(f"[min_trials fail] eid={eid} ttype={t}: M={m} < min_trials={min_trials}")
+                    else:
+                        print(f"[min_trials fail] eid={eid} ttype={t}: cannot load/invalid shape")
+                return
+
+            # Otherwise skip this eid entirely
+            bad_list = ", ".join(
+                f"{t}(M={m})" if m >= 0 else f"{t}(invalid)"
+                for t, m in sorted(viol.items())
+            )
+            print(f"[skip eid] {eid}: min_trials violated for {bad_list}")
             continue
-        if xyz.ndim != 2 or xyz.shape[1] < 3:
-            print(f"[skip] {eid}/{fov}: xyz has unexpected shape {xyz.shape}")
-            continue
-        xyz = xyz[:, :3]
 
-        segs_all, segs_even, segs_odd = [], [], []
-        ok = True
+        # --------- build stacks for this eid (all its FOV/meta entries) ---------
+        for _eid, fov, mp in eid_entries:
+            eid_path = trial_cuts_dir / eid
+            meta = _load_meta(mp)
 
-        for t in ref_ttypes:
-            fp = eid_path / meta["peth_files"][t]
-            X = np.load(fp, mmap_mode="r")  # (M,N,T_local)
+            ids = np.asarray(meta.get("region_labels", []), dtype=object)
+            xyz = np.asarray(meta.get("xyz", []), dtype=np.float32)
 
-            if X.shape[1] != ids.shape[0]:
-                print(f"[skip] {eid}/{fov}: N mismatch for {t}: {X.shape[1]} != {ids.shape[0]}")
-                ok = False
-                break
+            if ids.size == 0 or xyz.size == 0:
+                print(f"[skip] {eid}/{fov}: missing region_labels or xyz")
+                continue
+            if xyz.ndim != 2 or xyz.shape[1] < 3:
+                print(f"[skip] {eid}/{fov}: xyz has unexpected shape {xyz.shape}")
+                continue
+            xyz = xyz[:, :3]
 
-            A_all = _avg_trials_mode(X, "all")
-            A_even = _avg_trials_mode(X, "even")
-            A_odd = _avg_trials_mode(X, "odd")
+            segs_all, segs_even, segs_odd = [], [], []
+            ok = True
 
-            if A_all is None or A_even is None or A_odd is None:
-                print(f"[skip] {eid}/{fov}: insufficient trials for {t} (min_trials={min_trials})")
-                ok = False
-                break
-
-            # enforce length handling
-            T_target = int(ref_len[t])
-            T_local = int(A_all.shape[1])
-
-            if cut_to_min:
-                # truncate to common minimum (or if somehow smaller than min, skip)
-                if T_local < T_target:
-                    print(f"[skip] {eid}/{fov}: {t} has T={T_local} < min_T={T_target} (unexpected)")
+            for t in ref_ttypes:
+                fp = eid_path / meta["peth_files"][t]
+                try:
+                    X = np.load(fp, mmap_mode="r")  # (M,N,T)
+                except Exception as e:
+                    print(f"[skip] {eid}/{fov}: cannot load {t} ({fp.name}) ({type(e).__name__}: {e})")
                     ok = False
                     break
-                A_all = A_all[:, :T_target]
-                A_even = A_even[:, :T_target]
-                A_odd = A_odd[:, :T_target]
-            else:
-                # old behavior: require exact match
-                if T_local != T_target:
-                    print(f"[skip] {eid}/{fov}: T mismatch for {t}: {T_local} != {T_target}")
+
+                if X.ndim != 3:
+                    print(f"[skip] {eid}/{fov}: {t} has unexpected ndim {X.ndim} shape {X.shape}")
                     ok = False
                     break
 
-            segs_all.append(A_all)
-            segs_even.append(A_even)
-            segs_odd.append(A_odd)
+                if X.shape[1] != ids.shape[0]:
+                    print(f"[skip] {eid}/{fov}: N mismatch for {t}: {X.shape[1]} != {ids.shape[0]}")
+                    ok = False
+                    break
 
-            del X
+                # session-level trial counts: set once (they are consistent by the EID-level screen)
+                if allow_tr_nums:
+                    M = int(X.shape[0])
+                    n_all = M
+                    n_even = (M + 1) // 2
+                    n_odd = M // 2
+                    if tr_nums_all[t] is None:
+                        tr_nums_all[t] = n_all
+                        tr_nums_even[t] = n_even
+                        tr_nums_odd[t] = n_odd
 
-        if not ok:
-            continue
+                A_all = _avg_trials_mode(X, "all")
+                A_even = _avg_trials_mode(X, "even")
+                A_odd = _avg_trials_mode(X, "odd")
 
-        P_all = np.concatenate(segs_all, axis=1).astype(np.float32, copy=False)   # (N,L)
-        P_even = np.concatenate(segs_even, axis=1).astype(np.float32, copy=False)
-        P_odd = np.concatenate(segs_odd, axis=1).astype(np.float32, copy=False)
+                # This should never happen now (we pre-screened), but keep as a guard.
+                if A_all is None or A_even is None or A_odd is None:
+                    print(f"[skip] {eid}/{fov}: insufficient trials for {t} (min_trials={min_trials}) [unexpected after prescreen]")
+                    ok = False
+                    break
 
-        blocks_all.append(P_all)
-        blocks_even.append(P_even)
-        blocks_odd.append(P_odd)
+                S_all = _reduce_time_to_scalar(A_all)
+                S_even = _reduce_time_to_scalar(A_even)
+                S_odd = _reduce_time_to_scalar(A_odd)
 
-        ids_blocks.append(ids)
-        xyz_blocks.append(xyz)
-        eid_blocks.append(np.array([eid] * ids.shape[0], dtype=object))
-        fov_blocks.append(np.array([fov] * ids.shape[0], dtype=object))
+                if S_all is None or S_even is None or S_odd is None:
+                    print(f"[skip] {eid}/{fov}: {t} has T<1 after averaging (unexpected)")
+                    ok = False
+                    break
 
-        del segs_all, segs_even, segs_odd, P_all, P_even, P_odd
-        gc.collect()
+                segs_all.append(S_all)   # (N,1)
+                segs_even.append(S_even)
+                segs_odd.append(S_odd)
+
+                del X
+
+            if not ok:
+                continue
+
+            P_all = np.concatenate(segs_all, axis=1).astype(np.float32, copy=False)   # (N,L)
+            P_even = np.concatenate(segs_even, axis=1).astype(np.float32, copy=False)
+            P_odd = np.concatenate(segs_odd, axis=1).astype(np.float32, copy=False)
+
+            blocks_all.append(P_all)
+            blocks_even.append(P_even)
+            blocks_odd.append(P_odd)
+
+            ids_blocks.append(ids)
+            xyz_blocks.append(xyz)
+            eid_blocks.append(np.array([eid] * ids.shape[0], dtype=object))
+            fov_blocks.append(np.array([fov] * ids.shape[0], dtype=object))
+
+            del segs_all, segs_even, segs_odd, P_all, P_even, P_odd
+            gc.collect()
 
     if not blocks_all:
         raise RuntimeError("No FOV blocks aggregated (all were skipped).")
@@ -1668,7 +1960,7 @@ def stack_trial_cuts_meso(
         r["eid"] = eid_all
         r["FOV"] = fov_all
         r["ttypes"] = list(ref_ttypes)
-        r["len"] = {t: int(ref_len[t]) for t in ref_ttypes}
+        r["len"] = {t: 1 for t in ref_ttypes}  # 1 scalar per ttype
 
         r["concat"] = concat.astype(np.float32, copy=False)
         r["fr"] = np.array([np.mean(x) for x in r["concat"]], dtype=np.float32)
@@ -1680,6 +1972,14 @@ def stack_trial_cuts_meso(
         for i in range(N):
             lz_vals[i] = lzs_pci(r["concat_z"][i], rng)
         r["lz"] = lz_vals
+
+        if allow_tr_nums:
+            r["tr_nums"] = {
+                "all": {k: int(v) for k, v in tr_nums_all.items() if v is not None},
+                "even": {k: int(v) for k, v in tr_nums_even.items() if v is not None},
+                "odd": {k: int(v) for k, v in tr_nums_odd.items() if v is not None},
+            }
+
         return r
 
     r_all = _finalize_stack(concat_all)
@@ -1694,6 +1994,8 @@ def stack_trial_cuts_meso(
     print(f"saved: {out_even}")
     print(f"saved: {out_odd}")
     print(f"Function 'stack_trial_cuts_meso' executed in: {time.time() - start_time:.4f} s")
+
+
 
 
 def _load_dict(p: Path) -> dict:
@@ -1719,20 +2021,21 @@ def regional_group_meso(
     symmetric: bool = False,
     rerun: bool = False,
     cache_dir: str | Path | None = None,
+    single_eid: str | list[str] | None = None,   # NEW
 ):
     """
     Mesoscope analogue of `regional_group(...)`, using stack files created by `stack_trial_cuts_meso()`.
 
     Mapping : one of ['Beryl','Cosmos','rm','lz','fr','kmeans','PCA'].
 
-    Policy (updated):
-      - nclus and nclus_rm are independent.
-      - RM cache filenames include nclus_rm.
-      - KMeans cache filenames include nclus_rm (even though labels don't depend on it).
-      - r['isort'] ALWAYS exists for any mapping:
-          * if mapping=='rm': r['isort'] is the RM ordering.
-          * else: r['isort'] is attached from RM cache; computed+saved if missing/invalid.
-        (This does NOT overwrite mapping-specific r['acs']/r['cols'] unless mapping=='rm'.)
+    Updates
+    -------
+    - single_eid:
+        * None / [] -> load standard stack_all/stack_even/stack_odd
+        * str or [str] (length 1) -> load stack_*_{eid}_filter*.npy
+    - If cv=True:
+        * attach r['concat_z_even'] and r['concat_z_odd'] as before
+        * ALSO save concat_z_even into RM and KMeans caches (do not save non-zscored 'concat')
     """
     mapping = str(mapping)
     nclus = int(nclus)
@@ -1753,9 +2056,22 @@ def regional_group_meso(
         cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    stack_all_path = stack_dir / f"stack_all_filter{bool(filter_neurons)}.npy"
-    stack_even_path = stack_dir / f"stack_even_filter{bool(filter_neurons)}.npy"
-    stack_odd_path = stack_dir / f"stack_odd_filter{bool(filter_neurons)}.npy"
+    # normalize single_eid
+    if single_eid is None:
+        single_eids: list[str] = []
+    elif isinstance(single_eid, str):
+        single_eids = [single_eid]
+    else:
+        single_eids = list(single_eid)
+
+    if len(single_eids) > 1:
+        raise ValueError("regional_group_meso: single_eid must be None/[] or a single eid (str or [str]).")
+
+    eid_tag = f"_{single_eids[0]}" if len(single_eids) == 1 else ""
+
+    stack_all_path = stack_dir / f"stack_all{eid_tag}_filter{bool(filter_neurons)}.npy"
+    stack_even_path = stack_dir / f"stack_even{eid_tag}_filter{bool(filter_neurons)}.npy"
+    stack_odd_path = stack_dir / f"stack_odd{eid_tag}_filter{bool(filter_neurons)}.npy"
 
     if not stack_all_path.is_file():
         raise FileNotFoundError(f"Missing meso stack: {stack_all_path}")
@@ -1775,28 +2091,59 @@ def regional_group_meso(
         r_even = _load_dict(stack_even_path)
         r_odd = _load_dict(stack_odd_path)
 
-        N = int(np.asarray(r["concat"]).shape[0])
-        if int(np.asarray(r_even["concat"]).shape[0]) != N or int(np.asarray(r_odd["concat"]).shape[0]) != N:
-            raise ValueError("even/odd stacks do not match N of all-stack (ordering mismatch).")
+        # stacks may no longer contain 'concat' (new policy), so use concat_z if present, else fall back to concat
+        def _get_feat_for_cv(d: dict) -> np.ndarray:
+            if "concat_z" in d:
+                return np.asarray(d["concat_z"], dtype=np.float32)
+            if "concat" in d:
+                # older stacks
+                X = np.asarray(d["concat"], dtype=np.float32)
 
-        def _zscore_rows(X: np.ndarray) -> np.ndarray:
-            X = np.asarray(X, dtype=np.float32)
+                # local zscore (row-wise) to match expected semantics
+                mu = np.nanmean(X, axis=1, keepdims=True)
+                sd = np.nanstd(X, axis=1, keepdims=True)
+                sd = np.where(sd == 0, 1.0, sd)
+                return (X - mu) / sd
+            raise KeyError("cv stacks must contain 'concat_z' (preferred) or legacy 'concat'.")
+
+        X_all = None
+        if "concat_z" in r:
+            X_all = np.asarray(r["concat_z"], dtype=np.float32)
+        elif "concat" in r:
+            # legacy all-stack
+            X = np.asarray(r["concat"], dtype=np.float32)
             mu = np.nanmean(X, axis=1, keepdims=True)
             sd = np.nanstd(X, axis=1, keepdims=True)
             sd = np.where(sd == 0, 1.0, sd)
-            return (X - mu) / sd
+            X_all = (X - mu) / sd
+        else:
+            raise KeyError("Saved all-stack lacks 'concat_z' (preferred) or legacy 'concat'.")
 
-        r["concat_z_even"] = _zscore_rows(np.asarray(r_even["concat"], dtype=np.float32))
-        r["concat_z_odd"] = _zscore_rows(np.asarray(r_odd["concat"], dtype=np.float32))
+        X_even = _get_feat_for_cv(r_even)
+        X_odd = _get_feat_for_cv(r_odd)
+
+        N = int(X_all.shape[0])
+        if int(X_even.shape[0]) != N or int(X_odd.shape[0]) != N:
+            raise ValueError("even/odd stacks do not match N of all-stack (ordering mismatch).")
+
+        r["concat_z_even"] = X_even
+        r["concat_z_odd"] = X_odd
 
     # ---------- common bookkeeping ----------
     if "xyz" not in r:
         raise KeyError("Saved stack lacks 'xyz'.")
-    r["nums"] = np.arange(np.asarray(r["xyz"]).shape[0], dtype=int)
 
     feat_key = "concat_z"
     if feat_key not in r:
-        raise KeyError(f"Saved stack lacks '{feat_key}'.")
+        # allow legacy stacks
+        if "concat" in r:
+            X = np.asarray(r["concat"], dtype=np.float32)
+            mu = np.nanmean(X, axis=1, keepdims=True)
+            sd = np.nanstd(X, axis=1, keepdims=True)
+            sd = np.where(sd == 0, 1.0, sd)
+            r["concat_z"] = (X - mu) / sd
+        else:
+            raise KeyError(f"Saved stack lacks '{feat_key}' (or legacy 'concat').")
 
     n_rows = int(np.asarray(r[feat_key]).shape[0])
 
@@ -1807,18 +2154,19 @@ def regional_group_meso(
 
     # ---------- cache paths ----------
     def _cache_path(kind: str) -> Path:
-        # RM filenames depend on nclus_rm only
+        # include single-eid tag in cache names so per-eid caches do not collide
+        eid_part = f"_eid{single_eids[0]}" if len(single_eids) == 1 else ""
+
         if kind == "rm":
-            base = f"meso_rm_filter{bool(filter_neurons)}_cv{bool(cv)}_nclusrm{nclus_rm}"
+            base = f"meso_rm{eid_part}_filter{bool(filter_neurons)}_cv{bool(cv)}_nclusrm{nclus_rm}"
             return cache_dir / (base + ".npy")
 
-        # KMeans filenames include nclus_rm by policy (even though labels don't depend on it)
         if kind == "kmeans":
-            base = f"meso_kmeans_filter{bool(filter_neurons)}_cv{bool(cv)}_n{nclus}_nclusrm{nclus_rm}"
+            base = f"meso_kmeans{eid_part}_filter{bool(filter_neurons)}_cv{bool(cv)}_n{nclus}_nclusrm{nclus_rm}"
             return cache_dir / (base + ".npy")
 
         if kind == "pca":
-            base = f"meso_pca_filter{bool(filter_neurons)}_cv{bool(cv)}"
+            base = f"meso_pca{eid_part}_filter{bool(filter_neurons)}_cv{bool(cv)}"
             return cache_dir / (base + ".npy")
 
         raise ValueError(kind)
@@ -1888,16 +2236,17 @@ def regional_group_meso(
         if labels.shape[0] != n_rows or isort.shape[0] != n_rows:
             raise ValueError("Rastermap outputs do not match all-stack length.")
 
-        np.save(
-            p,
-            {
-                "rm_labels": labels,
-                "isort": isort,
-                "order_sig": r["_order_signature"],
-                "nclus_rm": nclus_rm,
-            },
-            allow_pickle=True,
-        )
+        payload = {
+            "rm_labels": labels,
+            "isort": isort,
+            "order_sig": r["_order_signature"],
+            "nclus_rm": nclus_rm,
+        }
+        # NEW: if cv=True, save concat_z_even into cache (but do not save any non-zscored 'concat')
+        if cv:
+            payload["concat_z_even"] = np.asarray(r["concat_z_even"], dtype=np.float32)
+
+        np.save(p, payload, allow_pickle=True)
         return labels, isort
 
     def _ensure_rm_isort_attached() -> None:
@@ -1952,23 +2301,23 @@ def regional_group_meso(
             if clusters.shape[0] != n_rows:
                 raise ValueError("KMeans labels do not match all-stack length.")
 
-            np.save(
-                km_cache_path,
-                {
-                    "kmeans_labels": clusters,
-                    "order_sig": r["_order_signature"],
-                    "feat_fit": feat_fit,
-                    "nclus": nclus,
-                },
-                allow_pickle=True,
-            )
+            payload = {
+                "kmeans_labels": clusters,
+                "order_sig": r["_order_signature"],
+                "feat_fit": feat_fit,
+                "nclus": nclus,
+            }
+            # NEW: if cv=True, save concat_z_even into cache (but do not save any non-zscored 'concat')
+            if cv:
+                payload["concat_z_even"] = np.asarray(r["concat_z_even"], dtype=np.float32)
+
+            np.save(km_cache_path, payload, allow_pickle=True)
 
         cols, color_map = _tab20_color_map_for_labels(clusters)
         r["els"] = [Line2D([0], [0], color=color_map[u], lw=4, label=f"{u + 1}") for u in np.sort(np.unique(clusters))]
         r["acs"] = clusters
         r["cols"] = cols
 
-        # always attach RM ordering
         _ensure_rm_isort_attached()
 
     elif mapping == "PCA":
@@ -2090,6 +2439,7 @@ def regional_group_meso(
 
 
 
+
 ######################################################
 ###########  plotting
 ######################################################
@@ -2113,6 +2463,185 @@ def _override_cols_tab20(r, *, key_labels: str = "acs", key_cols: str = "cols") 
     r[key_cols] = np.stack([cat2rgba[l] for l in labels], axis=0).astype(np.float32, copy=False)
 
 
+def scatter_x_vs_cv_sim_meso(
+    *,
+    stack_dir=None,
+    filter_neurons: bool = True,
+    mapping: str = "Beryl",
+    cv: bool = True,
+    nclus: int = 20,
+    nclus_rm: int = 20,
+    rerun: bool = False,
+    single_eid: str | None = None,
+    xvar: str = "fr",
+    jitter: float = 0.15,
+    shuf: bool = True,
+    shuf_seed: int = 0,
+    ax=None,
+):
+    """
+    Scatter plot:
+      y = per-neuron CV similarity = 0.5*(cosine(concat_z_even, concat_z_odd) + 1)
+
+    If shuf=True:
+      - compute per-neuron shuffle control by independently permuting each row of X_odd
+      - plot shuffle points in grey, real points in black (same x)
+    """
+    # --- load grouped data ---
+    r = regional_group_meso(
+        mapping=mapping,
+        stack_dir=stack_dir,
+        filter_neurons=filter_neurons,
+        cv=cv,
+        nclus=nclus,
+        nclus_rm=nclus_rm,
+        rerun=rerun,
+        single_eid=single_eid,
+    )
+
+    # --- required keys ---
+    for k in ("concat_z_even", "concat_z_odd"):
+        if k not in r:
+            raise KeyError(f"Required key '{k}' missing from result dict.")
+    if xvar in ("fr", "lz") and xvar not in r:
+        raise KeyError(f"xvar='{xvar}' requires r['{xvar}'].")
+
+    # --- x variable ---
+    xticks = None
+    xticklabels = None
+
+    if xvar == "fr":
+        x = np.asarray(r["fr"], float)
+        xlabel = "firing rate (fr)"
+
+    elif xvar == "lz":
+        x = np.asarray(r["lz"], float)
+        xlabel = "LZ / PCI complexity"
+
+    elif xvar == "acs":
+        if "acs" not in r:
+            raise KeyError("xvar='acs' requires r['acs'].")
+
+        acs_arr = np.asarray(r["acs"])
+
+        # numeric acs → use directly
+        if np.issubdtype(acs_arr.dtype, np.number):
+            x = acs_arr.astype(float)
+            xticks = np.unique(x)
+            xticklabels = [str(int(t)) for t in xticks]
+
+        # categorical / string acs → canonical mapping
+        else:
+            uniq_sorted = np.sort(np.unique(acs_arr.astype(str)))
+            acs_to_idx = {lab: i for i, lab in enumerate(uniq_sorted)}
+            x = np.array([acs_to_idx[str(a)] for a in acs_arr], dtype=float)
+
+            xticks = np.arange(len(uniq_sorted))
+            xticklabels = uniq_sorted.tolist()
+
+        # jitter x positions only (do not jitter tick positions)
+        if jitter and jitter > 0:
+            rng = np.random.default_rng(shuf_seed)
+            x = x + rng.uniform(-jitter, jitter, size=x.shape)
+
+        xlabel = "acs"
+
+    else:
+        raise ValueError(f"Unsupported xvar='{xvar}'")
+
+    # --- matrices ---
+    X_even = np.asarray(r["concat_z_even"], float)
+    X_odd  = np.asarray(r["concat_z_odd"], float)
+    if X_even.shape != X_odd.shape:
+        raise ValueError(f"even/odd shape mismatch: {X_even.shape} vs {X_odd.shape}")
+
+    # --- cosine similarity mapped to [0,1] ---
+    def _sim01(A: np.ndarray, B: np.ndarray) -> np.ndarray:
+        num = np.sum(A * B, axis=1)
+        den = np.sqrt(np.sum(A**2, axis=1) * np.sum(B**2, axis=1))
+        out = np.full_like(num, np.nan, float)
+        good = den > 0
+        out[good] = num[good] / den[good]
+        return 0.5 * (out + 1.0)
+
+    sim = _sim01(X_even, X_odd)
+    mean_sim = float(np.nanmean(sim))
+
+    # --- shuffle control: independently permute each row of X_odd ---
+    sim_shuf = None
+    mean_sim_shuf = None
+    if shuf:
+        rng = np.random.default_rng(shuf_seed)
+
+        # per-row random permutation using random keys + argsort
+        keys = rng.random(X_odd.shape)
+        perm = np.argsort(keys, axis=1)
+        X_odd_shuf = np.take_along_axis(X_odd, perm, axis=1)
+
+        sim_shuf = _sim01(X_even, X_odd_shuf)
+        mean_sim_shuf = float(np.nanmean(sim_shuf))
+
+    # --- plotting ---
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(4.5, 4))
+    else:
+        fig = ax.figure
+
+    # REAL data first (black, underneath)
+    ax.scatter(
+        x,
+        sim,
+        s=6,
+        alpha=0.55,
+        linewidths=0,
+        color="k",
+        zorder=1,
+        label="real" if shuf else None,
+    )
+
+    # SHUFFLE on top (grey)
+    if shuf and sim_shuf is not None:
+        ax.scatter(
+            x,
+            sim_shuf,
+            s=6,
+            alpha=0.25,
+            linewidths=0,
+            color="0.6",
+            zorder=2,
+            label="shuffled",
+        )
+
+    if xvar == "acs" and xticks is not None and xticklabels is not None:
+        ax.set_xticks(xticks)
+        ax.set_xticklabels(xticklabels, rotation=90)
+
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("CV similarity (0.5·(cos+1))")
+    ax.set_ylim(-0.05, 1.05)
+
+    # reference: cos=0 -> sim=0.5
+    ax.axhline(0.5, color="k", lw=0.8, alpha=0.25)
+
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+    if shuf:
+        ax.legend(frameon=False)
+
+    # --- title ---
+    title = f"CV similarity vs {xvar} | mean={mean_sim:.3f}"
+    if shuf and mean_sim_shuf is not None:
+        title += f"\nshuf={mean_sim_shuf:.3f} | Δ={mean_sim - mean_sim_shuf:+.3f}"
+    if single_eid is not None:
+        title += f" | eid={single_eid[:3]}..."
+    ax.set_title(title)
+
+    plt.tight_layout()
+
+
+
+
 
 def plot_rastermap_meso(
     *,
@@ -2123,13 +2652,13 @@ def plot_rastermap_meso(
     cv: bool = True,
     sort_method: str = "rastermap",   # 'rastermap' or 'acs'
     nclus: int = 100,
-    nclus_rm: int | None = None,
+    nclus_rm: int = 20,
     rerun: bool = False,
     bounds: bool = True,
     bg: bool = False,
     bg_bright: float = 0.99,
     vmax: float = 2.0,
-    interp: str = "antialiased",
+    interp: str = "none",             # default for single values per PETH
     img_only: bool = False,
     clabels: str | int = "all",
     fps: float = 8,
@@ -2141,16 +2670,16 @@ def plot_rastermap_meso(
     symmetric: bool = False,
     clsfig: bool = False,
     peth_dict: dict = peth_dictm,
-    exa: bool = False,                 # NEW
+    exa: bool = False,
+    single_eid: str | None = None,
 ):
     """
     Simplified mesoscope raster plot.
 
     If exa=True, also opens a new figure with plot_cluster_mean_PETHs_meso(r, ...).
 
-    Adds a descriptor string composed of:
-      mapping, cv, sort_method, nclus, nclus_rm
-    used for window title and (if saving) filename.
+    Descriptor (used for window title + filename if saving):
+      single_eid, mapping, cv, sort_method, nclus, nclus_rm
     """
     # --- get grouped result dict ---
     r = regional_group_meso(
@@ -2165,12 +2694,12 @@ def plot_rastermap_meso(
         time_lag_window=time_lag_window,
         symmetric=symmetric,
         rerun=rerun,
+        single_eid=single_eid,
     )
 
     if exa:
-        # separate figure
         plt.ion()
-        plot_cluster_mean_PETHs_meso(r)
+        plot_cluster_mean_PETHs_meso(r, feat=feat, peth_dict=peth_dict)
 
     if feat not in r:
         raise KeyError(f"feat='{feat}' not in result dict. Available keys: {list(r.keys())[:30]}...")
@@ -2181,7 +2710,10 @@ def plot_rastermap_meso(
 
     # --- descriptor ---
     nclus_rm_eff = int(nclus) if nclus_rm is None else int(nclus_rm)
-    descriptor = f"mapping={mapping}|cv={cv}|sort={sort_method}|nclus={int(nclus)}|nclus_rm={nclus_rm_eff}"
+    eid_desc = str(single_eid) if single_eid is not None else "all"
+    descriptor = (
+        f"eid={eid_desc[:3]}...|feat={feat}|mapping={mapping}|cv={cv}|sort={sort_method}|nclus={int(nclus)}|nclus_rm={nclus_rm_eff}"
+    )
 
     # --- sorting ---
     if sort_method == "rastermap":
@@ -2258,7 +2790,6 @@ def plot_rastermap_meso(
         del rgba_overlay
         gc.collect()
 
-    # avoid half-pixel strip issues
     ax.set_xlim(0, n_cols)
     ax.set_ylim(n_rows, 0)
 
@@ -2303,7 +2834,6 @@ def plot_rastermap_meso(
                 clip_on=False,
             )
 
-    # --- vertical segment boundaries + top labels (text), centered & boundary-shifted ---
     if "len" in r and isinstance(r["len"], dict) and len(r["len"]) > 0:
         ordered_segments = list(r["len"].keys())
 
@@ -2311,50 +2841,46 @@ def plot_rastermap_meso(
         if labels is None:
             labels = {k: k for k in ordered_segments}
 
-        trans_top = mpl.transforms.blended_transform_factory(ax.transData, ax.transAxes)
+        # one scalar per PETH -> one column
+        n_seg = min(len(ordered_segments), n_cols)
 
-        h = 0
-        for seg in ordered_segments:
-            seg_len = int(r["len"][seg])
-            end_bin = h + seg_len
-            if end_bin > n_cols:
-                break
+        # IMPORTANT: shift ticks by +0.5 so they describe each column correctly
+        xticks = np.arange(n_seg) + 0.5
+        ax.set_xticks(xticks)
+        ax.set_xticklabels(
+            [labels.get(seg, seg) for seg in ordered_segments[:n_seg]],
+            rotation=90,
+        )
 
-            # boundary BETWEEN samples: between (end_bin-1) and (end_bin)
-            xline = end_bin - 0.5
-            if 0 <= xline <= (n_cols - 1):
-                ax.axvline(xline, linestyle=":", linewidth=1, color="grey", zorder=6)
+        # move ticks/labels to top only
+        ax.xaxis.set_ticks_position("top")
+        ax.tick_params(
+            axis="x",
+            which="both",
+            top=True,
+            labeltop=True,
+            bottom=False,
+            labelbottom=False,
+        )
 
-            if not img_only:
-                # center of bins [h, ..., end_bin-1]
-                center = h + (seg_len - 1) / 2.0
-                ax.text(
-                    center,
-                    1.02,
-                    labels.get(seg, seg),
-                    rotation=90,
-                    fontsize=10,
-                    ha="center",
-                    va="bottom",
-                    transform=trans_top,
-                    clip_on=False,
-                )
+        fontsize = float(np.clip(180 / max(n_seg, 1), 6, 12))
+        for lab in ax.get_xticklabels():
+            lab.set_fontsize(fontsize)
 
-            h = end_bin
-
-
-    # --- x-axis ticks in seconds ---
-    if fps is not None and float(fps) > 0:
-        step = max(int(round(1.0 * float(fps))), 1)  # 1-second ticks
-        x_ticks = np.arange(0, n_cols + 1, step)
-        ax.set_xticks(x_ticks)
-        ax.set_xticklabels([f"{int(t / float(fps))}" for t in x_ticks])
-        ax.set_xlabel("time [sec]")
+        ax.set_xlabel("")
     else:
-        ax.set_xlabel("time [frames]")
+        # fallback (should not happen if stacks are well-formed)
+        if fps is not None and float(fps) > 0:
+            step = max(int(round(1.0 * float(fps))), 1)
+            x_ticks = np.arange(0, n_cols + 1, step)
+            ax.set_xticks(x_ticks)
+            ax.set_xticklabels([f"{int(t / float(fps))}" for t in x_ticks])
+            ax.set_xlabel("time [sec]")
+        else:
+            ax.set_xlabel("PETH index")
 
     ax.set_ylabel("cells")
-    ax.spines["top"].set_visible(False)
+    ax.spines["top"].set_visible(True)
     ax.spines["right"].set_visible(False)
 
     if img_only:
@@ -2381,26 +2907,33 @@ def plot_rastermap_meso(
         plt.close(fig)
 
 
-
-
-
 def plot_cluster_mean_PETHs_meso(
     r: dict,
     *,
     feat: str = "concat_z",
-    fps: float = 8.0,
     extraclus=None,
     axx=None,
     alone: bool = True,
     mapping: str | None = None,
-    vline_style: str = ":",
-    vline_lw: float = 1.0,
-    vline_color: str = "grey",
+    vmax: float | None = None,
+    vmin: float | None = None,
+    interp: str = "none",
     top_labels: bool = True,
     top_label_fs: float = 10.0,
-    # pretty segment labels (LaTeX) for TOP labels only
     peth_dict: dict = peth_dictm,
 ):
+    """
+    Plot cluster-mean PETH values for mesoscope data.
+
+    IMPORTANT:
+    - Each PETH type contributes exactly ONE scalar value (1 column).
+    - Visualization is done with imshow (1 × n_peth row per cluster, or overlay rows).
+
+    Modes
+    -----
+    - overlay mode (extraclus non-empty): one axis, multiple rows (one per requested cluster)
+    - multi-panel mode (extraclus empty): one axis per cluster (each axis shows a 1×n_peth image)
+    """
     if feat not in r:
         raise KeyError(f"Feature '{feat}' not in result dict.")
     if "acs" not in r or "cols" not in r:
@@ -2409,8 +2942,6 @@ def plot_cluster_mean_PETHs_meso(
         raise KeyError("r['len'] (segment lengths) missing or empty.")
 
     ordered_segments = list(r["len"].keys())
-    if peth_dict is None:
-        peth_dict = r.get("peth_dict", None)
     if peth_dict is None:
         peth_dict = {k: k for k in ordered_segments}
 
@@ -2421,100 +2952,75 @@ def plot_cluster_mean_PETHs_meso(
         raise TypeError("extraclus must be a list/tuple/array of integers (or empty).")
     extraclus = [int(x) for x in extraclus]
 
-    X = np.asarray(r[feat])
+    X = np.asarray(r[feat])          # (N_cells, N_peth)
     acs = np.asarray(r["acs"])
-    cols = np.asarray(r["cols"])
+    n_peth = int(X.shape[1])
+
+    # tick/label centers on columns
+    x_centers = np.arange(n_peth) + 0.5
+    xticklabels = [peth_dict.get(seg, seg) for seg in ordered_segments[:n_peth]]
 
     clu_vals = np.array(sorted(np.unique(acs)))
     n_clu = len(clu_vals)
     if n_clu > 50 and len(extraclus) == 0:
-        print("too many (>50) line plots!")
+        print("too many (>50) plots!")
         return
 
-    n_bins = int(X.shape[1])
+    # common extent so ticks at 0.5..n-0.5 align with imshow pixel centers
+    extent = (0, n_peth, 0, 1)  # x in [0,n_peth], y in [0,1] for single-row images
 
-    # time axis
-    fps = float(fps) if fps is not None else 0.0
-    if fps > 0:
-        xx = np.arange(n_bins) / fps
-        to_x = lambda b: b / fps
-        xlabel = "time [sec]"
-    else:
-        xx = np.arange(n_bins)
-        to_x = lambda b: b
-        xlabel = "time [frames]"
+    def _set_top_peth_ticks(ax):
+        if not top_labels:
+            return
+        ax.set_xticks(x_centers)
+        ax.set_xticklabels(xticklabels, rotation=90, fontsize=top_label_fs)
+        ax.xaxis.set_ticks_position("top")
+        ax.tick_params(axis="x", which="both", top=True, labeltop=True, bottom=False, labelbottom=False)
 
-    seg_lengths = [int(r["len"][s]) for s in ordered_segments]
-    if sum(seg_lengths) != n_bins:
-        print(f"[warn] sum(r['len'])={sum(seg_lengths)} != n_bins={n_bins}")
-
-    def _draw_segments(ax, *, labels_on_top: bool):
-        h = 0
-        if labels_on_top and top_labels:
-            trans_top = mpl.transforms.blended_transform_factory(ax.transData, ax.transAxes)
-
-        for s in ordered_segments:
-            seg_len = int(r["len"][s])
-            xv_bins = h + seg_len
-            if xv_bins > n_bins:
-                break
-
-            # draw boundary BETWEEN samples: between (xv_bins-1) and (xv_bins)
-            # boundary
-            xline_bins = xv_bins - 0.5
-            ax.axvline(
-                to_x(xline_bins),
-                linestyle=vline_style,
-                linewidth=vline_lw,
-                color=vline_color,
-                zorder=0,
-            )
-
-            # centered top label
-            if labels_on_top and top_labels:
-                seg_center = h + (seg_len - 1) / 2.0
-                ax.text(
-                    to_x(seg_center),
-                    1.02,
-                    peth_dict.get(s, s),
-                    rotation=90,
-                    fontsize=top_label_fs,
-                    ha="center",
-                    va="bottom",
-                    transform=trans_top,
-                    clip_on=False,
-                )
-            h += seg_len
-
-
-    # ---------------- overlay mode ----------------
+    # ================= overlay mode =================
     if len(extraclus) > 0:
         valid = set(int(c) for c in clu_vals.tolist())
         bad = [c for c in extraclus if c not in valid]
         if bad:
             raise ValueError(f"extraclus contains invalid cluster IDs {bad}. Valid: {sorted(valid)}")
 
+        # build (K, n_peth) matrix
+        rows = []
+        for clu in extraclus:
+            idx = np.where(acs == clu)[0]
+            if idx.size == 0:
+                rows.append(np.full(n_peth, np.nan, dtype=float))
+            else:
+                rows.append(np.nanmean(X[idx, :], axis=0).astype(float, copy=False))
+        M = np.vstack(rows)  # (K, n_peth)
+
         if axx is None:
-            fg, ax = plt.subplots(figsize=(6, 3))
+            fg, ax = plt.subplots(figsize=(6, max(1.5, 0.35 * len(extraclus) + 1.0)))
         else:
             ax = axx if not isinstance(axx, (list, np.ndarray)) else axx[0]
             fg = ax.figure
 
-        for clu in extraclus:
-            idx = np.where(acs == clu)[0]
-            if idx.size == 0:
-                continue
-            yy = np.nanmean(X[idx, :], axis=0)
-            col = cols[idx[0]]
-            ax.step(xx, yy, where="mid", color=col, linewidth=1.5, label=str(clu))
+        # choose vmin/vmax if not provided
+        vmin_eff = np.nanmin(M) if vmin is None else float(vmin)
+        vmax_eff = np.nanmax(M) if vmax is None else float(vmax)
 
-        _draw_segments(ax, labels_on_top=True)
+        ax.imshow(
+            M,
+            aspect="auto",
+            interpolation=interp,
+            extent=(0, n_peth, len(extraclus), 0),  # origin='upper' via extent
+            vmin=vmin_eff,
+            vmax=vmax_eff,
+        )
 
-        ax.set_xlim(0, to_x(n_bins))
-        ax.set_xlabel(xlabel)
-        ax.spines["top"].set_visible(False)
+        _set_top_peth_ticks(ax)
+
+        ax.set_yticks(np.arange(len(extraclus)) + 0.5)
+        ax.set_yticklabels([str(c) for c in extraclus])
+        ax.set_ylabel("cluster")
+        ax.set_xlabel("")
         ax.spines["right"].set_visible(False)
-        ax.legend(title="cluster", frameon=False, loc="best")
+        ax.spines["bottom"].set_visible(False)
 
         if alone:
             plt.tight_layout()
@@ -2528,9 +3034,9 @@ def plot_cluster_mean_PETHs_meso(
 
         return fg, ax
 
-    # ---------------- multi-panel mode ----------------
+    # ================= multi-panel mode =================
     if axx is None:
-        fg, axx = plt.subplots(nrows=n_clu, sharex=True, sharey=False, figsize=(6, 10))
+        fg, axx = plt.subplots(nrows=n_clu, sharex=True, sharey=False, figsize=(6, max(2.0, 0.28 * n_clu + 1.5)))
     else:
         fg = plt.gcf()
 
@@ -2539,33 +3045,58 @@ def plot_cluster_mean_PETHs_meso(
     if len(axx) != n_clu:
         raise ValueError(f"Expected {n_clu} axes, got {len(axx)}.")
 
+    # global vmin/vmax across all clusters for comparability (unless user pins it)
+    if vmin is None or vmax is None:
+        # compute per-cluster means then global min/max
+        Ms = []
+        for clu in clu_vals:
+            idx = np.where(acs == clu)[0]
+            Ms.append(np.nanmean(X[idx, :], axis=0) if idx.size else np.full(n_peth, np.nan))
+        M_all = np.vstack(Ms)
+        vmin_eff = np.nanmin(M_all) if vmin is None else float(vmin)
+        vmax_eff = np.nanmax(M_all) if vmax is None else float(vmax)
+        del M_all
+    else:
+        vmin_eff = float(vmin)
+        vmax_eff = float(vmax)
+
     for k, clu in enumerate(clu_vals):
         idx = np.where(acs == clu)[0]
+        row = (np.nanmean(X[idx, :], axis=0) if idx.size else np.full(n_peth, np.nan)).astype(float, copy=False)
 
-        axx[k].spines["top"].set_visible(False)
-        axx[k].spines["right"].set_visible(False)
-        axx[k].spines["left"].set_visible(False)
-        axx[k].tick_params(left=False, labelleft=False)
+        ax = axx[k]
+        ax.imshow(
+            row[None, :],                 # (1, n_peth)
+            aspect="auto",
+            interpolation=interp,
+            extent=extent,
+            vmin=vmin_eff,
+            vmax=vmax_eff,
+        )
 
-        yy = np.nanmean(X[idx, :], axis=0) if idx.size else np.full(n_bins, np.nan)
-        col = cols[idx[0]] if idx.size else (0, 0, 0, 1)
-        axx[k].step(xx, yy, where="mid", color=col, linewidth=1.5)
+        ax.set_yticks([])
 
-        # y label: cluster / acs category (as before)
-        axx[k].set_ylabel(str(clu), rotation=0, labelpad=10)
+        # y label: cluster id
+        ax.set_ylabel(str(clu), rotation=0, labelpad=10)
 
-        if k != (n_clu - 1):
-            axx[k].spines["bottom"].set_visible(False)
-            axx[k].tick_params(bottom=False, labelbottom=False)
+        # top labels only on first axis
+        if k == 0:
+            _set_top_peth_ticks(ax)
         else:
-            axx[k].spines["bottom"].set_visible(True)
-            axx[k].tick_params(bottom=True, labelbottom=True)
+            ax.tick_params(axis="x", which="both", top=False, labeltop=False, bottom=False, labelbottom=False)
 
-        # boundaries on every axis; TOP labels only on first axis (like your ephys version)
-        _draw_segments(axx[k], labels_on_top=(k == 0))
-        axx[k].set_xlim(0, to_x(n_bins))
+        # remove clutter
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.spines["left"].set_visible(False)
+        if k != (n_clu - 1):
+            ax.spines["bottom"].set_visible(False)
 
-    axx[-1].set_xlabel(xlabel)
+        ax.set_xlim(0, n_peth)
+        ax.set_ylim(0, 1)
+
+    # no bottom xlabel (x labels are on top of first axis)
+    axx[-1].set_xlabel("")
 
     if alone:
         plt.tight_layout()
@@ -2578,6 +3109,8 @@ def plot_cluster_mean_PETHs_meso(
         pass
 
     plt.show()
+
+
 
 
 def plot_xy_meso(
