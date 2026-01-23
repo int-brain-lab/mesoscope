@@ -3,7 +3,9 @@ from pathlib import Path
 from tqdm import tqdm
 import pickle
 from itertools import combinations
+from copy import copy
 from datetime import datetime
+
 import numpy as np
 import pandas as pd
 import pynapple as nap
@@ -33,7 +35,7 @@ def parse_cannonicals_sessions_file(path: Path) -> pd.DataFrame:
 
 
 # %% new data loading approach
-def load_imaging_data(eid: str, fov: str, deconvolved: bool = True):
+def load_imaging_data(eid: str, fov: str, deconvolved: bool = True) -> nap.TsdFrame:
     session_path = base_folder / one.eid2path(eid).session_path_short()
     fov_collection = f"alf/{fov}"
 
@@ -98,7 +100,9 @@ def load_imaging_data(eid: str, fov: str, deconvolved: bool = True):
 
 
 # load behavior
-def load_behavior_data(eid):
+def load_behavior_data(eid: str) -> pd.DataFrame:
+    """helper to load the trials table belonging to an eid and adding the relevant columns
+    necessary for creating the response feature vectors"""
     trials_table_file = list((base_folder / one.eid2path(eid).session_path_short()).rglob("*trials.table*"))
     assert len(trials_table_file) == 1
     trials_df = pd.read_parquet(trials_table_file[0])
@@ -111,6 +115,7 @@ def extract_event_based_responses(
     trials_df: pd.DataFrame,
     event_definitions: dict,
 ) -> pd.DataFrame:
+    """computes the feature vectors for all neurons / session"""
     stim_avgs = {}
     for event, definition in event_definitions.items():
         _trials_df = trials_df.query(definition["query"])
@@ -133,13 +138,14 @@ def extract_event_based_responses(
 
 
 def process_imaging_data(imaging_data: nap.TsdFrame) -> nap.TsdFrame:
-    # normalize
+    """ """
     a, b = np.percentile(imaging_data, (20, 99))
     imaging_data = (imaging_data - a) / (b - a)
     return imaging_data
 
 
-def get_fovs(eid):
+def get_fovs(eid: str) -> np.ndarray:
+    """helper to get all FOVs for a session"""
     session_path = base_folder / one.eid2path(eid).session_path_short()
     # infer fov collections
     fov_folders = list(session_path.rglob("*alf/FOV_??*"))
@@ -151,6 +157,7 @@ def get_fovs(eid):
 subject = "SP058"
 # session_type selection: biased or training
 session_type = "biased"
+# session_type = "training"
 
 if session_type == "biased":
     event_definitions = event_definitions_biasedCW
@@ -185,10 +192,10 @@ for eid in tqdm(eids):
         metadata.append(imaging_data[eid][fov].metadata)
     event_responses = pd.concat(event_responses)
     metadata = pd.concat(metadata)
-    responses[eid] = (event_responses, metadata)
+    responses[eid] = (event_responses, metadata)  # FIXME this isn't great, leads to hard to read syntax later on
 
 # %% correlations - unit feature vectors, pairwise, by eid
-# pairwise eids combinations
+# a df with all the pairwise eids combinations and their time delta
 eid_combos = list(combinations(eids, 2))
 eid_combos = pd.DataFrame(eid_combos, columns=["eid_a", "eid_b"])
 for i, row in eid_combos.iterrows():
@@ -198,7 +205,7 @@ for i, row in eid_combos.iterrows():
 
 event_order = np.sort(list(event_definitions.keys()))
 
-# %% extract
+# %% extraction run for all
 results = []
 for i, row in eid_combos.iterrows():
     common_roicat_UCIDs = np.array(
@@ -212,6 +219,8 @@ for i, row in eid_combos.iterrows():
     # filter out nan
     common_roicat_UCIDs = common_roicat_UCIDs[~pd.isna(common_roicat_UCIDs)]
     common_roicat_UCIDs = common_roicat_UCIDs[~(common_roicat_UCIDs == "nan")]
+    # TODO we could filter here for suite2p iscell metric instead of further
+    # below
 
     # subselect cells
     response_pair = []
@@ -238,19 +247,68 @@ for i, row in eid_combos.iterrows():
     )
 
     rhos = np.zeros(common_roicat_UCIDs.shape[0])
-    sel = ["fback1", "fback0", "choiceL", "choiceR"]
+    rhos_feature_shuffle = np.zeros(common_roicat_UCIDs.shape[0])
+    # sel = ["fback1", "fback0", "choiceL", "choiceR"]
     for i, roicat_ucid in enumerate(common_roicat_UCIDs):
         a = response_pair[0].loc[roicat_ucid]
         b = response_pair[1].loc[roicat_ucid]
         # a = a.loc[sel]
         # b = b.loc[sel]
         valid_ix = ~np.logical_or(pd.isna(a), pd.isna(b))
-        rhos[i] = np.corrcoef(a.loc[valid_ix].values, b.loc[valid_ix].values)[0, 1]
+        a_values = a.loc[valid_ix].values
+        b_values = b.loc[valid_ix].values
+        rhos[i] = np.corrcoef(a_values, b_values)[0, 1]
+
+        # feature shuffle
+        np.random.shuffle(a_values)
+        rhos_feature_shuffle[i] = np.corrcoef(a_values, b_values)[0, 1]
+
+    # neuron shuffle
+    rhos_neuron_shuffle = np.zeros(common_roicat_UCIDs.shape[0])
+    common_roicat_UCIDs_shuffle = copy(common_roicat_UCIDs)
+    np.random.shuffle(common_roicat_UCIDs_shuffle)
+    for i, (roicat_ucid_a, roicat_ucid_b) in enumerate(
+        zip(common_roicat_UCIDs, common_roicat_UCIDs_shuffle),
+    ):
+        a = response_pair[0].loc[roicat_ucid_a]
+        b = response_pair[1].loc[roicat_ucid_b]
+        valid_ix = ~np.logical_or(pd.isna(a), pd.isna(b))
+        a_values = a.loc[valid_ix].values
+        b_values = b.loc[valid_ix].values
+        rhos_neuron_shuffle[i] = np.corrcoef(a_values, b_values)[0, 1]
+
+    # neuron within brain region shuffle
+    rhos_region_shuffle = np.zeros(common_roicat_UCIDs.shape[0])
+
+    # get brain regions for roicat_UCID
+    # is this ugly expression
+    brain_regions = responses[row["eid_a"]][1].set_index("roicat_UCID").loc[common_roicat_UCIDs, "region_labels"].values
+    q = pd.DataFrame(zip(common_roicat_UCIDs, brain_regions), columns=["ucid", "brain_region"]).sort_values("brain_region")
+    roicat_UCIDs = q["ucid"].values
+    roicat_UCIDs_region_shuffle = []
+    for brain_region, group in q.groupby("brain_region"):
+        ucids = group["ucid"].values
+        np.random.shuffle(ucids)
+        roicat_UCIDs_region_shuffle.append(ucids)
+    roicat_UCIDs_region_shuffle = np.concatenate(roicat_UCIDs_region_shuffle)
+
+    for i, (roicat_ucid_a, roicat_ucid_b) in enumerate(
+        zip(roicat_UCIDs, roicat_UCIDs_region_shuffle),
+    ):
+        a = response_pair[0].loc[roicat_ucid_a]
+        b = response_pair[1].loc[roicat_ucid_b]
+        valid_ix = ~np.logical_or(pd.isna(a), pd.isna(b))
+        a_values = a.loc[valid_ix].values
+        b_values = b.loc[valid_ix].values
+        rhos_region_shuffle[i] = np.corrcoef(a_values, b_values)[0, 1]
 
     # storing the result for easier plotting
     result_df = pd.DataFrame(columns=["eid_a", "eid_b", "dt", "roicat_UCID", "p", "brain_region"])
     result_df["roicat_UCID"] = common_roicat_UCIDs
     result_df["rho"] = rhos
+    result_df["rho_feature_shuffle"] = rhos_feature_shuffle
+    result_df["rho_neuron_shuffle"] = rhos_neuron_shuffle
+    result_df["rho_region_shuffle"] = rhos_region_shuffle
     result_df["brain_region"] = (
         responses[row["eid_a"]][1].set_index("roicat_UCID").loc[common_roicat_UCIDs, "region_labels"].values
     )
@@ -260,7 +318,54 @@ for i, row in eid_combos.iterrows():
     results.append(result_df)
 
 results = pd.concat(results, axis=0)
+results["dt"] = results["dt"].astype("int")
 
+
+# %%
+from scipy.stats import linregress
+
+plots_folder = Path(__file__).parent / "local" / "plots"
+
+results_ = pd.melt(
+    results[["rho", "rho_feature_shuffle", "rho_neuron_shuffle", "rho_region_shuffle", "dt", "brain_region"]],
+    id_vars=["dt", "brain_region"],
+    value_vars=["rho", "rho_feature_shuffle", "rho_neuron_shuffle", "rho_region_shuffle"],
+)
+
+n = 500
+counts = results_["brain_region"].value_counts()
+brain_regions = counts[counts > n].index
+
+for brain_region in brain_regions:
+    res = results_.groupby("brain_region").get_group(brain_region)
+
+    region_colors = dict(zip(brain_regions, sns.color_palette("husl", n_colors=brain_regions.shape[0])))
+
+    hue_colors = dict(
+        zip(
+            ["rho", "rho_feature_shuffle", "rho_neuron_shuffle", "rho_region_shuffle"],
+            [
+                region_colors[brain_region],
+                "#B6B6B6",
+                "#7B7B7B",
+                "#626262",
+            ],
+        )
+    )
+
+    fig, axes = plt.subplots()
+    max_day = results["dt"].max() + 1
+    sns.barplot(data=res, y="value", x="dt", hue="variable", palette=hue_colors, order=np.arange(1, max_day), ax=axes)
+    axes.axhline(0, linestyle=":", lw=2, alpha=0.5, color="k")
+    axes.set_xlabel("time between sessions (days)")
+    axes.set_ylabel("spearmans ρ")
+    xs = res.groupby("variable").get_group("rho")["dt"]
+    ys = res.groupby("variable").get_group("rho")["value"]
+    linreg = linregress(xs, ys)
+    plt.gca().set_title(f"{subject} - {session_type} - {brain_region}\nslope:{linreg.slope:.2e} - p:{linreg.pvalue:.2e}")
+
+    sns.despine(fig)
+    fig.savefig(plots_folder / f"{subject} - {session_type} - {brain_region.replace('/', '-')}.png")
 
 # %% overall
 from scipy.stats import linregress
@@ -281,6 +386,8 @@ axes.set_ylabel("spearmans ρ")
 linreg = linregress(xs, ys)
 plt.gca().set_title(f"{subject} - {session_type} - slope:{linreg.slope:.5f}, pval:{linreg.pvalue:.2f}")
 sns.despine(fig)
+plots_folder = Path(__file__).parent / "local" / "plots"
+fig.savefig(plots_folder / f"{subject} - {session_type} - all cells.png")
 
 # %% brain region resolved
 # filter into brain regions that have actual numbers
@@ -308,5 +415,6 @@ for region in brain_regions:
     linreg = linregress(xs, ys)
     plt.gca().set_title(f"{subject} - {session_type} - {region} - slope:{linreg.slope:.5f}, pval:{linreg.pvalue:.2f}")
     sns.despine(fig)
+    fig.savefig(plots_folder / f"{subject} - {session_type} - {region.replace('/', '-')}.png")
 
 # %%
