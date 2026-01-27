@@ -74,8 +74,9 @@ def load_imaging_data(eid: str, fov: str, deconvolved: bool = True) -> nap.TsdFr
     with open(file, "rb") as fH:
         roicat_output = pickle.load(fH)
 
+    file = next(chronic_folder.glob(f"*{fov}.clusterUIDs_all.csv"))
     cluster_uids = pd.read_csv(
-        chronic_folder / f"{fov}.clusterUIDs_all.csv",
+        file,
         header=None,
         names=["roicat_UCID"],
     )
@@ -154,11 +155,17 @@ def get_fovs(eid: str) -> np.ndarray:
 
 
 # %%
+
 # selecting the subject
+
+# subject = "SP072"
 subject = "SP058"
+selection = "all cells"
+
 # session_type selection: biased or training
 session_type = "biased"
 # session_type = "training"
+save_plots = True
 
 if session_type == "biased":
     event_definitions = event_definitions_biasedCW
@@ -221,12 +228,18 @@ def get_common_roicat_UCIDs(eids: list[str], responses: dict):
     for eid in eids:
         subset = responses[eid][1].set_index("roicat_UCID").loc[common_roicat_UCIDs]
         refined_ids.append(set(subset.query("iscell > 0.5 & cluster_silhouette > 0.2").index))
-        # refined_ids.append(set(subset.query("iscell > 0.5 & cluster_silhouette > 0.2").index))
 
     return np.array(list(set.intersection(*refined_ids)))
 
 
 # %% extraction run for all
+from scipy.stats import spearmanr
+
+
+def metric(x, y):
+    return spearmanr(x, y)[0]
+
+
 results = []
 for i, row in eid_combos.iterrows():
     common_roicat_UCIDs = get_common_roicat_UCIDs([row["eid_a"], row["eid_b"]], responses)
@@ -247,11 +260,11 @@ for i, row in eid_combos.iterrows():
         valid_ix = ~np.logical_or(pd.isna(a), pd.isna(b))
         a_values = a.loc[valid_ix].values
         b_values = b.loc[valid_ix].values
-        rhos[i] = np.corrcoef(a_values, b_values)[0, 1]
+        rhos[i] = metric(a_values, b_values)
 
         # feature shuffle
         np.random.shuffle(a_values)
-        rhos_feature_shuffle[i] = np.corrcoef(a_values, b_values)[0, 1]
+        rhos_feature_shuffle[i] = metric(a_values, b_values)
 
     # neuron shuffle
     rhos_neuron_shuffle = np.zeros(common_roicat_UCIDs.shape[0])
@@ -265,7 +278,7 @@ for i, row in eid_combos.iterrows():
         valid_ix = ~np.logical_or(pd.isna(a), pd.isna(b))
         a_values = a.loc[valid_ix].values
         b_values = b.loc[valid_ix].values
-        rhos_neuron_shuffle[i] = np.corrcoef(a_values, b_values)[0, 1]
+        rhos_neuron_shuffle[i] = metric(a_values, b_values)
 
     # neuron within brain region shuffle
     rhos_region_shuffle = np.zeros(common_roicat_UCIDs.shape[0])
@@ -290,7 +303,7 @@ for i, row in eid_combos.iterrows():
         valid_ix = ~np.logical_or(pd.isna(a), pd.isna(b))
         a_values = a.loc[valid_ix].values
         b_values = b.loc[valid_ix].values
-        rhos_region_shuffle[i] = np.corrcoef(a_values, b_values)[0, 1]
+        rhos_region_shuffle[i] = metric(a_values, b_values)
 
     # storing the result for easier plotting
     result_df = pd.DataFrame(columns=["eid_a", "eid_b", "dt", "roicat_UCID", "p", "brain_region"])
@@ -310,77 +323,211 @@ for i, row in eid_combos.iterrows():
 results = pd.concat(results, axis=0)
 results["dt"] = results["dt"].astype("int")
 
+if selection == "all cells":
+    results_ = copy(results)
+if selection == "positively correl only":
+    # subselection to only positively correlated
+    selection_ids = results.query("dt == 1 & rho > 0")["roicat_UCID"].values
+    results_ = results.loc[results["roicat_UCID"].isin(selection_ids)]
 
-# %% All cells combined
+# %% PLOT PREP
 plots_folder = Path(__file__).parent / "local" / "plots"
-
-results_ = pd.melt(
-    results[["rho", "rho_feature_shuffle", "rho_neuron_shuffle", "rho_region_shuffle", "dt", "brain_region"]],
-    id_vars=["dt", "brain_region"],
-    value_vars=["rho", "rho_feature_shuffle", "rho_neuron_shuffle", "rho_region_shuffle"],
-)
 
 hue_colors = dict(
     zip(
         ["rho", "rho_feature_shuffle", "rho_neuron_shuffle", "rho_region_shuffle"],
         [
             "#5854CD",
-            "#B6B6B6",
-            "#7B7B7B",
+            "#CFCFCF",
+            "#979797",
             "#626262",
         ],
     )
 )
 
+# %% histograms
+bins = np.linspace(-1, 1, 75)
+dts = np.sort(results["dt"].unique())
+dt_colors = dict(zip(dts, sns.color_palette("viridis", n_colors=dts.shape[0])))
+
 fig, axes = plt.subplots()
-max_day = results["dt"].max() + 1
-sns.barplot(data=results_, y="value", x="dt", hue="variable", palette=hue_colors, order=np.arange(1, max_day), ax=axes)
-axes.axhline(0, linestyle=":", lw=2, alpha=0.5, color="k")
-axes.set_xlabel("time between sessions (days)")
-axes.set_ylabel("spearmans ρ")
-xs = results_.groupby("variable").get_group("rho")["dt"]
-ys = results_.groupby("variable").get_group("rho")["value"]
-linreg = linregress(xs, ys)
-plt.gca().set_title(f"{subject} - {session_type} - all cells\nslope:{linreg.slope:.2e} - p:{linreg.pvalue:.2e}")
-
-sns.despine(fig)
-fig.savefig(plots_folder / f"{subject} - {session_type} - {'all cells'}.png")
-
-
-# %%
-n = 500
-counts = results_["brain_region"].value_counts()
-brain_regions = counts[counts > n].index
-
-for brain_region in brain_regions:
-    res = results_.groupby("brain_region").get_group(brain_region)
-
-    region_colors = dict(zip(brain_regions, sns.color_palette("husl", n_colors=brain_regions.shape[0])))
-
-    hue_colors = dict(
-        zip(
-            ["rho", "rho_feature_shuffle", "rho_neuron_shuffle", "rho_region_shuffle"],
-            [
-                region_colors[brain_region],
-                "#B6B6B6",
-                "#7B7B7B",
-                "#626262",
-            ],
-        )
+for dt in dts:
+    axes.hist(
+        results.query(f"dt == {dt}")["rho"].values, bins=bins, color=dt_colors[dt], alpha=0.7, density=True, label=f"dt={dt}"
     )
 
-    fig, axes = plt.subplots()
-    max_day = results["dt"].max() + 1
-    sns.barplot(data=res, y="value", x="dt", hue="variable", palette=hue_colors, order=np.arange(1, max_day), ax=axes)
-    axes.axhline(0, linestyle=":", lw=2, alpha=0.5, color="k")
-    axes.set_xlabel("time between sessions (days)")
-    axes.set_ylabel("spearmans ρ")
-    xs = res.groupby("variable").get_group("rho")["dt"]
-    ys = res.groupby("variable").get_group("rho")["value"]
-    linreg = linregress(xs, ys)
-    plt.gca().set_title(f"{subject} - {session_type} - {brain_region}\nslope:{linreg.slope:.2e} - p:{linreg.pvalue:.2e}")
-
-    sns.despine(fig)
-    fig.savefig(plots_folder / f"{subject} - {session_type} - {brain_region.replace('/', '-')}.png")
+sns.despine(fig)
+axes.legend()
+axes.set_ylabel("density")
+axes.set_xlabel("spearmans ρ")
+axes.set_title(f"session to session correlations\nall neurons {subject} - {session_type}")
+if save_plots:
+    fig.savefig(plots_folder / f"histograms - {subject} - {session_type} - {selection}.png")
 
 # %%
+results_m = pd.melt(
+    results_[["rho", "rho_feature_shuffle", "rho_neuron_shuffle", "rho_region_shuffle", "dt", "brain_region"]],
+    id_vars=["dt", "brain_region"],
+    value_vars=["rho", "rho_feature_shuffle", "rho_neuron_shuffle", "rho_region_shuffle"],
+)
+
+
+# %% All cells combined bar plot
+def calc_linear_model(x, y, nx=100, nm=2000):
+    """cacluates linear regression on data points x and y
+    calculates confidence intervals by stochastically sampling the model"""
+    linreg = linregress(x, y)
+    xm = np.linspace(x[0], x[-1], nx)
+    Y = np.zeros((nx, nm))
+    ms = linreg.slope + np.random.randn(nm) * linreg.stderr
+    bs = linreg.intercept + np.random.randn(nm) * linreg.intercept_stderr
+
+    for i in range(nm):
+        Y[:, i] = bs[i] + xm * ms[i]
+    return linreg, xm, Y
+
+
+# for all cells
+results_m_median = results_m[["dt", "variable", "value"]].groupby(["dt", "variable"]).apply(np.median).reset_index()
+
+fig, axes = plt.subplots()
+for var, group in results_m_median.groupby("variable"):
+    x = group["dt"].values
+    y = group[0].values
+    axes.plot(x, y, ".", color=hue_colors[var])
+
+    linreg, xm, Y = calc_linear_model(x, y)
+    # add line
+    axes.plot(x, linreg.intercept + x * linreg.slope, lw=2, color=hue_colors[var], label=var)
+    # add shading
+    axes.fill_between(xm, *np.percentile(Y, (5, 95), axis=1), alpha=0.4, color=hue_colors[var], linewidth=0)
+    if var == "rho":
+        axes.set_title(f"{subject} - {session_type} - all cells\nslope:{linreg.slope:.2e} - p:{linreg.pvalue:.2e}")
+
+axes.legend()
+sns.despine(fig)
+axes.set_xlabel("time between sessions (days)")
+axes.set_ylabel("spearmans ρ")
+if save_plots:
+    fig.savefig(plots_folder / f"line plot - {subject} - {session_type} - {selection}.png")
+
+# %% resolved by brain region
+n = 500  # minimum this number of neurons per group
+counts = results_m["brain_region"].value_counts()
+brain_regions = counts[counts > n].index
+region_colors = dict(zip(brain_regions, sns.color_palette("husl", n_colors=brain_regions.shape[0])))
+
+res = (
+    results_m[["dt", "brain_region", "variable", "value"]]
+    .groupby(["dt", "brain_region", "variable"])
+    .apply(np.median)
+    .reset_index()
+)
+
+for brain_region in brain_regions:
+    res_ = res.groupby("brain_region").get_group(brain_region)
+    fig, axes = plt.subplots()
+    for var, group in res_.groupby("variable"):
+        x = group["dt"].values
+        y = group[0].values
+        color = region_colors[brain_region] if var == "rho" else hue_colors[var]
+        axes.plot(x, y, ".", color=color)
+
+        linreg, xm, Y = calc_linear_model(x, y)
+        # add line
+        axes.plot(x, linreg.intercept + x * linreg.slope, lw=2, color=color, label=var)
+        # add shading
+        axes.fill_between(xm, *np.percentile(Y, (5, 95), axis=1), alpha=0.4, color=color, linewidth=0)
+        if var == "rho":
+            axes.set_title(f"{subject} - {session_type} - {brain_region}\nslope:{linreg.slope:.2e} - p:{linreg.pvalue:.2e}")
+
+    axes.legend()
+    sns.despine(fig)
+    axes.set_xlabel("time between sessions (days)")
+    axes.set_ylabel("spearmans ρ")
+    if save_plots:
+        fig.savefig(plots_folder / f"line plot {subject} - {session_type} - {brain_region.replace('/', '-')}.png")
+
+
+# %% barplot of slopes per brain region
+slopes_df = []
+for brain_region in brain_regions:
+    res_ = res.groupby(["brain_region", "variable"]).get_group((brain_region, "rho"))
+    x = res_["dt"].values
+    y = res_[0].values
+    linreg, xm, Y = calc_linear_model(x, y)
+    slopes_df.append(dict(slope=linreg.slope, p=linreg.pvalue, err=linreg.stderr, brain_region=brain_region))
+slopes_df = pd.DataFrame(slopes_df)
+slopes_df = slopes_df.sort_values("slope").reset_index()
+
+fig, axes = plt.subplots()
+
+for i, row in slopes_df.iterrows():
+    color = "royalblue" if row["p"] < 0.05 else "grey"
+    axes.bar(height=row["slope"], x=i, color=color)
+    axes.plot([i, i], [row["slope"] - row["err"], row["slope"] + row["err"]], lw=1, color="k")
+    axes.axvline(i, lw=0.5, linestyle=":", color="k")
+
+axes.set_title(f"slopes per brain region\n{subject} - {session_type}")
+axes.set_xticks(np.arange(slopes_df.shape[0]))
+axes.set_xticklabels(slopes_df["brain_region"], rotation=90, ha="center")
+axes.set_ylabel("slope")
+sns.despine(fig)
+fig.tight_layout()
+if save_plots:
+    fig.savefig(plots_folder / f"slopes barplot {subject} - {session_type} - {brain_region.replace('/', '-')}.png")
+
+
+# %% leftover from schonoover repdrift
+# from numpy import linalg
+# from itertools import combinations
+
+# def angle(a: np.ndarray, b: np.ndarray):
+#     # calculates the angle between to vectors (as 1d arrays)
+#     return np.arccos(np.dot(a, b) / (linalg.norm(a) * linalg.norm(b)))
+
+# def frobenius(A, B):
+#     # frobenius norm of vectors or matrices
+#     # faster than spatial.distance.euclidean(A.flatten(),B.flatten() ) :)
+#     return np.sqrt(np.sum((A - B) ** 2))
+
+# def angle_eval(response: np.ndarray):
+#     # all pairwise angles between vectors in neural response space
+#     # -> each dimension is the response magnitude of a neuron to a given stimulus
+#     # dimensionality of response: neurons x stimuli
+
+#     # returns: n-1 stim x n_pairwise combos
+#     _, n_stims = response.shape
+#     combos = []
+#     for i in range(n_stims):
+#         ix = list(range(n_stims))
+#         ix.remove(i)
+#         combos.append(list(combinations(ix, 2)))
+
+#     return np.array([[angle(response[:, i], response[:, j]) for (i, j) in combos[k]] for k in range(len(combos))])
+
+# common_roicat_UCIDs = get_common_roicat_UCIDs(eids, responses)
+# for i, row in eid_combos.iterrows():
+#     # subselect cells
+#     response_pair = []
+#     for eid in [row["eid_a"], row["eid_b"]]:
+#         response_pair.append(responses[eid][0].set_index(responses[eid][1]["roicat_UCID"]).loc[common_roicat_UCIDs])
+
+#     a = response_pair[0].loc[common_roicat_UCIDs]
+#     b = response_pair[1].loc[common_roicat_UCIDs]
+#     valid_ix = ~np.logical_or(pd.isna(a).values, pd.isna(b).values)
+#     a_values = a.values[:, np.any(valid_ix, axis=0)]
+#     b_values = b.values[:, np.any(valid_ix, axis=0)]
+
+#     dist = frobenius(angle_eval(a_values), angle_eval(b_values))
+
+#     eid_combos.loc[i, "dist"] = dist
+
+# max_day = eid_combos["dt"].max() + 1
+# # sns.barplot(data=results_, y="value", x="dt", hue="variable", palette=hue_colors,  ax=axes)
+# sns.barplot(
+#     data=eid_combos,
+#     x="dt",
+#     y="dist",
+#     order=np.arange(1, max_day),
+# )
