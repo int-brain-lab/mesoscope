@@ -355,50 +355,74 @@ def save_trial_cuts_meso(
         pre: float,
         post: float,
         out_path: Path,
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, dict]:
         """
-        Inclusive endpoint cutting at native frame rate, but we *store only one bin*:
-          - if n_frames == 1: store that single frame
-          - if n_frames  > 1: store nanmean over frames (per trial, per ROI)
+        Cut an inclusive continuous-time window [t0-pre, t0+post] and store one value per trial/ROI:
+        - if n_frames == 1: store that single frame
+        - if n_frames  > 1: store nanmean over frames (per trial, per ROI)
 
-        Writes shape (n_trials, N, 1).
-        Returns (n_trials, 1).
+        Indexing:
+        - event frame index uses nearest frame in frame_times (via searchsorted + neighbor check)
+        - window edges use floor/ceil in units of dt to avoid missing the intended interval
+
+        Returns (n_trials, 1, info_dict).
         """
         pre = float(pre)
         post = float(post)
-
         if not np.isfinite(pre) or not np.isfinite(post):
             raise ValueError("Non-finite pre/post.")
 
-        dt = float(np.median(np.diff(frame_times)))
+        frame_times = np.asarray(frame_times, dtype=float)
+        if frame_times.ndim != 1 or frame_times.size < 2:
+            raise ValueError("frame_times must be 1D with >= 2 elements.")
+
+        dts = np.diff(frame_times)
+        dt = float(np.median(dts))
         if not np.isfinite(dt) or dt <= 0:
             raise ValueError("Bad frame_times dt.")
 
-        frame0 = float(frame_times[0])
-
+        # Window in event-relative time
         start_rel = -pre
         end_rel = post
         if end_rel <= start_rel:
-            raise ValueError(f"Invalid window: [{start_rel}, {end_rel}] relative to event (pre={pre}, post={post}).")
+            raise ValueError(f"Invalid window: [{start_rel}, {end_rel}] relative to event.")
 
-        idx0_rel = int(np.round(start_rel / dt))
-        idx1_rel = int(np.round(end_rel / dt))
+        # Use floor/ceil so we cover the intended continuous interval
+        idx0_rel = int(np.floor(start_rel / dt))
+        idx1_rel = int(np.ceil(end_rel / dt))
         n_frames = idx1_rel - idx0_rel + 1
         if n_frames <= 0:
-            raise ValueError(f"n_frames <= 0 for window [{start_rel},{end_rel}] and dt={dt}.")
+            raise ValueError("n_frames <= 0 after floor/ceil; check pre/post/dt.")
 
         N, T = roi_signal.shape
         n_trials = int(event_times.size)
 
-        offset_frames = np.round(offsets_s / dt).astype(np.int32)  # (N,)
+        # Convert ROI offsets to frames; still an approximation.
+        # (If you want exact handling, you must index with (frame_times + offset_n) per ROI.)
+        offset_frames = np.rint(offsets_s / dt).astype(np.int32)  # (N,)
+
+        # Precompute relative frame offsets
         frame_offsets = (np.arange(n_frames, dtype=np.int32) + idx0_rel)[None, :]  # (1, n_frames)
 
-        mm = np.lib.format.open_memmap(
-            out_path, mode="w+", dtype=np.float32, shape=(n_trials, N, 1)
-        )
+        mm = np.lib.format.open_memmap(out_path, mode="w+", dtype=np.float32, shape=(n_trials, N, 1))
 
-        for i, t0 in enumerate(event_times.astype(float, copy=False)):
-            event_idx = int(np.round((t0 - frame0) / dt))
+        ft0 = frame_times[0]
+        ftN = frame_times[-1]
+
+        def nearest_frame_index(t: float) -> int:
+            """Nearest index in frame_times to time t."""
+            j = int(np.searchsorted(frame_times, t, side="left"))
+            if j <= 0:
+                return 0
+            if j >= frame_times.size:
+                return frame_times.size - 1
+            # pick closer of j-1 and j
+            return j if (frame_times[j] - t) < (t - frame_times[j - 1]) else (j - 1)
+
+        for i, t0 in enumerate(np.asarray(event_times, dtype=float)):
+            event_idx = nearest_frame_index(t0)
+
+            # indices per ROI, per frame in window
             idx = (event_idx + frame_offsets) - offset_frames[:, None]  # (N, n_frames)
 
             valid = (idx >= 0) & (idx < T)
@@ -416,7 +440,24 @@ def save_trial_cuts_meso(
                 print(f"    wrote {i+1}/{n_trials} trials to {out_path.name}")
 
         del mm
-        return n_trials, 1
+
+        # Report realized relative bounds in seconds (given dt-based indexing)
+        realized_start = idx0_rel * dt
+        realized_end = idx1_rel * dt
+
+        info = dict(
+            dt=dt,
+            idx0_rel=idx0_rel,
+            idx1_rel=idx1_rel,
+            n_frames=n_frames,
+            intended=(start_rel, end_rel),
+            realized=(realized_start, realized_end),
+            # Worst-case boundary overshoot relative to intended interval:
+            overshoot_start=(start_rel - realized_start),  # >= 0 typically
+            overshoot_end=(realized_end - end_rel),        # >= 0 typically
+        )
+        return n_trials, 1, info
+
 
     saved_meta_paths: list[Path] = []
 
@@ -547,7 +588,7 @@ def save_trial_cuts_meso(
                 continue
 
             print(f"  {keyname}: {tls[keyname]} trials -> writing {out_path.name}")
-            n_trials, n_frames = _cut_one_peth_to_memmap(
+            n_trials, n_frames, _ = _cut_one_peth_to_memmap(
                 roi_signal=roi_signal,
                 frame_times=frame_times,
                 offsets_s=roi_offsets_use,
@@ -1002,6 +1043,7 @@ def chronic_pair_feature_corr_subject(
     rerun: bool = False,
     roicat_root: str | Path = Path.home() / "chronic_csv",
     server_root: str | Path | None = None,
+    per_reg: bool = True,
 ) -> pd.DataFrame:
     """
     For a given subject (e.g. 'SP058'):
@@ -1380,7 +1422,7 @@ def _eid_date_from_path(one: ONE, eid: str) -> pd.Timestamp:
 
 def plot_chronic_corr_vs_time_subject(
     subject: str = "SP058",
-    eid_c: str = "20ebc2b9-5b4c-42cd-8e4b-65ddb427b7ff",
+    eid_c: str | None = "20ebc2b9-5b4c-42cd-8e4b-65ddb427b7ff",
     *,
     one: ONE | None = None,
     pair_mode: str = "all",   # "consecutive" | "all"
@@ -1389,25 +1431,12 @@ def plot_chronic_corr_vs_time_subject(
     reg_col: str = "area_a",          # "area_a" | "area_b"
     agg: str = "mean",                # "mean" | "median"
     min_neurons: int = 50,
-    # NEW: shuffle control
     shuf: bool = True,
     shuf_seed: int = 0,
     ax: plt.Axes | None = None,
     title: str | None = None,
 ) -> tuple[pd.DataFrame, plt.Axes]:
-    """
-    Load (cached) df = chronic_pair_feature_corr_subject(subject, ...) or recompute if needed,
-    then plot one point per (eid_c, eid_other) pair:
-        y = average corr across all neurons for that pair
-        x = days relative to eid_c (negative = earlier sessions, positive = later)
 
-    Shuffle control (if shuf=True):
-      For each pair-group, compute the same similarity after independently permuting the neuron order
-      (rows) in the A and B feature matrices within that group, then recomputing per-row cosine sim01.
-
-    If per_reg=True, plot separate series per region (reg_col), averaging within (pair, region).
-    Returns (out, ax) where out includes corr_avg, n_neurons, and optionally corr_shuf_avg.
-    """
     if one is None:
         one = ONE()
 
@@ -1415,23 +1444,30 @@ def plot_chronic_corr_vs_time_subject(
         raise ValueError("agg must be 'mean' or 'median'")
     if per_reg and reg_col not in ("area_a", "area_b"):
         raise ValueError("reg_col must be 'area_a' or 'area_b'")
+    if per_reg and not shuf:
+        raise ValueError("per_reg=True requires shuf=True (data − shuffle is plotted).")
 
-    # (1) Load df from cache (inside chronic_pair_feature_corr_subject) or recompute if missing
+    # ------------------------------------------------------------------
+    # (1) Load chronic pairwise dataframe
+    # ------------------------------------------------------------------
     df = chronic_pair_feature_corr_subject(
         subject,
         one=one,
         pair_mode=pair_mode,
         rerun=rerun,
     )
+    if df.empty:
+        raise ValueError(f"Empty df for subject={subject}")
 
-    # ---- helper: choose numeric feature pairs (_a/_b) for recomputing similarity ----
+    # ------------------------------------------------------------------
+    # helpers
+    # ------------------------------------------------------------------
     def _get_feature_pairs(dfin: pd.DataFrame) -> tuple[list[str], list[str]]:
         cols_a = [c for c in dfin.columns if c.endswith("_a")]
         exclude_bases = {
             "eid", "area", "subject", "pair_tag", "FOV", "uid",
             "x", "y", "z",
         }
-        bases = []
         ca_list, cb_list = [], []
         for ca in cols_a:
             base = ca[:-2]
@@ -1440,18 +1476,15 @@ def plot_chronic_corr_vs_time_subject(
             cb = base + "_b"
             if cb not in dfin.columns:
                 continue
-            # require numeric-convertible (at least some finite entries)
             a_num = pd.to_numeric(dfin[ca], errors="coerce")
             b_num = pd.to_numeric(dfin[cb], errors="coerce")
             if np.isfinite(a_num.to_numpy()).any() and np.isfinite(b_num.to_numpy()).any():
-                bases.append(base)
                 ca_list.append(ca)
                 cb_list.append(cb)
         if not ca_list:
             raise ValueError("No numeric feature pairs found for shuffle control.")
         return ca_list, cb_list
 
-    # ---- helper: cosine similarity mapped to [0,1] row-wise ----
     def _rowwise_cos_sim01(A: np.ndarray, B: np.ndarray) -> np.ndarray:
         A = np.asarray(A, float)
         B = np.asarray(B, float)
@@ -1461,117 +1494,214 @@ def plot_chronic_corr_vs_time_subject(
         num = np.sum(A0 * B0, axis=1)
         den = np.sqrt(np.sum(A0 * A0, axis=1) * np.sum(B0 * B0, axis=1))
         den = np.where(den == 0, np.nan, den)
-        cos = num / den
-        return 0.5 * (cos + 1.0)
+        return 0.5 * (num / den + 1.0)
 
-    # (2) Build eid -> start_time map via Alyx (cached locally within this function call)
+    def _nansem(x: np.ndarray) -> float:
+        x = np.asarray(x, float)
+        x = x[np.isfinite(x)]
+        if x.size <= 1:
+            return np.nan
+        return float(np.std(x, ddof=1) / np.sqrt(x.size))
+
+    # ------------------------------------------------------------------
+    # (2) eid → date mapping
+    # ------------------------------------------------------------------
     eids = pd.unique(pd.concat([df["eid_a"], df["eid_b"]], ignore_index=True))
     eid2t = {str(eid): _eid_date_from_path(one, str(eid)) for eid in eids}
 
-    if str(eid_c) not in eid2t:
-        raise ValueError(f"eid_c not present in df / not resolvable: {eid_c}")
+    # ------------------------------------------------------------------
+    # (3) select rows + compute dt_days
+    # ------------------------------------------------------------------
+    if eid_c is None:
+        d0 = df.copy()
+        ta = d0["eid_a"].map(eid2t)
+        tb = d0["eid_b"].map(eid2t)
+        ok = np.isfinite((tb - ta).dt.total_seconds())
+        d0 = d0.loc[ok].copy()
+        d0["dt_days"] = np.abs((tb.loc[ok] - ta.loc[ok]).dt.total_seconds()) / (3600 * 24)
+        group_cols = ["eid_a", "eid_b", "dt_days", "pair_tag"]
+        x_label = "Days between sessions"
+        mode_label = "all pairs"
+    else:
+        if str(eid_c) not in eid2t:
+            raise ValueError(f"eid_c not resolvable: {eid_c}")
+        t_c = eid2t[str(eid_c)]
+        d0 = df[(df["eid_a"] == eid_c) | (df["eid_b"] == eid_c)].copy()
+        if d0.empty:
+            raise ValueError(f"No rows for center eid_c={eid_c}")
+        d0["eid_other"] = np.where(d0["eid_a"] == eid_c, d0["eid_b"], d0["eid_a"])
+        d0["t_other"] = d0["eid_other"].map(eid2t)
+        ok = np.isfinite((d0["t_other"] - t_c).dt.total_seconds())
+        d0 = d0.loc[ok].copy()
+        d0["dt_days"] = (d0["t_other"] - t_c).dt.total_seconds() / (3600 * 24)
+        group_cols = ["eid_other", "dt_days", "pair_tag"]
+        x_label = "Days relative to center eid"
+        mode_label = "centered"
 
-    t_c = eid2t[str(eid_c)]
-
-    # (3) Filter to pairs involving center eid
-    d0 = df[(df["eid_a"] == eid_c) | (df["eid_b"] == eid_c)].copy()
-    if d0.empty:
-        raise ValueError(f"No rows for center eid_c={eid_c} in subject={subject}")
-
-    d0["eid_other"] = np.where(d0["eid_a"] == eid_c, d0["eid_b"], d0["eid_a"])
-    d0["t_other"] = d0["eid_other"].map(eid2t)
-    d0 = d0[np.isfinite((d0["t_other"] - t_c).dt.total_seconds())]
-    d0["dt_days"] = (d0["t_other"] - t_c).dt.total_seconds() / (3600 * 24)
-
-    # (4) Aggregate to one point per pair (or per pair+region)
-    group_cols = ["eid_other", "dt_days", "pair_tag"]
     if per_reg:
-        if reg_col not in d0.columns:
-            raise ValueError(f"reg_col '{reg_col}' not in df columns.")
-        group_cols.append(reg_col)
+        group_cols = group_cols + [reg_col]
 
+    # ------------------------------------------------------------------
+    # (4) aggregate per pair (or pair+region)
+    # ------------------------------------------------------------------
     g = d0.groupby(group_cols, dropna=False)
     corr_avg = g["corr"].mean() if agg == "mean" else g["corr"].median()
+    corr_sem = g["corr"].apply(lambda s: _nansem(s.to_numpy()))
     n_neu = g["corr"].size()
 
     out = (
-        pd.concat([corr_avg.rename("corr_avg"), n_neu.rename("n_neurons")], axis=1)
+        pd.concat(
+            [corr_avg.rename("corr_avg"),
+             corr_sem.rename("corr_sem"),
+             n_neu.rename("n_neurons")],
+            axis=1
+        )
         .reset_index()
         .query("n_neurons >= @min_neurons")
         .sort_values("dt_days", kind="mergesort")
+        .reset_index(drop=True)
     )
 
-    # ---- NEW: shuffle control per group (cheap, uses existing per-row features) ----
+    # ------------------------------------------------------------------
+    # (5) shuffle baseline
+    # ------------------------------------------------------------------
     if shuf:
         ca_list, cb_list = _get_feature_pairs(d0)
         rng = np.random.default_rng(int(shuf_seed))
-
-        # compute shuffled aggregate per group, aligned to `out`
         shuf_vals = []
+
         for _, row in out.iterrows():
-            # filter rows belonging to this group
             m = np.ones(len(d0), dtype=bool)
             for c in group_cols:
                 m &= (d0[c].to_numpy() == row[c])
             dd = d0.loc[m]
-            if dd.empty:
+
+            if dd.empty or dd.shape[0] < min_neurons:
                 shuf_vals.append(np.nan)
                 continue
 
-            A = dd[ca_list].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
-            B = dd[cb_list].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+            A = dd[ca_list].apply(pd.to_numeric, errors="coerce").to_numpy(float)
+            B = dd[cb_list].apply(pd.to_numeric, errors="coerce").to_numpy(float)
 
-            n = A.shape[0]
-            if n < int(min_neurons):
-                shuf_vals.append(np.nan)
-                continue
-
-            # independently permute neuron order within A and within B (break matching)
-            ia = rng.permutation(n)
-            ib = rng.permutation(n)
-
+            ia = rng.permutation(A.shape[0])
+            ib = rng.permutation(A.shape[0])
             sim = _rowwise_cos_sim01(A[ia], B[ib])
-
-            if agg == "mean":
-                shuf_vals.append(float(np.nanmean(sim)))
-            else:
-                shuf_vals.append(float(np.nanmedian(sim)))
+            shuf_vals.append(float(np.nanmean(sim)))
 
         out["corr_shuf_avg"] = np.asarray(shuf_vals, float)
 
-    # (5) Plot
+    # ------------------------------------------------------------------
+    # (6) collapse by dt_days if eid_c is None
+    # ------------------------------------------------------------------
+    out_plot = out
+    if eid_c is None:
+        if not per_reg:
+            out_plot = (
+                out.groupby("dt_days")
+                .agg(
+                    corr_avg=("corr_avg", "mean"),
+                    corr_sem=("corr_avg", _nansem),
+                    corr_shuf_avg=("corr_shuf_avg", "mean"),
+                )
+                .reset_index()
+                .sort_values("dt_days")
+            )
+        else:
+            out_plot = (
+                out.groupby(["dt_days", reg_col])
+                .agg(
+                    corr_avg=("corr_avg", "mean"),
+                    corr_shuf_avg=("corr_shuf_avg", "mean"),
+                )
+                .reset_index()
+                .sort_values(["dt_days", reg_col])
+            )
+
+    # ------------------------------------------------------------------
+    # (7) plotting
+    # ------------------------------------------------------------------
     if ax is None:
         _, ax = plt.subplots(figsize=(6, 3))
 
-    if not per_reg:
-        ax.scatter(out["dt_days"], out["corr_avg"], label="data")
-        if shuf and "corr_shuf_avg" in out.columns:
-            ax.scatter(out["dt_days"], out["corr_shuf_avg"], label="shuffle", alpha=0.6)
-            ax.legend(frameon=False, loc="best")
+    if eid_c is None and per_reg:
+        # Δ = data − shuffle
+        out_plot["delta"] = out_plot["corr_avg"] - out_plot["corr_shuf_avg"]
+
+        for reg, dd in out_plot.groupby(reg_col, sort=False):
+            ax.plot(dd["dt_days"], dd["delta"], marker="o", lw=1.5, label=str(reg))
+
+        # global line
+        gg = out_plot.groupby("dt_days")["delta"].mean().reset_index()
+        ax.plot(gg["dt_days"], gg["delta"], marker="o", lw=2.5, color="k", label="all neurons")
+
+        ax.axhline(0.0, color="k", lw=0.75, alpha=0.4)
+        ax.set_ylabel("Δ cosine similarity (data − shuffle)")
+        ax.legend(frameon=False)
+
     else:
-        for reg, dd in out.groupby(reg_col, sort=False):
-            ax.scatter(dd["dt_days"], dd["corr_avg"], label=str(reg))
-        ax.legend(title=reg_col, bbox_to_anchor=(1.02, 1), loc="upper left", borderaxespad=0)
+        x = out_plot["dt_days"]
+        y = out_plot["corr_avg"]
 
-        # optional: shuffle per_reg (overlay, same color cycle not guaranteed; keep simple)
-        if shuf and "corr_shuf_avg" in out.columns:
-            for reg, dd in out.groupby(reg_col, sort=False):
-                ax.scatter(dd["dt_days"], dd["corr_shuf_avg"], alpha=0.35)
+        ax.plot(x, y, marker="o", lw=1.5)
+        if shuf and "corr_shuf_avg" in out_plot.columns:
+            ys = out_plot["corr_shuf_avg"]
+            ax.plot(x, ys, lw=1.0, alpha=0.6)
+            for xi, ysi, ydi in zip(x, ys, y):
+                if np.isfinite(ysi) and np.isfinite(ydi):
+                    ax.plot([xi, xi], [ysi, ydi], color="k", lw=0.8, alpha=0.4)
 
-    ax.axvline(0.0)
-    ax.set_xlabel("Days relative to center eid")
-    ax.set_ylabel(f"{agg} corr across neurons")
+        ax.set_ylabel(f"{agg} cosine similarity")
+
+    if eid_c is not None:
+        ax.axvline(0.0, color="k", lw=0.75, alpha=0.5)
+
+    ax.set_xlabel(x_label)
+
+    # integer day ticks
+    xmin, xmax = ax.get_xlim()
+    ax.set_xticks(np.arange(np.floor(xmin), np.ceil(xmax) + 1))
+
+    # title
     if title is None:
-        title = f"{subject}: corr vs time (center eid)"
+        title = f"{subject}: cosine similarity vs time ({mode_label})"
         if per_reg:
-            title += f" | per_reg ({reg_col})"
-        if shuf:
-            title += " | +shuffle"
+            title += " | per_reg"
     ax.set_title(title)
 
+    # despine
+    for s in ("top", "right"):
+        ax.spines[s].set_visible(False)
 
+    plt.tight_layout()
 
+    # ------------------------------------------------------------------
+    # (8) concise audit printout
+    # ------------------------------------------------------------------
+    if eid_c is None:
+        print("\nSession pairs grouped by |Δdays|:\n")
+        ta = df["eid_a"].map(eid2t)
+        tb = df["eid_b"].map(eid2t)
+        ok = np.isfinite((tb - ta).dt.total_seconds())
+        dprint = (
+            df.loc[ok, ["eid_a", "eid_b"]]
+            .assign(
+                dt_days_int=lambda x: (
+                    np.abs((tb[ok] - ta[ok]).dt.total_seconds()) / (3600 * 24)
+                ).round().astype(int)
+            )
+            .drop_duplicates()
+            .sort_values(["dt_days_int", "eid_a", "eid_b"])
+        )
 
+        for d, dd in dprint.groupby("dt_days_int"):
+            print(f"Δdays = {d}")
+            for _, r in dd.iterrows():
+                da = eid2t[r["eid_a"]].date()
+                db = eid2t[r["eid_b"]].date()
+                print(f"  {r['eid_a']} ({da})  <->  {r['eid_b']} ({db})")
+            print()
+
+    return out_plot, ax
 
 
 
