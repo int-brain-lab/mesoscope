@@ -1,7 +1,7 @@
 # %%
 from pathlib import Path
+from typing import Literal, Dict, List
 from tqdm import tqdm
-import pickle
 from itertools import combinations
 from copy import copy
 from datetime import datetime
@@ -15,97 +15,36 @@ from one.api import ONE
 from trial_type_definitions import event_definitions_biasedCW, event_definitions_trainingCW, add_info_to_trials_table
 from scipy.stats import linregress
 
-from iblatlas.atlas import AllenAtlas
+import chronic_data_loader as data_loader
 
 one = ONE()
 
-base_folder = Path("/mnt/s0/Data/Subjects")
+BASE_FOLDER = Path("/mnt/s0/Data/Subjects")
 
 
-# %% get all SP058 eids
 def parse_cannonicals_sessions_file(path: Path) -> pd.DataFrame:
     """parses the text file of canonical sessions into a
     DataFrame for easier groupby selection of sessions"""
 
+    session_paths = []
     with open(path, "r") as fH:
-        canonical_sessions = [line.strip() for line in fH.readlines() if line != "\n"]
-    session_paths = [sess.replace("\\", "/") for sess in canonical_sessions]
+        lines = fH.readlines()
+    for line in lines:
+        if line.startswith("#") or line == "\n":
+            continue
+        else:
+            line = line.strip().replace("\\", "/")
+            session_paths.append(line)
+
     eids = [str(one.path2eid(path)) for path in session_paths]
     df = pd.DataFrame(one.alyx.rest("sessions", "list", django=f"id__in,{eids}"))
     return df.drop(columns=["number", "lab", "projects", "url"]).set_index("id")
 
 
-# %% new data loading approach
-def load_imaging_data(eid: str, fov: str, deconvolved: bool = True) -> nap.TsdFrame:
-    session_path = base_folder / one.eid2path(eid).session_path_short()
-    fov_collection = f"alf/{fov}"
-
-    # our uuids
-    fov_uuids = pd.read_csv(session_path / fov_collection / "mpciROIs.uuids.csv")
-
-    # roicat UCIDs
-    roicat_UCIDs = pd.read_csv(
-        session_path / f"{fov_collection}/mpciROIs.clusterUIDs.csv",
-        skip_blank_lines=False,
-        header=None,
-        names=["roicat_UCID"],
-    )
-    roi_info = pd.concat([fov_uuids, roicat_UCIDs], axis=1)
-
-    # other suite2p info: cell classifier
-    roi_info["iscell"] = np.load(session_path / fov_collection / "mpciROIs.cellClassifier.npy")
-
-    # brain region estimate
-    if (session_path / fov_collection / "mpciROIs.brainLocationIds_ccf_2017.npy").exists():
-        roi_info["region_ids"] = np.load(session_path / fov_collection / "mpciROIs.brainLocationIds_ccf_2017.npy")
-    else:
-        roi_info["region_ids"] = np.load(session_path / fov_collection / "mpciROIs.brainLocationIds_ccf_2017_estimate.npy")
-
-    atlas = AllenAtlas()
-    roi_info["region_labels"] = atlas.regions.id2acronym(roi_info["region_ids"].values)
-    roi_info["fov"] = fov
-
-    # roicat data
-    chronic_folder = base_folder / subject / "Chronic"
-    roicat_metrics = ["cluster_intra_means", "cluster_intra_maxs", "cluster_intra_mins", "cluster_silhouette"]
-
-    # get roicat data
-    file = next(chronic_folder.glob(f"*{fov}*tracking.results.pkl"))
-    with open(file, "rb") as fH:
-        roicat_output = pickle.load(fH)
-
-    file = next(chronic_folder.glob(f"*{fov}.clusterUIDs_all.csv"))
-    cluster_uids = pd.read_csv(
-        file,
-        header=None,
-        names=["roicat_UCID"],
-    )
-    roicat_df = pd.DataFrame({metric: roicat_output["quality_metrics"][metric] for metric in roicat_metrics})
-
-    # set index to cluster labels
-    roicat_df.index = np.array(roicat_output["quality_metrics"]["cluster_labels_unique"], dtype="int32")
-    # merge with cluster_uids
-    roicat_df["roicat_UCID"] = cluster_uids
-
-    # combine roi_info with roicat metrics
-    roi_info = pd.merge(roi_info, roicat_df, on="roicat_UCID", how="left")
-
-    # fluorescence data
-    dataset = "mpci.ROIActivityDeconvolved.npy" if deconvolved else "mpci.ROIActivityF.npy"
-
-    # load all traces (suite2p) for one FOV
-    suite2p_data_fov = np.load(session_path / fov_collection / dataset)
-    times = np.load(session_path / fov_collection / "mpci.times.npy")
-    assert suite2p_data_fov.shape[1] == roi_info.shape[0]
-    # as a pynapple object, merged with the metadata
-    return nap.TsdFrame(t=times, d=suite2p_data_fov, metadata=roi_info)
-
-
-# load behavior
 def load_behavior_data(eid: str) -> pd.DataFrame:
     """helper to load the trials table belonging to an eid and adding the relevant columns
     necessary for creating the response feature vectors"""
-    trials_table_file = list((base_folder / one.eid2path(eid).session_path_short()).rglob("*trials.table*"))
+    trials_table_file = list((BASE_FOLDER / one.eid2path(eid).session_path_short()).rglob("*trials.table*"))
     assert len(trials_table_file) == 1
     trials_df = pd.read_parquet(trials_table_file[0])
     trials_df = add_info_to_trials_table(trials_df)
@@ -146,55 +85,43 @@ def process_imaging_data(imaging_data: nap.TsdFrame) -> nap.TsdFrame:
     return imaging_data
 
 
-def get_fovs(eid: str) -> np.ndarray:
-    """helper to get all FOVs for a session"""
-    session_path = base_folder / one.eid2path(eid).session_path_short()
-    # infer fov collections
-    fov_folders = list(session_path.rglob("*alf/FOV_??*"))
-    return np.sort([folder.parts[-1] for folder in fov_folders])
-
-
 # %%
-
 # selecting the subject
-
-# subject = "SP072"
+# subject = "SP060"
 subject = "SP058"
+# subject = "SP072"
 selection = "all cells"
 
 # session_type selection: biased or training
 session_type = "biased"
 # session_type = "training"
-save_plots = True
+save_plots = False
 
 if session_type == "biased":
     event_definitions = event_definitions_biasedCW
 elif session_type == "training":
     event_definitions = event_definitions_trainingCW
 
-sessions_df = parse_cannonicals_sessions_file(Path(__file__).parent / "canonical_sessions.txt")
-sessions_df = sessions_df.groupby("subject").get_group(subject).sort_values("start_time")
-
-sessions_df = sessions_df.loc[sessions_df["task_protocol"].str.contains(session_type)]  # <- here selection
-eids = sessions_df.index.values
+sessions_df = data_loader.parse_canonicals_sessions_file(Path(__file__).parent / "canonical_sessions_mod.txt")
+sessions_df_ = sessions_df.loc[sessions_df["task_protocol"].str.contains(session_type)]
+eids = sessions_df_.query("subject == @subject")["id"].values
 
 # center_eid = "20ebc2b9-5b4c-42cd-8e4b-65ddb427b7ff"  # cosyne distance
 # add odd even trials as internal control
 
-# %% load all imaging data
-imaging_data = {}
-for eid in tqdm(eids):
-    imaging_data[eid] = {}
-    fovs = get_fovs(eid)
-    for fov in fovs:
-        data = load_imaging_data(eid, fov)
-        imaging_data[eid][fov] = process_imaging_data(data)
+# %% using the newer loaders
+session_FOVs = [data_loader.get_session_FOVs(eid) for eid in eids]
+common_session_FOVs = sorted(list(set.intersection(*[set(s) for s in session_FOVs])))
+imaging_data = data_loader.load_chronic_imaging(eids, FOVs=common_session_FOVs, processing_fn=process_imaging_data)
+
 
 # %% extract all responses
 responses = {}
+responses_cv = {}
 for eid in tqdm(eids):
-    fovs = get_fovs(eid)
+    fovs = data_loader.get_session_FOVs(eid)
     trials_df = load_behavior_data(eid)
+
     # these are now stacked along FOVs
     event_responses = []
     metadata = []
@@ -203,18 +130,22 @@ for eid in tqdm(eids):
         metadata.append(imaging_data[eid][fov].metadata)
     event_responses = pd.concat(event_responses)
     metadata = pd.concat(metadata)
+
     responses[eid] = (event_responses, metadata)  # FIXME this isn't great, leads to hard to read syntax later on
 
-# %% correlations - unit feature vectors, pairwise, by eid
-# a df with all the pairwise eids combinations and their time delta
-eid_combos = list(combinations(eids, 2))
-eid_combos = pd.DataFrame(eid_combos, columns=["eid_a", "eid_b"])
-for i, row in eid_combos.iterrows():
-    t1 = datetime.fromisoformat(sessions_df.loc[row["eid_a"], "start_time"])
-    t2 = datetime.fromisoformat(sessions_df.loc[row["eid_b"], "start_time"])
-    eid_combos.loc[i, "dt"] = (t2 - t1).days
+    # this is for the cross validation
+    trials_df_even = trials_df.iloc[::2]
+    trials_df_odd = trials_df.iloc[1::2]
 
-event_order = np.sort(list(event_definitions.keys()))
+    event_responses_odd = []
+    event_responses_even = []
+    for fov in fovs:
+        event_responses_odd.append(extract_event_based_responses(imaging_data[eid][fov], trials_df_odd, event_definitions))
+        event_responses_even.append(extract_event_based_responses(imaging_data[eid][fov], trials_df_even, event_definitions))
+
+    responses_cv[eid] = {}
+    responses_cv[eid]["odd"] = pd.concat(event_responses_odd)
+    responses_cv[eid]["even"] = pd.concat(event_responses_even)
 
 
 # %%
@@ -231,6 +162,22 @@ def get_common_roicat_UCIDs(eids: list[str], responses: dict):
 
     return np.array(list(set.intersection(*refined_ids)))
 
+
+# %% correlations - unit feature vectors, pairwise, by eid
+# a df with all the pairwise eids combinations and their time delta
+eid_combos = list(combinations(eids, 2))
+eid_combos = pd.DataFrame(eid_combos, columns=["eid_a", "eid_b"])
+for i, row in eid_combos.iterrows():
+    eid_a = row["eid_a"]
+    eid_b = row["eid_b"]
+    t1 = datetime.fromisoformat(sessions_df.query("id == @eid_a")["start_time"].values[0])
+    t2 = datetime.fromisoformat(sessions_df.query("id == @eid_b")["start_time"].values[0])
+    eid_combos.loc[i, "dt"] = (t2 - t1).days
+
+event_order = np.sort(list(event_definitions.keys()))
+
+for i, row in eid_combos.iterrows():
+    eid_combos.loc[i, "n_commmon"] = len(get_common_roicat_UCIDs([row["eid_a"], row["eid_b"]], responses))
 
 # %% extraction run for all
 from scipy.stats import spearmanr
@@ -330,6 +277,26 @@ if selection == "positively correl only":
     selection_ids = results.query("dt == 1 & rho > 0")["roicat_UCID"].values
     results_ = results.loc[results["roicat_UCID"].isin(selection_ids)]
 
+# %% the CV self validation
+intra_session_rhos = {}
+for eid in eids:
+    metadata = responses[eid][1]
+
+    roicat_UCIDs = metadata.query("iscell > .5 & cluster_silhouette > .2")["roicat_UCID"]
+    roicat_UCIDs = roicat_UCIDs[~pd.isna(roicat_UCIDs)]
+    roicat_UCIDs = roicat_UCIDs[~(roicat_UCIDs == "nan")]
+
+    rhos = np.zeros(roicat_UCIDs.shape[0])
+    for i, roicat_ucid in enumerate(roicat_UCIDs):
+        a = responses_cv[eid]["odd"].set_index(metadata["roicat_UCID"]).loc[roicat_ucid]
+        b = responses_cv[eid]["even"].set_index(metadata["roicat_UCID"]).loc[roicat_ucid]
+        valid_ix = ~np.logical_or(pd.isna(a), pd.isna(b))
+        a_values = a.loc[valid_ix].values
+        b_values = b.loc[valid_ix].values
+        rhos[i] = metric(a_values, b_values)
+
+    intra_session_rhos[eid] = rhos
+
 # %% PLOT PREP
 plots_folder = Path(__file__).parent / "local" / "plots"
 
@@ -344,6 +311,27 @@ hue_colors = dict(
         ],
     )
 )
+# %% plot some feature vectors
+data = response_pair[0].values.flatten()
+data = data[~pd.isna(data)]
+vmin, vmax = np.percentile(data, (5, 99))
+axes = sns.heatmap(response_pair[0].T, vmin=vmin, vmax=vmax, cmap="viridis")
+axes.set_xticklabels("")
+axes.set_yticks(0.5 + np.arange(len(response_pair[0].columns)))
+axes.set_yticklabels(response_pair[0].columns)
+axes.set_xticks([])
+
+# %% the upper bound calculation
+bins = np.linspace(-1, 1, 75)
+fig, axes = plt.subplots()
+eid_colors = dict(zip(eids, sns.color_palette("husl", n_colors=len(eids))))
+for eid in eids:
+    axes.hist(intra_session_rhos[eid], bins=bins, alpha=0.5, color=eid_colors[eid], density=True)
+    # axes.axvline(np.median(intra_session_rhos[eid]), lw=1, color="k", alpha=0.6)
+axes.set_xlabel("spearmans ρ")
+axes.set_ylabel("density")
+axes.set_title(f"intra session correlation (odd/even)\n{subject} - {session_type}")
+sns.despine(fig)
 
 # %% histograms
 bins = np.linspace(-1, 1, 75)
@@ -351,6 +339,16 @@ dts = np.sort(results["dt"].unique())
 dt_colors = dict(zip(dts, sns.color_palette("viridis", n_colors=dts.shape[0])))
 
 fig, axes = plt.subplots()
+axes.hist(
+    np.concatenate([intra_session_rhos[eid] for eid in eids]),
+    bins=bins,
+    color="gray",
+    histtype="step",
+    alpha=0.8,
+    density=True,
+    label="cv",
+)
+
 for dt in dts:
     axes.hist(
         results.query(f"dt == {dt}")["rho"].values, bins=bins, color=dt_colors[dt], alpha=0.7, density=True, label=f"dt={dt}"
@@ -363,6 +361,12 @@ axes.set_xlabel("spearmans ρ")
 axes.set_title(f"session to session correlations\nall neurons {subject} - {session_type}")
 if save_plots:
     fig.savefig(plots_folder / f"histograms - {subject} - {session_type} - {selection}.png")
+
+# %%
+fig, axes = plt.subplots()
+for eid in eids:
+    date = sessions_df.set_index("id").loc[eid]["start_time"]
+    axes.bar(x=datetime.fromisoformat(date), height=np.average(intra_session_rhos[eid]), color="gray")
 
 # %%
 results_m = pd.melt(
@@ -408,6 +412,10 @@ axes.legend()
 sns.despine(fig)
 axes.set_xlabel("time between sessions (days)")
 axes.set_ylabel("spearmans ρ")
+
+intra_sess_rho_median = np.median([np.median(intra_session_rhos[eid]) for eid in eids])
+axes.axhline(intra_sess_rho_median, linestyle=":", label="intra session xval", color="k")
+
 if save_plots:
     fig.savefig(plots_folder / f"line plot - {subject} - {session_type} - {selection}.png")
 

@@ -204,11 +204,11 @@ def qc_imaging_data_by_query(
     return nap.TsdFrame(
         t=imaging_data.t,
         d=imaging_data.d[:, ix],
-        metadata=metadata_,
+        metadata=metadata_.reset_index(names="session_index"),
     )
 
 
-def qc_imaging_data_by_ids(
+def select_imaging_data_by_roicat_UCIDs(
     imaging_data: nap.TsdFrame,
     roicat_UCIDs: List[str],
 ) -> nap.TsdFrame:
@@ -233,14 +233,14 @@ def qc_chronic_data_by_query(
         roicat_UCIDs.append(ucids)
 
     common_UCIDs = list(set.intersection(*[set(ucids) for ucids in roicat_UCIDs]))
-    return qc_chronic_data_by_ids(chronic_data, common_UCIDs)
+    return select_chronic_data_by_roicat_UCIDs(chronic_data, common_UCIDs)
 
 
-def qc_chronic_data_by_ids(
+def select_chronic_data_by_roicat_UCIDs(
     chronic_data: List[nap.TsdFrame],
     roicat_UCIDs: List[str],
 ) -> List[nap.TsdFrame]:
-    return [qc_imaging_data_by_ids(data, roicat_UCIDs) for data in chronic_data]
+    return [select_imaging_data_by_roicat_UCIDs(data, roicat_UCIDs) for data in chronic_data]
 
 
 def load_imaging_session(
@@ -352,7 +352,7 @@ def stack_fov_data(
     order: Optional[List[str]] = None,
 ) -> nap.TsdFrame:
     order = order if order is not None else sorted(list(session_data.keys()))
-    stacked_metadata = pd.concatenate([session_data[o].metadata for o in order], axis=0)
+    stacked_metadata = pd.concat([session_data[o].metadata for o in order], axis=0)
     stacked_metadata = stacked_metadata.reset_index(names="fov_index")
     return nap.TsdFrame(
         t=session_data[order[0]].t,
@@ -393,71 +393,71 @@ def interpolate_and_stack(
 # logging.basicConfig()
 
 # selecting the subject
-subject = "SP058"
-subject = "SP072"
+# subject = "SP058"
+# subject = "SP072"
 
-# session_type selection: biased or training
-session_type = "biased"
+# # session_type selection: biased or training
+# session_type = "biased"
 
-sessions_df = parse_canonicals_sessions_file(Path(__file__).parent / "canonical_sessions_mod.txt")
-sessions_df_ = sessions_df.loc[sessions_df["task_protocol"].str.contains(session_type)]
-eids = sessions_df_.query("subject == @subject")["id"].values
+# sessions_df = parse_canonicals_sessions_file(Path(__file__).parent / "canonical_sessions_mod.txt")
+# sessions_df_ = sessions_df.loc[sessions_df["task_protocol"].str.contains(session_type)]
+# eids = sessions_df_.query("subject == @subject")["id"].values
 
-# %%
-data = load_chronic_imaging(eids, FOVs=["FOV_00", "FOV_01"])
+# # %%
+# data = load_chronic_imaging(eids, FOVs=["FOV_00", "FOV_01"])
 
-# %%
-session_data = load_imaging_session(eids[0], ["FOV_00", "FOV_01"])
+# # %%
+# session_data = load_imaging_session(eids[0], ["FOV_00", "FOV_01"])
 
-# %%
-session_data = interpolate_to_common_time_base(session_data)
-order = sorted(list(session_data.keys()))
-stacked_data = np.concatenate([session_data[o].d for o in order], axis=1)
-stacked_metadata = pd.concat([session_data[o].metadata for o in order], axis=0)
-stacked_metadata = stacked_metadata.reset_index(names="fov_index")
+# # %%
+# session_data = interpolate_to_common_time_base(session_data)
+# order = sorted(list(session_data.keys()))
+# stacked_data = np.concatenate([session_data[o].d for o in order], axis=1)
+# stacked_metadata = pd.concat([session_data[o].metadata for o in order], axis=0)
+# stacked_metadata = stacked_metadata.reset_index(names="fov_index")
 
-# %%
-qc_chronic_data_by_query(data, "iscell > .5")
-# %% loader validation - picking a FOV and roicat tracekd cell that is present in all
-fov = "FOV_07"
-common_roicat_UCIDs = np.array(list(set.intersection(*[set(data[eid][fov].metadata["roicat_UCID"].values) for eid in eids])))
-common_roicat_UCIDs = common_roicat_UCIDs[~pd.isna(common_roicat_UCIDs)]
-common_roicat_UCIDs = common_roicat_UCIDs[~(common_roicat_UCIDs == "nan")]
+# # %%
+# qc_chronic_data_by_query(data, "iscell > .5")
+# # %% loader validation - picking a FOV and roicat tracekd cell that is present in all
+# fov = "FOV_07"
+# common_roicat_UCIDs = np.array(list(set.intersection(*[set(data[eid][fov].metadata["roicat_UCID"].values) for eid in eids])))
+# common_roicat_UCIDs = common_roicat_UCIDs[~pd.isna(common_roicat_UCIDs)]
+# common_roicat_UCIDs = common_roicat_UCIDs[~(common_roicat_UCIDs == "nan")]
 
-roicat_id = common_roicat_UCIDs[10]
+# roicat_id = common_roicat_UCIDs[10]
 
-# following that cell over the sessions
-ixs = []
-for eid in eids:
-    ixs.append(data[eid][fov].metadata[data[eid][fov].metadata["roicat_UCID"] == roicat_id].index[0])
+# # following that cell over the sessions
+# ixs = []
+# for eid in eids:
+#     ixs.append(data[eid][fov].metadata[data[eid][fov].metadata["roicat_UCID"] == roicat_id].index[0])
 
-# sanity check, is the neuron in the same location in each image
-# across sessions?
+# # sanity check, is the neuron in the same location in each image
+# # across sessions?
 
-BASE_FOLDER = Path("/mnt/s0/Data/Subjects")
-chronic_folder = BASE_FOLDER / subject / "Chronic"
+# BASE_FOLDER = Path("/mnt/s0/Data/Subjects")
+# chronic_folder = BASE_FOLDER / subject / "Chronic"
 
-one = ONE()
+# one = ONE()
 
-for i, eid in enumerate(eids):
-    session_folder = BASE_FOLDER / one.eid2path(eid).session_path_short()
-    fov_folder = session_folder / "alf" / fov
-    stat_path = fov_folder / "_suite2p_ROIData.raw" / "stat.npy"
-    stat = np.load(stat_path, allow_pickle=True)
-    print(f"x:{stat[ixs[i]]['xpix'].mean():.2f}, y:{stat[ixs[i]]['ypix'].mean():.2f}")
+# for i, eid in enumerate(eids):
+#     session_folder = BASE_FOLDER / one.eid2path(eid).session_path_short()
+#     fov_folder = session_folder / "alf" / fov
+#     stat_path = fov_folder / "_suite2p_ROIData.raw" / "stat.npy"
+#     stat = np.load(stat_path, allow_pickle=True)
+#     print(f"x:{stat[ixs[i]]['xpix'].mean():.2f}, y:{stat[ixs[i]]['ypix'].mean():.2f}")
 
 
-# %% print the location of the ROI for each session
-fov_locations = []
-for eid in eids:
-    session_folder = BASE_FOLDER / one.eid2path(eid).session_path_short()
-    fovs = get_session_FOVs(eid)
-    for fov in fovs:
-        fov_folder = session_folder / "alf" / fov
-        mlapdv = np.load(fov_folder / "mpciMeanImage.mlapdv_estimate.npy")[0, 0]
-        fov_locations.append(dict(eid=eid, fov=fov, ml=mlapdv[0], ap=mlapdv[1], dv=mlapdv[2]))
-fov_locations = pd.DataFrame(fov_locations)
+# # %% print the location of the ROI for each session
+# fov_locations = []
+# for eid in eids:
+#     session_folder = BASE_FOLDER / one.eid2path(eid).session_path_short()
+#     fovs = get_session_FOVs(eid)
+#     for fov in fovs:
+#         fov_folder = session_folder / "alf" / fov
+#         mlapdv = np.load(fov_folder / "mpciMeanImage.mlapdv_estimate.npy")[0, 0]
+#         fov_locations.append(dict(eid=eid, fov=fov, ml=mlapdv[0], ap=mlapdv[1], dv=mlapdv[2]))
+# fov_locations = pd.DataFrame(fov_locations)
 
-# %% check if all the ROIs are in the same locations on all days
-for fov in fov_locations["fov"].unique():
-    assert np.unique(fov_locations.query(f'fov == "{fov}"')[["ml", "ap", "dv"]].values, axis=0).shape[0] == 1
+# # %% check if all the ROIs are in the same locations on all days
+# for fov in fov_locations["fov"].unique():
+#     assert np.unique(fov_locations.query(f'fov == "{fov}"')[["ml", "ap", "dv"]].values, axis=0).shape[0] == 1
