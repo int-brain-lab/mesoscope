@@ -1032,40 +1032,44 @@ def stack_pair_and_correlate(
 def chronic_pair_feature_corr_subject(
     subject: str,
     *,
-    one: ONE | None = None,
-    trial_cuts_root: str | Path | None = None,
-    out_dir: str | Path | None = None,
+    one: "ONE | None" = None,
+    trial_cuts_root: "str | Path | None" = None,
+    out_dir: "str | Path | None" = None,
     filter_neurons: bool = True,
     min_trials: int = 10,
     pair_mode: str = "all",          # "all" | "consecutive"
-    cut_to_min: bool = True,
-    zscore_before_corr: bool = True,
+    cut_to_min: bool = True,         # kept for cache key compatibility (not used internally here)
+    zscore_before_corr: bool = True, # kept for API compatibility; MUST be True (see below)
     rerun: bool = False,
-    roicat_root: str | Path = Path.home() / "chronic_csv",
-    server_root: str | Path | None = None,
-    per_reg: bool = True,
-) -> pd.DataFrame:
+    roicat_root: "str | Path" = Path.home() / "chronic_csv",
+    server_root: "str | Path | None" = None,
+    per_reg: bool = True,            # kept for API compatibility (not used internally here)
+    include_cv_baseline: bool = True,
+    cv_shuf_seed: int = 0,           # kept for API compatibility (not used internally here)
+) -> "pd.DataFrame":
     """
-    For a given subject (e.g. 'SP058'):
-      - enumerate canonical mesoscope sessions for that subject
-      - for every EID pair:
-          - ensure restricted per-pair trial-cuts exist (computed if missing)
-          - load trial-cuts, trial-average, build per-neuron feature vectors
-          - compute per-neuron Pearson r between sessions
-      - return a tidy DataFrame with:
-          subject, pair_tag, eid_a, eid_b, FOV, uid, area, xyz_a*, xyz_b*,
-          per-ttype features (*_a, *_b), and corr
+    IMPORTANT CHANGE:
+      - The per-ttype feature columns (*_a, *_b) are now ALWAYS the z-scored feature vectors
+        (row-wise z-score across trial-types for each neuron), for BOTH between-session and CV rows.
+      - Therefore, zscore_before_corr MUST be True; otherwise the stored features would be inconsistent
+        with the user's requirement ("store z-scored only").
+    """
+    import gc
+    import time
+    from itertools import combinations
 
-    Caching:
-      - saves/loads a subject-level parquet under out_dir
-      - uses a separate folder tree under trial_cuts_root for pairwise cuts
-      - does NOT touch the existing meso "res" cache files.
-    """
+    import numpy as np
+    import pandas as pd
+
     if one is None:
         one = ONE()
 
+    # Enforce invariant requested by user
+    if not bool(zscore_before_corr):
+        raise ValueError("zscore_before_corr must be True: this function now stores ONLY z-scored features (*_a/*_b).")
+
+    # ---------- roots ----------
     if trial_cuts_root is None:
-        # keep pairwise chronic products separate from existing pth_meso/res stacks
         trial_cuts_root = Path(pth_meso, "trial_cuts_pairs")
     else:
         trial_cuts_root = Path(trial_cuts_root)
@@ -1077,51 +1081,35 @@ def chronic_pair_feature_corr_subject(
         out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # ---------- subject-level cache ----------
-    cache_path = out_dir / (
+    # ---------- cache paths ----------
+    cache_stem = (
         f"chronic_corr_subject={subject}"
         f"_filter={int(filter_neurons)}"
         f"_mintrials={int(min_trials)}"
         f"_pairs={pair_mode}"
         f"_cutmin={int(cut_to_min)}"
-        f"_z={int(zscore_before_corr)}.parquet"
+        f"_z=1"  # forced
     )
-
-    if cache_path.is_file() and (not rerun):
-        return pd.read_parquet(cache_path)
-
-    # ---------- get EIDs for subject ----------
-    subj2eids = _canonical_sessions_subject_map(one)
-    eids = [str(e) for e in subj2eids.get(subject, [])]
-    eids = [e for e in eids if e and e.lower() != "none"]
-
-    if len(eids) < 2:
-        raise ValueError(f"{subject}: need >=2 canonical sessions, got {len(eids)}.")
-
-    # chronological order
-    eids_sorted = sorted(eids, key=lambda e: (_eid_date(one, e), e))
-
-    if pair_mode == "consecutive":
-        pairs = [(eids_sorted[i], eids_sorted[i + 1]) for i in range(len(eids_sorted) - 1)]
-    elif pair_mode == "all":
-        pairs = list(combinations(eids_sorted, 2))
-    else:
-        raise ValueError("pair_mode must be 'all' or 'consecutive'.")
+    cache_base_path = out_dir / f"{cache_stem}.parquet"
+    cache_cv_path = out_dir / f"{cache_stem}_cv=1.parquet"
 
     # ---------- helpers ----------
-    from meso_chronic import get_cluster_uids_neuronal_by_fov  # chronic-related; stays in meso_chronic.py
+    def _cv_eids_present(df: "pd.DataFrame") -> set[str]:
+        if df is None or df.empty:
+            return set()
+        if ("pair_type" not in df.columns) or ("eid_a" not in df.columns):
+            return set()
+        m = (df["pair_type"].astype(str) == "within_session")
+        if not np.any(m):
+            return set()
+        return set(df.loc[m, "eid_a"].astype(str).unique())
 
-    def _uid_first_index_map(u: np.ndarray) -> tuple[dict[str, int], np.ndarray]:
-        u = np.asarray(u, dtype=object)
-        if u.size == 0:
-            return {}, np.empty(0, dtype=object)
-        nz = (u != "")
-        if not np.any(nz):
-            return {}, np.empty(0, dtype=object)
-        u_nz = u[nz]
-        u_unique, idx_first = np.unique(u_nz, return_index=True)
-        idx_abs = np.flatnonzero(nz)[idx_first]
-        return {str(uid): int(ix) for uid, ix in zip(u_unique, idx_abs)}, u_unique.astype(object)
+    def _expected_eids_for_cv_from_df(df: "pd.DataFrame") -> set[str]:
+        if df is None or df.empty:
+            return set()
+        ea = set(df.get("eid_a", pd.Series([], dtype=object)).astype(str).unique())
+        eb = set(df.get("eid_b", pd.Series([], dtype=object)).astype(str).unique())
+        return {e for e in (ea | eb) if e and e.lower() != "none"}
 
     def _load_meta_dict(p: Path) -> dict:
         obj = np.load(p, allow_pickle=True)
@@ -1132,14 +1120,12 @@ def chronic_pair_feature_corr_subject(
         return obj
 
     def _avg_trials_1bin(X_mnt: np.ndarray) -> np.ndarray | None:
-        """
-        Expect (M,N,1). Return (N,) trial-mean, or None if M < min_trials.
-        """
+        """Expect (M,N,1). Return (N,) trial-mean, or None if M < min_trials."""
         if X_mnt.ndim != 3 or X_mnt.shape[2] != 1:
             raise ValueError(f"Expected (M,N,1), got {X_mnt.shape}")
         if X_mnt.shape[0] < min_trials:
             return None
-        return np.nanmean(X_mnt[:, :, 0], axis=0).astype(np.float32, copy=False)  # (N,)
+        return np.nanmean(X_mnt[:, :, 0], axis=0).astype(np.float32, copy=False)
 
     def _zscore_rows(X: np.ndarray) -> np.ndarray:
         X = np.asarray(X, dtype=np.float32)
@@ -1149,45 +1135,252 @@ def chronic_pair_feature_corr_subject(
         return (X - mu) / sd
 
     def _rowwise_cosine_sim01(A: np.ndarray, B: np.ndarray) -> np.ndarray:
-        """
-        A,B: (N,P). Returns cosine similarity mapped to [0,1] per row:
-            cos = <a,b> / (||a|| ||b||)   in [-1,1]
-            sim01 = 0.5 * (cos + 1)       in [0,1]
-        NaNs are ignored pairwise (mask per entry).
-        """
         A = np.asarray(A, dtype=np.float32)
         B = np.asarray(B, dtype=np.float32)
-
         mask = np.isfinite(A) & np.isfinite(B)
         A0 = np.where(mask, A, 0.0).astype(np.float32, copy=False)
         B0 = np.where(mask, B, 0.0).astype(np.float32, copy=False)
-
         num = np.sum(A0 * B0, axis=1)
         den = np.sqrt(np.sum(A0 * A0, axis=1) * np.sum(B0 * B0, axis=1))
         den = np.where(den == 0, np.nan, den)
-
         cos = num / den
-        sim01 = 0.5 * (cos + 1.0)
-        return sim01.astype(np.float32)
+        return (0.5 * (cos + 1.0)).astype(np.float32)
 
-    def _ensure_pair_cuts(eid_a: str, eid_b: str) -> Path | None:
-        """
-        Ensure restricted trial-cuts exist for this eid pair under:
-        trial_cuts_root/<subject>/<eidA>__<eidB>/<eidX>/
+    def _compute_cv_rows_for_eid(eid: str) -> list[dict]:
+        print(f"[chronic CV] computing within-session baseline for {eid}")
 
-        Returns
-        -------
-        pair_dir : Path
-            The pair directory if cuts exist (cached or newly computed).
-        None
-            If there are zero chronically tracked neurons across all overlapping FOVs.
+        def _as1d_obj(x) -> np.ndarray:
+            if x is None:
+                return np.empty(0, dtype=object)
+            if isinstance(x, (str, bytes)):
+                return np.array([x], dtype=object)
+            arr = np.asarray(x, dtype=object)
+            if arr.ndim == 0:
+                return np.array([arr.item()], dtype=object)
+            return arr.ravel().astype(object, copy=False)
 
-        Notes
-        -----
-        - Uses meso_chronic.match_tracked_indices_pair_per_fov as the source of truth
-        for per-FOV aligned indices and shared UIDs.
-        - Does NOT call save_trial_cuts_meso if total_shared == 0.
-        """
+        def _as_xyz(x) -> np.ndarray:
+            if x is None:
+                return np.empty((0, 3), dtype=np.float32)
+            arr = np.asarray(x, dtype=np.float32)
+            if arr.ndim == 1:
+                if arr.size >= 3:
+                    arr = arr.reshape(1, -1)
+                else:
+                    return np.empty((0, 3), dtype=np.float32)
+            if arr.ndim != 2 or arr.shape[1] < 3:
+                return np.empty((0, 3), dtype=np.float32)
+            return arr[:, :3]
+
+        single_eid_cuts_dir = Path(pth_meso) / "trial_cuts" / eid
+
+        if (not single_eid_cuts_dir.is_dir()) or (not any(single_eid_cuts_dir.glob("*meta_filter_*.npy"))):
+            print(f"[chronic CV]   building trial cuts for {eid}")
+            save_trial_cuts_meso(
+                eid,
+                filter_neurons=filter_neurons,
+                require_all=False,
+                out_dir=single_eid_cuts_dir,
+            )
+
+        metas = sorted(single_eid_cuts_dir.glob(f"{eid}_FOV_*_meta_filter_{filter_neurons}.npy"))
+        if not metas:
+            print(f"[chronic CV]   no valid metas found for {eid}")
+            return []
+
+        cv_rows: list[dict] = []
+
+        for mp in metas:
+            meta = _load_meta_dict(mp)
+            if bool(meta.get("filter_neurons")) != bool(filter_neurons):
+                continue
+
+            fov = str(meta.get("fov", ""))
+            ttypes = list(meta.get("trial_names", []))
+            if not ttypes:
+                continue
+
+            uids = _as1d_obj(meta.get("restrict_uids_used", None))
+            area = _as1d_obj(meta.get("region_labels", None))
+            xyz = _as_xyz(meta.get("xyz", None))
+
+            if uids.size == 0:
+                N0 = int(max(area.size, xyz.shape[0]))
+                if N0 <= 0:
+                    continue
+                uids = np.array([f"{fov}:roi{i:06d}" for i in range(N0)], dtype=object)
+
+            N = int(uids.size)
+
+            if area.size == 0:
+                area = np.array([""] * N, dtype=object)
+            if area.size != N:
+                print(f"[chronic CV]   {eid} {fov}: area size {area.size} != uids size {N} -> skip FOV")
+                continue
+
+            if xyz.shape[0] == 0:
+                print(f"[chronic CV]   {eid} {fov}: missing xyz -> skip FOV")
+                continue
+            if xyz.shape[0] != N:
+                print(f"[chronic CV]   {eid} {fov}: xyz rows {xyz.shape[0]} != uids size {N} -> skip FOV")
+                continue
+
+            feats_even: list[np.ndarray] = []
+            feats_odd: list[np.ndarray] = []
+
+            for t in ttypes:
+                fp = single_eid_cuts_dir / meta["peth_files"][t]
+                if not fp.is_file():
+                    feats_even = []
+                    feats_odd = []
+                    break
+
+                X = np.load(fp, mmap_mode="r")
+                if X.ndim != 3 or X.shape[2] != 1:
+                    feats_even = []
+                    feats_odd = []
+                    break
+
+                M = int(X.shape[0])
+                if M < min_trials:
+                    feats_even = []
+                    feats_odd = []
+                    break
+
+                X_even = X[0::2, :, 0]
+                X_odd = X[1::2, :, 0]
+                if (X_even.shape[0] == 0) or (X_odd.shape[0] == 0):
+                    feats_even = []
+                    feats_odd = []
+                    break
+
+                a_even = np.nanmean(X_even, axis=0).astype(np.float32, copy=False).ravel()
+                a_odd = np.nanmean(X_odd, axis=0).astype(np.float32, copy=False).ravel()
+
+                if a_even.size != N or a_odd.size != N:
+                    print(
+                        f"[chronic CV]   {eid} {fov} {t}: feature size mismatch "
+                        f"(even {a_even.size}, odd {a_odd.size}, N {N}) -> skip FOV"
+                    )
+                    feats_even = []
+                    feats_odd = []
+                    break
+
+                feats_even.append(a_even)
+                feats_odd.append(a_odd)
+
+            if not feats_even:
+                continue
+
+            A_even_raw = np.stack(feats_even, axis=1).astype(np.float32, copy=False)  # (N,P)
+            A_odd_raw = np.stack(feats_odd, axis=1).astype(np.float32, copy=False)
+
+            # ALWAYS store and compute on z-scored features
+            A_even = _zscore_rows(A_even_raw)
+            A_odd = _zscore_rows(A_odd_raw)
+
+            r = _rowwise_cosine_sim01(A_even, A_odd)
+
+            for i in range(N):
+                d = {
+                    "subject": subject,
+                    "pair_tag": f"{eid}__CV",
+                    "pair_type": "within_session",
+                    "eid_a": eid,
+                    "eid_b": eid,
+                    "dt_days": 0.0,
+                    "FOV": fov,
+                    "uid": uids[i],
+                    "area_a": area[i],
+                    "area_b": area[i],
+                    "x_a": float(xyz[i, 0]),
+                    "y_a": float(xyz[i, 1]),
+                    "z_a": float(xyz[i, 2]),
+                    "x_b": float(xyz[i, 0]),
+                    "y_b": float(xyz[i, 1]),
+                    "z_b": float(xyz[i, 2]),
+                    "corr": float(r[i]) if np.isfinite(r[i]) else np.nan,
+                }
+                # Store ONLY z-scored features
+                for j, t in enumerate(ttypes):
+                    d[f"{t}_a"] = float(A_even[i, j]) if np.isfinite(A_even[i, j]) else np.nan
+                    d[f"{t}_b"] = float(A_odd[i, j]) if np.isfinite(A_odd[i, j]) else np.nan
+                cv_rows.append(d)
+
+            gc.collect()
+
+        print(f"[chronic CV]   {eid}: generated {len(cv_rows)} CV rows")
+        return cv_rows
+
+    # ---------- cache fast paths ----------
+    if not rerun:
+        if include_cv_baseline and cache_cv_path.is_file():
+            df_cached = pd.read_parquet(cache_cv_path)
+            expected = _expected_eids_for_cv_from_df(df_cached)
+            present = _cv_eids_present(df_cached)
+            if expected.issubset(present):
+                print(f"[chronic] using cached CV dataframe: {cache_cv_path}")
+                return df_cached
+
+            missing = sorted(expected - present)
+            print(
+                f"[chronic CV] cv cache incomplete: have {len(present)}/{len(expected)} eids; "
+                f"adding {len(missing)} missing"
+            )
+            new_rows: list[dict] = []
+            for i, eid in enumerate(missing, start=1):
+                print(f"[chronic CV] ({i}/{len(missing)}) eid {eid}")
+                new_rows.extend(_compute_cv_rows_for_eid(eid))
+
+            if new_rows:
+                df_new = pd.DataFrame(new_rows)
+                df_cached = pd.concat([df_cached, df_new], ignore_index=True)
+                df_cached.sort_values(["pair_tag", "FOV", "uid"], inplace=True, kind="mergesort", ignore_index=True)
+                df_cached.to_parquet(cache_cv_path, index=False)
+                print(f"[chronic CV] updated CV cache saved: {cache_cv_path}")
+
+            return df_cached
+
+        if include_cv_baseline and cache_base_path.is_file():
+            df_base = pd.read_parquet(cache_base_path)
+            expected = _expected_eids_for_cv_from_df(df_base)
+            present = _cv_eids_present(df_base)
+            missing = sorted(expected - present)
+
+            print(f"[chronic CV] base cache found; computing CV for {len(missing)} sessions only")
+            new_rows: list[dict] = []
+            for i, eid in enumerate(missing, start=1):
+                print(f"[chronic CV] ({i}/{len(missing)}) eid {eid}")
+                new_rows.extend(_compute_cv_rows_for_eid(eid))
+
+            df_cv = pd.concat([df_base, pd.DataFrame(new_rows)], ignore_index=True) if new_rows else df_base.copy()
+            df_cv.sort_values(["pair_tag", "FOV", "uid"], inplace=True, kind="mergesort", ignore_index=True)
+            df_cv.to_parquet(cache_cv_path, index=False)
+            print(f"[chronic CV] CV cache saved: {cache_cv_path}")
+            return df_cv
+
+        if (not include_cv_baseline) and cache_base_path.is_file():
+            print(f"[chronic] using cached base dataframe: {cache_base_path}")
+            return pd.read_parquet(cache_base_path)
+
+    # ---------- get EIDs for subject ----------
+    subj2eids = _canonical_sessions_subject_map(one)
+    eids = [str(e) for e in subj2eids.get(subject, [])]
+    eids = [e for e in eids if e and e.lower() != "none"]
+    if len(eids) < 2:
+        raise ValueError(f"{subject}: need >=2 canonical sessions, got {len(eids)}.")
+
+    eids_sorted = sorted(eids, key=lambda e: (_eid_date(one, e), e))
+
+    if pair_mode == "consecutive":
+        pairs = [(eids_sorted[i], eids_sorted[i + 1]) for i in range(len(eids_sorted) - 1)]
+    elif pair_mode == "all":
+        pairs = list(combinations(eids_sorted, 2))
+    else:
+        raise ValueError("pair_mode must be 'all' or 'consecutive'.")
+
+    # ---------- pair-cuts helper ----------
+    def _ensure_pair_cuts(eid_a: str, eid_b: str) -> "Path | None":
         from meso_chronic import match_tracked_indices_pair_per_fov
 
         pair_tag = f"{eid_a}__{eid_b}"
@@ -1200,10 +1393,8 @@ def chronic_pair_feature_corr_subject(
         have_a = any(dir_a.glob(f"{eid_a}_FOV_*_meta_filter_*.npy"))
         have_b = any(dir_b.glob(f"{eid_b}_FOV_*_meta_filter_*.npy"))
         if have_a and have_b:
-            print(f"[chronic]   using cached trial cuts for {pair_tag}")
             return pair_dir
 
-        # --- compute per-FOV chronic matches in the SAME index space as save_trial_cuts_meso ---
         fov_match = match_tracked_indices_pair_per_fov(
             one,
             eid_a,
@@ -1224,18 +1415,9 @@ def chronic_pair_feature_corr_subject(
             uids_by_fov[fov] = m.shared_uids
             total_shared += int(m.shared_uids.size)
 
-        # progress / diagnostics
-        print(f"[chronic]   {pair_tag}: shared neurons total={total_shared} across {len(fov_match)} FOVs")
-        for fov, m in fov_match.items():
-            if m.shared_uids.size:
-                print(f"[chronic]     {fov}: {int(m.shared_uids.size)}")
-
         if total_shared == 0:
-            print(f"[chronic]   {pair_tag}: no shared neurons -> skip pair")
             return None
 
-        # --- compute and save restricted trial cuts for both eids ---
-        print(f"[chronic]   computing trial cuts for {pair_tag}")
         save_trial_cuts_meso(
             eid_a,
             filter_neurons=filter_neurons,
@@ -1254,28 +1436,33 @@ def chronic_pair_feature_corr_subject(
             restrict_uids=uids_by_fov,
             pair_tag=pair_tag,
         )
-
         return pair_dir
 
+    # ---------- main loop: between-session ----------
+    rows_between: list[dict] = []
+    unique_eids: set[str] = set()
 
-    # ---------- main loop ----------
-    rows: list[dict] = []
-
+    print(f"[chronic] subject={subject} | pairs={len(pairs)} | filter={int(filter_neurons)} | min_trials={min_trials}")
     for ip, (eid_a, eid_b) in enumerate(pairs, start=1):
         t_pair = time.time()
         pair_tag = f"{eid_a}__{eid_b}"
         print(f"[chronic] ({ip}/{len(pairs)}) pair {pair_tag}")
 
-        # ensure pair cuts exist (cached or computed)
+        unique_eids.add(eid_a)
+        unique_eids.add(eid_b)
+
         pair_dir = _ensure_pair_cuts(eid_a, eid_b)
         if pair_dir is None:
+            print(f"[chronic]   {pair_tag}: no shared neurons -> skip")
             continue
+
         dir_a = pair_dir / eid_a
         dir_b = pair_dir / eid_b
 
         metas_a = sorted(dir_a.glob(f"{eid_a}_FOV_*_meta_filter_*.npy"))
         metas_b = sorted(dir_b.glob(f"{eid_b}_FOV_*_meta_filter_*.npy"))
         if (not metas_a) or (not metas_b):
+            print(f"[chronic]   {pair_tag}: missing metas -> skip")
             continue
 
         ma = {(_load_meta_dict(p)["fov"]): _load_meta_dict(p) for p in metas_a}
@@ -1283,14 +1470,17 @@ def chronic_pair_feature_corr_subject(
 
         fovs = sorted(set(ma.keys()) & set(mb.keys()))
         if not fovs:
+            print(f"[chronic]   {pair_tag}: no overlapping FOVs -> skip")
             continue
 
-        # reference ttypes from first fov
         ref_ttypes = list(ma[fovs[0]].get("trial_names", []))
         if not ref_ttypes:
+            print(f"[chronic]   {pair_tag}: empty trial_names -> skip")
             continue
         if list(mb[fovs[0]].get("trial_names", [])) != ref_ttypes:
             raise ValueError(f"{pair_tag}: trial_names mismatch between eids (meta inconsistency).")
+
+        n_rows_before = len(rows_between)
 
         for fov in fovs:
             metaA = ma[fov]
@@ -1304,32 +1494,27 @@ def chronic_pair_feature_corr_subject(
             uidsA = np.asarray(metaA.get("restrict_uids_used", []), dtype=object)
             uidsB = np.asarray(metaB.get("restrict_uids_used", []), dtype=object)
             if uidsA.size == 0 or uidsB.size == 0:
-                # no chronic alignment recorded => skip (or enforce you always save restrict_uids_used)
                 continue
             if uidsA.shape != uidsB.shape or np.any(uidsA != uidsB):
                 raise ValueError(f"{pair_tag} {fov}: restrict_uids_used mismatch between eids.")
 
             areaA = np.asarray(metaA.get("region_labels", []), dtype=object)
             areaB = np.asarray(metaB.get("region_labels", []), dtype=object)
-            xyzA = np.asarray(metaA.get("xyz", []), dtype=np.float32)
-            xyzB = np.asarray(metaB.get("xyz", []), dtype=np.float32)
+            xyzA = np.asarray(metaA.get("xyz", []), dtype=np.float32)[:, :3]
+            xyzB = np.asarray(metaB.get("xyz", []), dtype=np.float32)[:, :3]
 
             if areaA.shape[0] != uidsA.shape[0] or areaB.shape[0] != uidsA.shape[0]:
                 raise ValueError(f"{pair_tag} {fov}: N mismatch between uids and region_labels.")
             if xyzA.shape[0] != uidsA.shape[0] or xyzB.shape[0] != uidsA.shape[0]:
                 raise ValueError(f"{pair_tag} {fov}: N mismatch between uids and xyz.")
-            xyzA = xyzA[:, :3]
-            xyzB = xyzB[:, :3]
 
-            # build per-neuron feature vectors: (N, P) with P=len(ref_ttypes)
             featsA: list[np.ndarray] = []
             featsB: list[np.ndarray] = []
 
-            # (optional) cut_to_min is mostly irrelevant now since each segment is 1 bin,
-            # but we keep it for robustness if older files exist.
             for t in ref_ttypes:
                 fpA = dir_a / metaA["peth_files"][t]
                 fpB = dir_b / metaB["peth_files"][t]
+
                 XA = np.load(fpA, mmap_mode="r")
                 XB = np.load(fpB, mmap_mode="r")
 
@@ -1339,7 +1524,6 @@ def chronic_pair_feature_corr_subject(
                     featsA = []
                     featsB = []
                     break
-
                 if a.shape[0] != uidsA.shape[0] or b.shape[0] != uidsA.shape[0]:
                     raise ValueError(f"{pair_tag} {fov} {t}: N mismatch in averaged features.")
 
@@ -1349,24 +1533,23 @@ def chronic_pair_feature_corr_subject(
             if not featsA:
                 continue
 
-            A = np.stack(featsA, axis=1).astype(np.float32, copy=False)  # (N,P)
-            B = np.stack(featsB, axis=1).astype(np.float32, copy=False)
+            A_raw = np.stack(featsA, axis=1).astype(np.float32, copy=False)  # (N,P)
+            B_raw = np.stack(featsB, axis=1).astype(np.float32, copy=False)
 
-            if zscore_before_corr:
-                Ause = _zscore_rows(A)
-                Buse = _zscore_rows(B)
-            else:
-                Ause, Buse = A, B
+            # ALWAYS store and compute on z-scored features
+            Ause = _zscore_rows(A_raw)
+            Buse = _zscore_rows(B_raw)
 
-            r = _rowwise_cosine_sim01(Ause, Buse)  # (N,) in [0,1]
+            r = _rowwise_cosine_sim01(Ause, Buse)
 
-            # write rows (wide: one column per ttype per session)
             for i in range(uidsA.shape[0]):
                 d = {
                     "subject": subject,
                     "pair_tag": pair_tag,
+                    "pair_type": "between_session",
                     "eid_a": eid_a,
                     "eid_b": eid_b,
+                    "dt_days": np.nan,
                     "FOV": fov,
                     "uid": uidsA[i],
                     "area_a": areaA[i],
@@ -1376,30 +1559,133 @@ def chronic_pair_feature_corr_subject(
                     "z_a": float(xyzA[i, 2]),
                     "x_b": float(xyzB[i, 0]),
                     "y_b": float(xyzB[i, 1]),
-                    "z_b": floasave_trial_cuts_mesot(xyzB[i, 2]),
+                    "z_b": float(xyzB[i, 2]),
                     "corr": float(r[i]) if np.isfinite(r[i]) else np.nan,
                 }
+                # Store ONLY z-scored features
                 for j, t in enumerate(ref_ttypes):
-                    d[f"{t}_a"] = float(A[i, j]) if np.isfinite(A[i, j]) else np.nan
-                    d[f"{t}_b"] = float(B[i, j]) if np.isfinite(B[i, j]) else np.nan
-                rows.append(d)
+                    d[f"{t}_a"] = float(Ause[i, j]) if np.isfinite(Ause[i, j]) else np.nan
+                    d[f"{t}_b"] = float(Buse[i, j]) if np.isfinite(Buse[i, j]) else np.nan
+                rows_between.append(d)
 
         gc.collect()
         print(
             f"[chronic] ({ip}/{len(pairs)}) pair {pair_tag} "
-            f"done in {time.time() - t_pair:.1f}s"
+            f"added {len(rows_between) - n_rows_before} rows in {time.time() - t_pair:.1f}s"
         )
 
-    if not rows:
-        raise RuntimeError(f"{subject}: no rows produced (no usable pairs/FOVs after filtering).")
+    if not rows_between:
+        raise RuntimeError(f"{subject}: no between-session rows produced (no usable pairs/FOVs after filtering).")
 
-    df = pd.DataFrame(rows)
+    df_between = pd.DataFrame(rows_between)
+    df_between.sort_values(["pair_tag", "FOV", "uid"], inplace=True, kind="mergesort", ignore_index=True)
+    df_between.to_parquet(cache_base_path, index=False)
+    print(f"\n[chronic] Saved between-session dataframe to {cache_base_path}")
+    print(f"[chronic]   Between-session rows: {len(df_between)}")
 
-    # stable sort for downstream
-    df.sort_values(["pair_tag", "FOV", "uid"], inplace=True, kind="mergesort", ignore_index=True)
+    if not include_cv_baseline:
+        return df_between
 
-    df.to_parquet(cache_path, index=False)
-    return df
+    print(f"\n[chronic CV] Computing within-session baselines for {len(unique_eids)} sessions")
+    cv_rows_all: list[dict] = []
+    for i, eid in enumerate(sorted(unique_eids), start=1):
+        try:
+            print(f"[chronic CV] ({i}/{len(unique_eids)}) eid {eid}")
+            cv_rows_all.extend(_compute_cv_rows_for_eid(eid))
+        except Exception as e:
+            print(f"[chronic CV] Failed for {eid}: {type(e).__name__}: {e}")
+            continue
+
+    df_cv = pd.concat([df_between, pd.DataFrame(cv_rows_all)], ignore_index=True) if cv_rows_all else df_between.copy()
+    df_cv.sort_values(["pair_tag", "FOV", "uid"], inplace=True, kind="mergesort", ignore_index=True)
+    df_cv.to_parquet(cache_cv_path, index=False)
+    print(f"\n[chronic] Saved dataframe (with CV) to {cache_cv_path}")
+    print(f"[chronic]   Total rows: {len(df_cv)}")
+    print(f"[chronic]   Within-session CV rows: {(df_cv['pair_type'].astype(str) == 'within_session').sum()}")
+
+    return df_cv
+
+
+def classify_session_protocol(one: ONE, eid: str) -> str:
+    """
+    Classify an IBL session by task protocol.
+
+    Returns one of:
+        - "training"
+        - "biased"
+        - "other"
+
+    Logic:
+      - Uses Alyx 'task_protocol' primarily
+      - Falls back to 'type' if needed
+    """
+    ses = one.alyx.rest("sessions", "read", id=str(eid))
+
+    tp = (ses.get("task_protocol") or "").lower()
+    st = (ses.get("type") or "").lower()
+
+    # training / habituation
+    if any(k in tp for k in ["training", "habituation"]):
+        return "training"
+
+    # biased choiceworld (trained task)
+    if "biased" in tp or "biasedchoiceworld" in tp or "biased_choiceworld" in tp:
+        return "biased"
+
+    # fallback: sometimes encoded in type
+    if "training" in st:
+        return "training"
+    if "biased" in st:
+        return "biased"
+
+    return "other"
+
+
+def filter_chronic_df_by_session(
+    df: pd.DataFrame,
+    *,
+    one: ONE,
+    sess: str = "all",   # "all" | "training" | "biased"
+) -> pd.DataFrame:
+    """
+    Filter chronic_pair_feature_corr_subject dataframe by session type.
+
+    sess:
+        - "all": no filtering
+        - "training": keep rows where involved eids are training sessions
+        - "biased": keep rows where involved eids are biasedChoiceWorld sessions
+    """
+    if sess == "all":
+        return df
+
+    if sess not in ("training", "biased"):
+        raise ValueError("sess must be 'all', 'training', or 'biased'")
+
+    # collect unique eids present
+    eids = pd.unique(
+        pd.concat([df["eid_a"], df["eid_b"]], ignore_index=True)
+        .astype(str)
+    )
+    eids = [e for e in eids if e and e.lower() != "none"]
+
+    # classify once
+    eid2cls = {eid: classify_session_protocol(one, eid) for eid in eids}
+
+    if sess == "training":
+        keep = {eid for eid, c in eid2cls.items() if c == "training"}
+    else:  # sess == "biased"
+        keep = {eid for eid, c in eid2cls.items() if c == "biased"}
+
+    # row-level filtering
+    def _row_ok(row):
+        ea = str(row["eid_a"])
+        eb = str(row["eid_b"])
+        # CV rows: ea == eb
+        return (ea in keep) and (eb in keep)
+
+    mask = df.apply(_row_ok, axis=1)
+    return df.loc[mask].reset_index(drop=True)
+
 
 ###################
 '''
@@ -1424,7 +1710,7 @@ def plot_chronic_corr_vs_time_subject(
     subject: str = "SP058",
     eid_c: str | None = "20ebc2b9-5b4c-42cd-8e4b-65ddb427b7ff",
     *,
-    one: ONE | None = None,
+    one: "ONE | None" = None,
     pair_mode: str = "all",   # "consecutive" | "all"
     rerun: bool = False,
     per_reg: bool = False,
@@ -1433,9 +1719,13 @@ def plot_chronic_corr_vs_time_subject(
     min_neurons: int = 50,
     shuf: bool = True,
     shuf_seed: int = 0,
-    ax: plt.Axes | None = None,
+    ax: "plt.Axes | None" = None,
     title: str | None = None,
-) -> tuple[pd.DataFrame, plt.Axes]:
+    filter_neurons: bool = True,
+    include_cv_baseline: bool = True,
+    sess: str = "all",   # "all" | "training" | "biased"
+) -> "tuple[pd.DataFrame, plt.Axes]":
+
 
     if one is None:
         one = ONE()
@@ -1447,26 +1737,25 @@ def plot_chronic_corr_vs_time_subject(
     if per_reg and not shuf:
         raise ValueError("per_reg=True requires shuf=True (data − shuffle is plotted).")
 
-    # ------------------------------------------------------------------
-    # (1) Load chronic pairwise dataframe
-    # ------------------------------------------------------------------
     df = chronic_pair_feature_corr_subject(
         subject,
         one=one,
         pair_mode=pair_mode,
         rerun=rerun,
+        filter_neurons=filter_neurons,
+        include_cv_baseline=include_cv_baseline,
+        zscore_before_corr=True,  # enforced by chronic function anyway
     )
-    if df.empty:
+    if df is None or df.empty:
         raise ValueError(f"Empty df for subject={subject}")
 
-    # ------------------------------------------------------------------
-    # helpers
-    # ------------------------------------------------------------------
+    df = filter_chronic_df_by_session(df, one=one, sess=sess)
+
     def _get_feature_pairs(dfin: pd.DataFrame) -> tuple[list[str], list[str]]:
         cols_a = [c for c in dfin.columns if c.endswith("_a")]
         exclude_bases = {
             "eid", "area", "subject", "pair_tag", "FOV", "uid",
-            "x", "y", "z",
+            "x", "y", "z", "dt_days", "pair_type",
         }
         ca_list, cb_list = [], []
         for ca in cols_a:
@@ -1503,19 +1792,63 @@ def plot_chronic_corr_vs_time_subject(
             return np.nan
         return float(np.std(x, ddof=1) / np.sqrt(x.size))
 
-    # ------------------------------------------------------------------
-    # (2) eid → date mapping
-    # ------------------------------------------------------------------
-    eids = pd.unique(pd.concat([df["eid_a"], df["eid_b"]], ignore_index=True))
+    def _stable_u32_seed(*parts: object) -> int:
+        s = "|".join(str(p) for p in parts)
+        return abs(hash(s)) % (2**32 - 1)
+
+    # eid → date mapping
+    eids = pd.unique(pd.concat([df["eid_a"], df["eid_b"]], ignore_index=True).astype(str))
+    eids = [e for e in eids if e and e.lower() != "none"]
     eid2t = {str(eid): _eid_date_from_path(one, str(eid)) for eid in eids}
 
-    # ------------------------------------------------------------------
-    # (3) select rows + compute dt_days
-    # ------------------------------------------------------------------
+    # dt_days=0 baseline from within-session CV rows + shuffle baseline for CV
+    cv0_row = None
+    if include_cv_baseline and ("pair_type" in df.columns):
+        m_cv = (df["pair_type"].astype(str) == "within_session")
+        if np.any(m_cv):
+            df_cv0 = df.loc[m_cv].copy()
+            df_cv0["eid_a"] = df_cv0["eid_a"].astype(str)
+
+            dcv = df_cv0[["eid_a", "corr"]].copy()
+            dcv["corr"] = pd.to_numeric(dcv["corr"], errors="coerce")
+            per_sess = dcv.groupby("eid_a")["corr"].mean()
+            per_sess = per_sess[np.isfinite(per_sess.to_numpy())]
+
+            if per_sess.size > 0:
+                cv0_row = dict(
+                    dt_days=0.0,
+                    corr_avg=float(per_sess.mean()),
+                    corr_sem=_nansem(per_sess.to_numpy()),
+                    corr_shuf_avg=np.nan,
+                    _n_sessions=int(per_sess.size),
+                )
+
+                if shuf:
+                    ca_list, cb_list = _get_feature_pairs(df_cv0)
+                    shuf_means = []
+                    for eid, dd in df_cv0.groupby("eid_a", sort=False):
+                        if dd.shape[0] < min_neurons:
+                            continue
+                        A = dd[ca_list].apply(pd.to_numeric, errors="coerce").to_numpy(float, copy=False)
+                        B = dd[cb_list].apply(pd.to_numeric, errors="coerce").to_numpy(float, copy=False)
+                        n = A.shape[0]
+                        rng = np.random.default_rng(_stable_u32_seed("cv", subject, eid, int(shuf_seed)))
+                        perm = rng.permutation(n)
+                        sim = _rowwise_cos_sim01(A, B[perm, :])
+                        shuf_means.append(float(np.nanmean(sim)))
+                    if len(shuf_means) > 0:
+                        cv0_row["corr_shuf_avg"] = float(np.nanmean(np.asarray(shuf_means, float)))
+
+    # use between-session rows only for dt>0 curve
+    d_between = df[df["pair_type"].astype(str) == "between_session"].copy() if ("pair_type" in df.columns) else df.copy()
+    if d_between.empty:
+        raise ValueError("No between-session rows available for plotting.")
+
+    # compute dt_days and choose grouping
     if eid_c is None:
-        d0 = df.copy()
-        ta = d0["eid_a"].map(eid2t)
-        tb = d0["eid_b"].map(eid2t)
+        d0 = d_between.copy()
+        ta = d0["eid_a"].astype(str).map(eid2t)
+        tb = d0["eid_b"].astype(str).map(eid2t)
         ok = np.isfinite((tb - ta).dt.total_seconds())
         d0 = d0.loc[ok].copy()
         d0["dt_days"] = np.abs((tb.loc[ok] - ta.loc[ok]).dt.total_seconds()) / (3600 * 24)
@@ -1526,11 +1859,11 @@ def plot_chronic_corr_vs_time_subject(
         if str(eid_c) not in eid2t:
             raise ValueError(f"eid_c not resolvable: {eid_c}")
         t_c = eid2t[str(eid_c)]
-        d0 = df[(df["eid_a"] == eid_c) | (df["eid_b"] == eid_c)].copy()
+        d0 = d_between[(d_between["eid_a"] == eid_c) | (d_between["eid_b"] == eid_c)].copy()
         if d0.empty:
             raise ValueError(f"No rows for center eid_c={eid_c}")
         d0["eid_other"] = np.where(d0["eid_a"] == eid_c, d0["eid_b"], d0["eid_a"])
-        d0["t_other"] = d0["eid_other"].map(eid2t)
+        d0["t_other"] = d0["eid_other"].astype(str).map(eid2t)
         ok = np.isfinite((d0["t_other"] - t_c).dt.total_seconds())
         d0 = d0.loc[ok].copy()
         d0["dt_days"] = (d0["t_other"] - t_c).dt.total_seconds() / (3600 * 24)
@@ -1541,110 +1874,100 @@ def plot_chronic_corr_vs_time_subject(
     if per_reg:
         group_cols = group_cols + [reg_col]
 
-    # ------------------------------------------------------------------
-    # (4) aggregate per pair (or pair+region)
-    # ------------------------------------------------------------------
+    # aggregate observed per group
     g = d0.groupby(group_cols, dropna=False)
     corr_avg = g["corr"].mean() if agg == "mean" else g["corr"].median()
-    corr_sem = g["corr"].apply(lambda s: _nansem(s.to_numpy()))
+    corr_sem = g["corr"].apply(lambda s: _nansem(pd.to_numeric(s, errors="coerce").to_numpy()))
     n_neu = g["corr"].size()
 
     out = (
-        pd.concat(
-            [corr_avg.rename("corr_avg"),
-             corr_sem.rename("corr_sem"),
-             n_neu.rename("n_neurons")],
-            axis=1
-        )
+        pd.concat([corr_avg.rename("corr_avg"), corr_sem.rename("corr_sem"), n_neu.rename("n_neurons")], axis=1)
         .reset_index()
         .query("n_neurons >= @min_neurons")
         .sort_values("dt_days", kind="mergesort")
         .reset_index(drop=True)
     )
 
-    # ------------------------------------------------------------------
-    # (5) shuffle baseline
-    # ------------------------------------------------------------------
+    # shuffle baseline (now consistent because *_a/*_b are z-scored everywhere)
     if shuf:
         ca_list, cb_list = _get_feature_pairs(d0)
-        rng = np.random.default_rng(int(shuf_seed))
-        shuf_vals = []
 
-        for _, row in out.iterrows():
-            m = np.ones(len(d0), dtype=bool)
-            for c in group_cols:
-                m &= (d0[c].to_numpy() == row[c])
-            dd = d0.loc[m]
-
-            if dd.empty or dd.shape[0] < min_neurons:
-                shuf_vals.append(np.nan)
-                continue
-
-            A = dd[ca_list].apply(pd.to_numeric, errors="coerce").to_numpy(float)
-            B = dd[cb_list].apply(pd.to_numeric, errors="coerce").to_numpy(float)
-
-            ia = rng.permutation(A.shape[0])
-            ib = rng.permutation(A.shape[0])
+        def _group_shuf_mean(dd: pd.DataFrame) -> float:
+            if dd.shape[0] < min_neurons:
+                return np.nan
+            A = dd[ca_list].apply(pd.to_numeric, errors="coerce").to_numpy(float, copy=False)
+            B = dd[cb_list].apply(pd.to_numeric, errors="coerce").to_numpy(float, copy=False)
+            n = A.shape[0]
+            tag = str(dd["pair_tag"].iloc[0]) if ("pair_tag" in dd.columns and dd["pair_tag"].notna().any()) else "group"
+            rng = np.random.default_rng(_stable_u32_seed("between", subject, tag, int(shuf_seed)))
+            ia = rng.permutation(n)
+            ib = rng.permutation(n)
             sim = _rowwise_cos_sim01(A[ia], B[ib])
-            shuf_vals.append(float(np.nanmean(sim)))
+            return float(np.nanmean(sim))
 
-        out["corr_shuf_avg"] = np.asarray(shuf_vals, float)
+        shuf_series = g.apply(_group_shuf_mean)
+        out = out.merge(shuf_series.rename("corr_shuf_avg").reset_index(), on=group_cols, how="left")
 
-    # ------------------------------------------------------------------
-    # (6) collapse by dt_days if eid_c is None
-    # ------------------------------------------------------------------
+    # collapse by dt_days when eid_c is None, then inject dt=0 CV point
     out_plot = out
     if eid_c is None:
         if not per_reg:
             out_plot = (
-                out.groupby("dt_days")
+                out.groupby("dt_days", dropna=False)
                 .agg(
                     corr_avg=("corr_avg", "mean"),
                     corr_sem=("corr_avg", _nansem),
-                    corr_shuf_avg=("corr_shuf_avg", "mean"),
+                    corr_shuf_avg=("corr_shuf_avg", "mean") if shuf else ("corr_avg", lambda x: np.nan),
                 )
                 .reset_index()
                 .sort_values("dt_days")
+                .reset_index(drop=True)
             )
+            if cv0_row is not None:
+                add = pd.DataFrame([{
+                    "dt_days": 0.0,
+                    "corr_avg": cv0_row["corr_avg"],
+                    "corr_sem": cv0_row["corr_sem"],
+                    "corr_shuf_avg": cv0_row.get("corr_shuf_avg", np.nan),
+                }])
+                out_plot = (
+                    pd.concat([add, out_plot], ignore_index=True)
+                    .drop_duplicates(subset=["dt_days"], keep="first")
+                    .sort_values("dt_days")
+                    .reset_index(drop=True)
+                )
         else:
             out_plot = (
-                out.groupby(["dt_days", reg_col])
+                out.groupby(["dt_days", reg_col], dropna=False)
                 .agg(
                     corr_avg=("corr_avg", "mean"),
-                    corr_shuf_avg=("corr_shuf_avg", "mean"),
+                    corr_shuf_avg=("corr_shuf_avg", "mean") if shuf else ("corr_avg", lambda x: np.nan),
                 )
                 .reset_index()
                 .sort_values(["dt_days", reg_col])
+                .reset_index(drop=True)
             )
 
-    # ------------------------------------------------------------------
-    # (7) plotting
-    # ------------------------------------------------------------------
+    # plotting
     if ax is None:
         _, ax = plt.subplots(figsize=(6, 3))
 
     if eid_c is None and per_reg:
-        # Δ = data − shuffle
         out_plot["delta"] = out_plot["corr_avg"] - out_plot["corr_shuf_avg"]
-
         for reg, dd in out_plot.groupby(reg_col, sort=False):
             ax.plot(dd["dt_days"], dd["delta"], marker="o", lw=1.5, label=str(reg))
-
-        # global line
         gg = out_plot.groupby("dt_days")["delta"].mean().reset_index()
         ax.plot(gg["dt_days"], gg["delta"], marker="o", lw=2.5, color="k", label="all neurons")
-
         ax.axhline(0.0, color="k", lw=0.75, alpha=0.4)
         ax.set_ylabel("Δ cosine similarity (data − shuffle)")
         ax.legend(frameon=False)
-
     else:
-        x = out_plot["dt_days"]
-        y = out_plot["corr_avg"]
-
+        x = out_plot["dt_days"].to_numpy()
+        y = out_plot["corr_avg"].to_numpy()
         ax.plot(x, y, marker="o", lw=1.5)
+
         if shuf and "corr_shuf_avg" in out_plot.columns:
-            ys = out_plot["corr_shuf_avg"]
+            ys = out_plot["corr_shuf_avg"].to_numpy()
             ax.plot(x, ys, lw=1.0, alpha=0.6)
             for xi, ysi, ydi in zip(x, ys, y):
                 if np.isfinite(ysi) and np.isfinite(ydi):
@@ -1657,51 +1980,31 @@ def plot_chronic_corr_vs_time_subject(
 
     ax.set_xlabel(x_label)
 
-    # integer day ticks
     xmin, xmax = ax.get_xlim()
-    ax.set_xticks(np.arange(np.floor(xmin), np.ceil(xmax) + 1))
+    if np.isfinite(xmin) and np.isfinite(xmax):
+        ticks = np.arange(np.floor(xmin), np.ceil(xmax) + 1)
+        if len(ticks) <= 50:  # avoid too many ticks
+            ax.set_xticks(ticks)
 
-    # title
     if title is None:
-        title = f"{subject}: cosine similarity vs time ({mode_label})"
+        title = (
+            f"{subject}: cosine similarity vs time "
+            f"({mode_label}, {sess})"
+        )
         if per_reg:
             title += " | per_reg"
+
     ax.set_title(title)
 
-    # despine
     for s in ("top", "right"):
         ax.spines[s].set_visible(False)
 
     plt.tight_layout()
-
-    # ------------------------------------------------------------------
-    # (8) concise audit printout
-    # ------------------------------------------------------------------
-    if eid_c is None:
-        print("\nSession pairs grouped by |Δdays|:\n")
-        ta = df["eid_a"].map(eid2t)
-        tb = df["eid_b"].map(eid2t)
-        ok = np.isfinite((tb - ta).dt.total_seconds())
-        dprint = (
-            df.loc[ok, ["eid_a", "eid_b"]]
-            .assign(
-                dt_days_int=lambda x: (
-                    np.abs((tb[ok] - ta[ok]).dt.total_seconds()) / (3600 * 24)
-                ).round().astype(int)
-            )
-            .drop_duplicates()
-            .sort_values(["dt_days_int", "eid_a", "eid_b"])
-        )
-
-        for d, dd in dprint.groupby("dt_days_int"):
-            print(f"Δdays = {d}")
-            for _, r in dd.iterrows():
-                da = eid2t[r["eid_a"]].date()
-                db = eid2t[r["eid_b"]].date()
-                print(f"  {r['eid_a']} ({da})  <->  {r['eid_b']} ({db})")
-            print()
-
     return out_plot, ax
+
+
+
+
 
 
 
@@ -2156,7 +2459,7 @@ def regional_group_meso(
     """
     Mesoscope analogue of `regional_group(...)`, using stack files created by `stack_trial_cuts_meso()`.
 
-    Mapping : one of ['Beryl','Cosmos','rm','lz','fr','kmeans','PCA'].
+    Mapping : one of ['Beryl','Cosmos','rm','lz','fr','cv_sim','kmeans','PCA'].
 
     Updates
     -------
@@ -2213,10 +2516,13 @@ def regional_group_meso(
         r["len"] = OrderedDict((k, int(r["len"][k])) for k in r["ttypes"])
 
     # ---------- attach cv blocks ----------
-    if cv:
+    _need_cv_blocks = bool(cv) or (mapping == "cv_sim")
+
+    if _need_cv_blocks:
         if not stack_even_path.is_file() or not stack_odd_path.is_file():
             raise FileNotFoundError(
-                f"cv=True but missing even/odd stacks:\n  {stack_even_path}\n  {stack_odd_path}"
+                f"Need even/odd stacks (cv=True or mapping='cv_sim') but missing:\n"
+                f"  {stack_even_path}\n  {stack_odd_path}"
             )
         r_even = _load_dict(stack_even_path)
         r_odd = _load_dict(stack_odd_path)
@@ -2226,26 +2532,23 @@ def regional_group_meso(
             if "concat_z" in d:
                 return np.asarray(d["concat_z"], dtype=np.float32)
             if "concat" in d:
-                # older stacks
                 X = np.asarray(d["concat"], dtype=np.float32)
-
-                # local zscore (row-wise) to match expected semantics
                 mu = np.nanmean(X, axis=1, keepdims=True)
                 sd = np.nanstd(X, axis=1, keepdims=True)
                 sd = np.where(sd == 0, 1.0, sd)
                 return (X - mu) / sd
             raise KeyError("cv stacks must contain 'concat_z' (preferred) or legacy 'concat'.")
 
-        X_all = None
+        # ensure all-stack feature exists (used for N consistency checks)
         if "concat_z" in r:
             X_all = np.asarray(r["concat_z"], dtype=np.float32)
         elif "concat" in r:
-            # legacy all-stack
             X = np.asarray(r["concat"], dtype=np.float32)
             mu = np.nanmean(X, axis=1, keepdims=True)
             sd = np.nanstd(X, axis=1, keepdims=True)
             sd = np.where(sd == 0, 1.0, sd)
             X_all = (X - mu) / sd
+            r["concat_z"] = X_all
         else:
             raise KeyError("Saved all-stack lacks 'concat_z' (preferred) or legacy 'concat'.")
 
@@ -2503,6 +2806,36 @@ def regional_group_meso(
 
         _ensure_rm_isort_attached()
 
+    elif mapping == "cv_sim":
+        # Requires even/odd features; ensured above via _need_cv_blocks
+        if ("concat_z_even" not in r) or ("concat_z_odd" not in r):
+            raise KeyError("mapping='cv_sim' requires r['concat_z_even'] and r['concat_z_odd'].")
+
+        Xe = np.asarray(r["concat_z_even"], dtype=np.float32)
+        Xo = np.asarray(r["concat_z_odd"], dtype=np.float32)
+
+        if Xe.shape != Xo.shape or Xe.ndim != 2:
+            raise ValueError(f"concat_z_even/odd must be same 2D shape; got {Xe.shape} vs {Xo.shape}.")
+
+        # cosine similarity per neuron (row)
+        # sim_i = <Xe_i, Xo_i> / (||Xe_i|| * ||Xo_i||)
+        num = np.nansum(Xe * Xo, axis=1)
+        den = np.sqrt(np.nansum(Xe * Xe, axis=1) * np.nansum(Xo * Xo, axis=1))
+        den = np.where(den == 0, np.nan, den)
+        sim = (num / den).astype(np.float32)
+
+        # store like 'fr'/'lz'
+        r["cv_sim"] = sim
+        r["acs"] = np.asarray(r.get("ids", []), dtype=object)
+
+        # colorize (cosine similarity nominally in [-1, 1])
+        norm = Normalize(vmin=-1.0, vmax=1.0)
+        cmap = cm.get_cmap("magma")
+        r["cols"] = cmap(norm(sim))
+
+        _ensure_rm_isort_attached()
+
+
     elif mapping == "fr":
         if "fr" not in r:
             raise KeyError("Saved stack lacks 'fr'.")
@@ -2549,7 +2882,8 @@ def regional_group_meso(
         _ensure_rm_isort_attached()
 
     else:
-        raise ValueError("mapping must be one of ['Beryl','Cosmos','rm','lz','fr','kmeans','PCA'].")
+        raise ValueError("mapping must be one of ['Beryl','Cosmos','rm','lz','fr','cv_sim','kmeans','PCA'].")
+
 
     # Always attach Beryl acronyms as r['Beryl'] for convenience
     acs_in = np.asarray(r.get("ids", []), dtype=object)
@@ -2602,7 +2936,7 @@ def scatter_x_vs_cv_sim_meso(
     nclus: int = 20,
     nclus_rm: int = 20,
     rerun: bool = False,
-    single_eid: str | None = None,
+    single_eid: str | None = None, # '20ebc2b9-5b4c-42cd-8e4b-65ddb427b7ff'
     xvar: str = "fr",
     jitter: float = 0.15,
     shuf: bool = True,
@@ -3268,13 +3602,16 @@ def plot_xy_meso(
     png_width: int = 3000,
     png_height: int = 2500,
     how: str = "eq_hist",
-    png_point_size: int = 1,                # spread px
+    png_point_size: int = 3,                # spread px
     x_range=None,
     y_range=None,
     title: str | None = None,
     title_color=(0, 0, 0),
     title_xy=(20, 20),
     title_fontsize: int = 28,
+    png_min_alpha: int = 80,          # 0..255 (higher = more visible)
+    png_span: float | None = None, 
+    cv_sim_threshold: float | None = None,
 ):
     """
     Mesoscope XY visualization with:
@@ -3290,8 +3627,14 @@ def plot_xy_meso(
     Default PNG save location (if save_png and savepath is None):
         pth_meso / 'figs' / f'xy_{mapping}_nclus{nclus}_cv{cv}.png'
     """
-    from pathlib import Path
-    import numpy as np
+
+    legend: bool = True,
+    legend_max_items: int = 20,        # for categorical mappings
+    legend_xy: tuple[int, int] = (40, 80),
+    legend_swatch: int = 18,
+    legend_linegap: int = 6,
+    legend_bg_alpha: int = 160,   
+
 
     # ---------- load once ----------
     r = regional_group_meso(
@@ -3303,12 +3646,18 @@ def plot_xy_meso(
         nclus=nclus,
     )
 
+
+
     for k in ("xyz", "acs", "cols"):
         if k not in r:
             raise KeyError(f"regional_group_meso output must contain key '{k}'.")
 
+
+
     if tab20_colors:
         _override_cols_tab20(r)
+
+
 
     xyz = np.asarray(r["xyz"])
     scale = 1000.0 if to_mm else 1.0
@@ -3323,12 +3672,33 @@ def plot_xy_meso(
 
     labels = np.asarray(r["acs"])
     cols = np.asarray(r["cols"], dtype=np.float32)
+
+     # ---------- optional cv_sim alpha masking ----------
+    if cv_sim_threshold is not None:
+        if "cv_sim" not in r:
+            raise ValueError(
+                "cv_sim_threshold was set, but r does not contain 'cv_sim'. "
+                "Use mapping='cv_sim' or compute cv_sim upstream."
+            )
+
+        sim = np.asarray(r["cv_sim"], dtype=float)
+        if sim.shape[0] != cols.shape[0]:
+            raise ValueError("cv_sim length does not match number of neurons.")
+
+        # set alpha = 0 for low-cv neurons
+        mask = np.isfinite(sim) & (sim > float(cv_sim_threshold))
+        cols = cols.copy()
+        cols[~mask, 3] = 0.0
+
+        # write back
+        r["cols"] = cols   
+
+
     if cols.ndim != 2 or cols.shape[1] != 4:
         raise ValueError("r['cols'] must be (N,4) RGBA floats.")
 
     # RGBA uint8 for Datoviz
     color_u8 = np.clip(np.round(cols * 255.0), 0, 255).astype(np.uint8, copy=False)
-    color_u8[:, 3] = 255
 
     N = int(x64.shape[0])
 
@@ -3421,7 +3791,12 @@ def plot_xy_meso(
         )
 
         agg = cvs.points(df, "x", "y", agg=ds.count_cat("label"))
-        img = tf.shade(agg, color_key=color_key, how=str(how))
+        img = tf.shade( agg,
+                        color_key=color_key,
+                        how=str(how),
+                        min_alpha=int(png_min_alpha),
+                        span=png_span,          # None means datashader chooses span
+                    )
 
         if int(png_point_size) > 1:
             img = tf.spread(img, px=int(png_point_size))
@@ -3439,6 +3814,152 @@ def plot_xy_meso(
             font = ImageFont.load_default()
 
         draw.text(tuple(title_xy), str(title), fill=title_color, font=font)
+
+        if legend:
+
+            def _scalar(x, name: str):
+                # Accept scalar or 1-tuple/list; reject other iterables
+                if isinstance(x, (list, tuple)):
+                    if len(x) != 1:
+                        raise ValueError(f"{name} must be scalar or 1-tuple; got {x!r}")
+                    x = x[0]
+                return x
+
+            # normalize legend params (robust to accidental 1-tuples)
+            legend_xy = _scalar(legend_xy, "legend_xy")
+            legend_max_items = int(_scalar(legend_max_items, "legend_max_items"))
+            legend_swatch = int(_scalar(legend_swatch, "legend_swatch"))
+            legend_linegap = int(_scalar(legend_linegap, "legend_linegap"))
+            legend_bg_alpha = int(_scalar(legend_bg_alpha, "legend_bg_alpha"))
+
+            # normalize legend_xy to (x,y)
+            if isinstance(legend_xy, (list, tuple)) and len(legend_xy) == 1 and isinstance(legend_xy[0], (list, tuple)):
+                legend_xy = legend_xy[0]
+            if not (isinstance(legend_xy, (list, tuple)) and len(legend_xy) == 2):
+                raise ValueError(f"legend_xy must be a 2-tuple (x,y); got {legend_xy!r}")
+            lx, ly = int(legend_xy[0]), int(legend_xy[1])
+
+            # ensure RGBA image so we can draw semi-transparent legend background
+            pil = pil.convert("RGBA")
+            draw = ImageDraw.Draw(pil, "RGBA")
+
+            # legend_xy can be (x, y) or ((x, y),); normalize
+            if isinstance(legend_xy, (list, tuple)) and len(legend_xy) == 1 and isinstance(legend_xy[0], (list, tuple)):
+                legend_xy = legend_xy[0]
+            if not (isinstance(legend_xy, (list, tuple)) and len(legend_xy) == 2):
+                raise ValueError(f"legend_xy must be a 2-tuple (x,y); got {legend_xy!r}")
+            lx, ly = int(legend_xy[0]), int(legend_xy[1])
+
+            # semi-transparent background box sized after we know content
+            def _draw_bg_box(x0, y0, x1, y1):
+                pad = 10
+                draw.rectangle(
+                    [x0 - pad, y0 - pad, x1 + pad, y1 + pad],
+                    fill=(255, 255, 255, int(legend_bg_alpha)),
+                    outline=(0, 0, 0, 200),
+                    width=2,
+                )
+
+            # Scalar legend for fr/lz/cv_sim: draw a simple vertical color bar with min/max
+            if mapping in ("fr", "lz", "cv_sim"):
+                if mapping == "cv_sim":
+                    vals = np.asarray(r.get("cv_sim", []), dtype=float)
+                    vmin, vmax = -1.0, 1.0
+                    cmap_for_bar = cm.get_cmap("magma")
+                    label_lo, label_hi = f"{vmin:.2f}", f"{vmax:.2f}"
+                    legend_title = "cv_sim"
+                elif mapping == "fr":
+                    vals = np.asarray(r.get("fr", []), dtype=float)
+                    # you used fr**0.1 for coloring; keep legend consistent with what you colorized
+                    vals = np.where(np.isfinite(vals), vals ** 0.1, np.nan)
+                    vmin, vmax = float(np.nanmin(vals)), float(np.nanmax(vals))
+                    cmap_for_bar = cm.get_cmap("magma")
+                    label_lo, label_hi = f"{vmin:.3g}", f"{vmax:.3g}"
+                    legend_title = "fr**0.1"
+                else:  # lz
+                    vals = np.asarray(r.get("lz", []), dtype=float)
+                    vals = np.where(np.isfinite(vals), vals ** 0.1, np.nan)
+                    vmin, vmax = float(np.nanmin(vals)), float(np.nanmax(vals))
+                    cmap_for_bar = cm.get_cmap("cividis")
+                    label_lo, label_hi = f"{vmin:.3g}", f"{vmax:.3g}"
+                    legend_title = "lz**0.1"
+
+                bar_w = 22
+                bar_h = 180
+                # background box bounds
+                text_w = 140
+                x0, y0 = lx, ly
+                x1, y1 = lx + bar_w + 12 + text_w, ly + bar_h + 30
+                _draw_bg_box(x0, y0, x1, y1)
+
+                # title
+                draw.text((lx, ly), legend_title, fill=(0, 0, 0, 255), font=font)
+
+                # draw bar (top=vmax bright)
+                bx = lx
+                by = ly + 26
+                for j in range(bar_h):
+                    t = 1.0 - (j / max(1, bar_h - 1))
+                    rgba = np.array(cmap_for_bar(t)) * 255.0
+                    rgba = np.clip(np.round(rgba), 0, 255).astype(np.uint8)
+                    draw.line([(bx, by + j), (bx + bar_w, by + j)], fill=tuple(rgba.tolist()), width=1)
+
+                # min/max labels
+                draw.text((bx + bar_w + 10, by - 6), label_hi, fill=(0, 0, 0, 255), font=font)
+                draw.text((bx + bar_w + 10, by + bar_h - 18), label_lo, fill=(0, 0, 0, 255), font=font)
+
+            else:
+                # Categorical legend (kmeans/rm/Beryl/Cosmos/etc.): show top-N labels by count
+                lab = labels
+                c = Counter(lab.tolist())
+                # normalize legend_max_items (must be scalar int)
+                lmi = legend_max_items
+                if isinstance(lmi, (list, tuple)):
+                    if len(lmi) != 1:
+                        raise ValueError(f"legend_max_items must be an int or 1-tuple; got {lmi!r}")
+                    lmi = lmi[0]
+
+                try:
+                    lmi = int(lmi)
+                except Exception:
+                    raise ValueError(f"legend_max_items must be convertible to int; got {legend_max_items!r}")
+
+                top = c.most_common(lmi)
+
+                # measure approximate box size
+                line_h = legend_swatch + legend_linegap
+                box_h = 30 + line_h * len(top)
+                box_w = 320
+                x0, y0 = lx, ly
+                x1, y1 = lx + box_w, ly + box_h
+                _draw_bg_box(x0, y0, x1, y1)
+
+                draw.text((lx, ly), f"Legend (top {len(top)})", fill=(0, 0, 0, 255), font=font)
+
+                yy = ly + 26
+                for lab_i, cnt_i in top:
+                    # color_key already maps label -> "#RRGGBB" from first occurrence
+                    hexcol = color_key.get(lab_i, "#808080")
+                    rr = int(hexcol[1:3], 16)
+                    gg = int(hexcol[3:5], 16)
+                    bb = int(hexcol[5:7], 16)
+
+                    # swatch
+                    draw.rectangle(
+                        [lx, yy, lx + int(legend_swatch), yy + int(legend_swatch)],
+                        fill=(rr, gg, bb, 255),
+                        outline=(0, 0, 0, 200),
+                        width=1,
+                    )
+                    # text
+                    draw.text(
+                        (lx + int(legend_swatch) + 10, yy - 2),
+                        f"{lab_i}  (n={cnt_i})",
+                        fill=(0, 0, 0, 255),
+                        font=font,
+                    )
+                    yy += line_h
+
 
         # ---------- save ----------
         if dpi is None:
@@ -3462,4 +3983,42 @@ def plot_xy_meso(
     app.destroy()
 
 
+
+def plot_cv_sim_hist_meso(
+    *,
+    stack_dir=None,
+    cache_dir=None,
+    filter_neurons: bool = True,
+    single_eid=None,
+    rerun: bool = False,
+    bins: int = 80,
+    range_=(-1.0, 1.0),
+    density: bool = False,
+    title: str | None = None,
+):
+    """
+    Load mapping='cv_sim' from regional_group_meso and plot histogram of per-neuron cv cosine similarity.
+    """
+    r = regional_group_meso(
+        "cv_sim",
+        stack_dir=stack_dir,
+        cache_dir=cache_dir,
+        filter_neurons=filter_neurons,
+        cv=False,              # not required for cv_sim (you made cv blocks load for mapping=='cv_sim')
+        single_eid=single_eid,
+        rerun=rerun,
+    )
+
+    sim = np.asarray(r["cv_sim"], dtype=float)
+    sim = sim[np.isfinite(sim)]
+
+    fig, ax = plt.subplots(figsize=(6.5, 3.6))
+    ax.hist(sim, bins=int(bins), range=range_, density=bool(density))
+    ax.set_xlabel("cv_sim = cosine(concat_z_even, concat_z_odd)")
+    ax.set_ylabel("Density" if density else "Count")
+    if title is None:
+        title = f"cv_sim histogram (N={sim.size})"
+    ax.set_title(title)
+    ax.set_xlim(range_)
+    fig.tight_layout()
 
