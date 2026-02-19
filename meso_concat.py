@@ -2003,9 +2003,338 @@ def plot_chronic_corr_vs_time_subject(
     return out_plot, ax
 
 
+def _session_behavior_metrics(one: ONE, eid: str) -> dict:
+    """
+    Compute compact behavioral/session-level metrics from `trials`.
+
+    Returns
+    -------
+    dict with keys:
+        performance, n_trials_total, n_trials_scored,
+        n_correct, n_incorrect, n_no_choice, median_rt_s
+    """
+    trials = one.load_object(eid, "trials")
+
+    fb = np.asarray(trials.get("feedbackType", []), dtype=float)
+    stim = np.asarray(trials.get("stimOn_times", []), dtype=float)
+    first = np.asarray(trials.get("firstMovement_times", []), dtype=float)
+
+    n_trials_total = int(stim.size) if stim.size > 0 else int(fb.size)
+
+    valid_fb = np.isfinite(fb) & np.isin(fb, (-1, 1))
+    n_trials_scored = int(np.sum(valid_fb))
+    n_correct = int(np.sum(fb[valid_fb] == 1)) if n_trials_scored > 0 else 0
+    n_incorrect = int(np.sum(fb[valid_fb] == -1)) if n_trials_scored > 0 else 0
+    n_no_choice = int(max(n_trials_total - n_trials_scored, 0))
+
+    performance = float(n_correct / n_trials_scored) if n_trials_scored > 0 else np.nan
+
+    median_rt_s = np.nan
+    if stim.size > 0 and first.size > 0:
+        n = min(int(stim.size), int(first.size))
+        rt = first[:n] - stim[:n]
+        ok = np.isfinite(rt) & (rt > 0) & (rt < 10)
+        if np.any(ok):
+            median_rt_s = float(np.nanmedian(rt[ok]))
+
+    return {
+        "performance": performance,
+        "n_trials_total": n_trials_total,
+        "n_trials_scored": n_trials_scored,
+        "n_correct": n_correct,
+        "n_incorrect": n_incorrect,
+        "n_no_choice": n_no_choice,
+        "median_rt_s": median_rt_s,
+    }
 
 
+def plot_session_even_odd_similarity_vs_performance_subject(
+    subject: str = "SP058",
+    *,
+    one: "ONE | None" = None,
+    filter_neurons: bool = True,
+    min_trials: int = 10,
+    rerun_canonical: bool = False,
+    rerun_trial_cuts: bool = False,
+    rerun_stacks: bool = False,
+    rerun_group: bool = False,
+    nclus_rm: int = 20,
+    shuf: bool = True,
+    shuf_seed: int = 0,
+    out_dir: str | Path | None = None,
+    save_outputs: bool = True,
+    fail_fast: bool = False,
+    verbose: bool = True,
+):
+    """
+    For each session of one subject, compute within-session neural stability
+    as cosine similarity between even- and odd-trial averaged activity patterns,
+    then relate it to behavioral performance.
 
+    IMPORTANT
+    ---------
+    - This is independent of chronic tracking across sessions.
+    - Processing is session-local (single_eid mode), using all available ROIs
+      after optional filtering.
+
+    Returns
+    -------
+    df : pd.DataFrame
+        One row per session.
+    fig : matplotlib.figure.Figure
+        Two-panel summary figure.
+    paths : dict
+        Saved output paths (csv/parquet/png/svg).
+    """
+    if one is None:
+        one = ONE()
+
+    subj2eids = _canonical_sessions_subject_map(one=one, rerun=rerun_canonical)
+    eids = [str(e) for e in subj2eids.get(subject, []) if e and str(e).lower() != "none"]
+    if len(eids) == 0:
+        raise ValueError(f"No canonical sessions found for subject={subject}.")
+
+    # Stable chronological order
+    eids_sorted = sorted(eids, key=lambda e: (_eid_date(one, e), e))
+
+    trial_cuts_dir = Path(pth_meso, "trial_cuts")
+    stack_dir = Path(pth_meso)
+
+    if out_dir is None:
+        out_dir = Path(pth_meso, "session_cv_similarity")
+    else:
+        out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    def _sim01(A: np.ndarray, B: np.ndarray) -> np.ndarray:
+        A = np.asarray(A, float)
+        B = np.asarray(B, float)
+        num = np.sum(A * B, axis=1)
+        den = np.sqrt(np.sum(A**2, axis=1) * np.sum(B**2, axis=1))
+        out = np.full_like(num, np.nan, float)
+        good = den > 0
+        out[good] = num[good] / den[good]
+        return 0.5 * (out + 1.0)
+
+    def _seed_u32(*parts: object) -> int:
+        s = "|".join(str(p) for p in parts)
+        return abs(hash(s)) % (2**32 - 1)
+
+    rows = []
+    failures = []
+
+    for i, eid in enumerate(eids_sorted, start=1):
+        try:
+            if verbose:
+                print(f"\n[session {i}/{len(eids_sorted)}] {eid}")
+
+            single_cuts_dir = trial_cuts_dir / eid
+            has_metas = single_cuts_dir.is_dir() and any(
+                single_cuts_dir.glob(f"{eid}_FOV_*_meta_filter_{filter_neurons}.npy")
+            )
+
+            if rerun_trial_cuts or (not has_metas):
+                if verbose:
+                    print("  building trial cuts...")
+                save_trial_cuts_meso(
+                    eid,
+                    filter_neurons=filter_neurons,
+                    require_all=False,
+                    out_dir=single_cuts_dir,
+                )
+
+            stack_all = stack_dir / f"stack_all_{eid}_filter{filter_neurons}.npy"
+            stack_even = stack_dir / f"stack_even_{eid}_filter{filter_neurons}.npy"
+            stack_odd = stack_dir / f"stack_odd_{eid}_filter{filter_neurons}.npy"
+
+            if rerun_stacks or (not stack_all.is_file()) or (not stack_even.is_file()) or (not stack_odd.is_file()):
+                if verbose:
+                    print("  building single-session all/even/odd stacks...")
+                stack_trial_cuts_meso(
+                    trial_cuts_dir=trial_cuts_dir,
+                    filter_neurons=filter_neurons,
+                    min_trials=min_trials,
+                    single_eid=eid,
+                )
+
+            for p in (stack_all, stack_even, stack_odd):
+                if not p.is_file():
+                    raise FileNotFoundError(f"Expected stack file missing: {p}")
+
+            r = regional_group_meso(
+                mapping="cv_sim",
+                stack_dir=stack_dir,
+                filter_neurons=filter_neurons,
+                cv=True,
+                nclus=100,
+                nclus_rm=nclus_rm,
+                rerun=rerun_group,
+                single_eid=eid,
+            )
+
+            sim = np.asarray(r.get("cv_sim", []), dtype=float)
+            finite = np.isfinite(sim)
+            if sim.size == 0 or (not np.any(finite)):
+                raise RuntimeError("cv_sim is empty/non-finite for this session.")
+
+            sim_mean = float(np.nanmean(sim[finite]))
+            sim_sem = float(np.nanstd(sim[finite], ddof=1) / np.sqrt(np.sum(finite))) if np.sum(finite) > 1 else np.nan
+            n_neurons = int(np.sum(finite))
+
+            sim_shuf_mean = np.nan
+            sim_delta = np.nan
+            if shuf:
+                Xe = np.asarray(r["concat_z_even"], dtype=float)
+                Xo = np.asarray(r["concat_z_odd"], dtype=float)
+                if Xe.shape != Xo.shape:
+                    raise ValueError(f"concat_z_even/odd mismatch: {Xe.shape} vs {Xo.shape}")
+
+                rng = np.random.default_rng(_seed_u32(subject, eid, int(shuf_seed)))
+                keys = rng.random(Xo.shape)
+                perm = np.argsort(keys, axis=1)
+                Xo_sh = np.take_along_axis(Xo, perm, axis=1)
+
+                sim_sh = _sim01(Xe, Xo_sh)
+                sim_shuf_mean = float(np.nanmean(sim_sh))
+                sim_delta = sim_mean - sim_shuf_mean
+
+            beh = _session_behavior_metrics(one, eid)
+            date = _eid_date_from_path(one, eid)
+
+            rows.append(
+                {
+                    "subject": subject,
+                    "eid": str(eid),
+                    "session_date": pd.to_datetime(date),
+                    "cv_sim_mean": sim_mean,
+                    "cv_sim_sem": sim_sem,
+                    "cv_sim_shuf_mean": sim_shuf_mean,
+                    "cv_sim_delta": sim_delta,
+                    "n_neurons": n_neurons,
+                    **beh,
+                }
+            )
+
+            if verbose:
+                ptxt = beh["performance"]
+                if np.isfinite(ptxt):
+                    print(f"  done: n_neurons={n_neurons}, cv_sim={sim_mean:.4f}, performance={ptxt:.4f}")
+                else:
+                    print(f"  done: n_neurons={n_neurons}, cv_sim={sim_mean:.4f}, performance=nan")
+
+        except Exception as e:
+            msg = f"{type(e).__name__}: {e}"
+            failures.append((eid, msg))
+            print(f"[skip] {eid}: {msg}")
+            if fail_fast:
+                raise
+
+    if len(rows) == 0:
+        fail_txt = "\n".join([f"- {eid}: {err}" for eid, err in failures])
+        raise RuntimeError(f"No sessions produced usable results for {subject}.\n{fail_txt}")
+
+    df = pd.DataFrame(rows).sort_values("session_date").reset_index(drop=True)
+    df["session_number"] = np.arange(1, len(df) + 1, dtype=int)
+
+    cols_first = [
+        "subject", "session_number", "session_date", "eid",
+        "performance", "cv_sim_mean", "cv_sim_sem", "cv_sim_shuf_mean", "cv_sim_delta",
+        "n_neurons", "n_trials_total", "n_trials_scored", "n_correct", "n_incorrect", "n_no_choice", "median_rt_s",
+    ]
+    cols_first = [c for c in cols_first if c in df.columns]
+    df = df[cols_first + [c for c in df.columns if c not in cols_first]]
+
+    # ---------- plotting ----------
+    fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(11, 4.2))
+
+    # Panel A: progression over sessions
+    x = df["session_number"].to_numpy(int)
+    y_cv = df["cv_sim_mean"].to_numpy(float)
+    y_perf = df["performance"].to_numpy(float)
+
+    ax0.plot(x, y_cv, marker="o", lw=1.8, color="tab:blue", label="CV similarity")
+    ax0.set_xlabel("Session number")
+    ax0.set_ylabel("Even/Odd cosine similarity [0,1]", color="tab:blue")
+    ax0.tick_params(axis="y", labelcolor="tab:blue")
+    ax0.set_ylim(0, 1)
+
+    ax0b = ax0.twinx()
+    ax0b.plot(x, y_perf, marker="s", lw=1.5, color="tab:orange", label="Performance")
+    ax0b.set_ylabel("Performance (feedbackType==1 fraction)", color="tab:orange")
+    ax0b.tick_params(axis="y", labelcolor="tab:orange")
+    ax0b.set_ylim(0, 1)
+
+    # Combined legend
+    h0, l0 = ax0.get_legend_handles_labels()
+    h1, l1 = ax0b.get_legend_handles_labels()
+    ax0.legend(h0 + h1, l0 + l1, frameon=False, loc="lower right")
+
+    # Panel B: performance vs stability
+    m = np.isfinite(y_perf) & np.isfinite(y_cv)
+    ax1.scatter(y_perf[m], y_cv[m], s=45, alpha=0.85, color="k")
+
+    # annotate by session number for traceability
+    for xi, yi, si in zip(y_perf[m], y_cv[m], x[m]):
+        ax1.text(xi, yi, str(int(si)), fontsize=8, ha="left", va="bottom", alpha=0.75)
+
+    r_val = np.nan
+    if np.sum(m) >= 2:
+        r_val = float(np.corrcoef(y_perf[m], y_cv[m])[0, 1])
+        xp = y_perf[m]
+        yp = y_cv[m]
+        if np.nanstd(xp) > 0:
+            coef = np.polyfit(xp, yp, deg=1)
+            xx = np.linspace(np.nanmin(xp), np.nanmax(xp), 100)
+            yy = coef[0] * xx + coef[1]
+            ax1.plot(xx, yy, lw=1.5, color="tab:green", alpha=0.9)
+
+    ax1.set_xlabel("Performance")
+    ax1.set_ylabel("Even/Odd cosine similarity")
+    ax1.set_xlim(0, 1)
+    ax1.set_ylim(0, 1)
+
+    ttl = f"{subject}: session neural stability vs behavior"
+    if np.isfinite(r_val):
+        ttl += f"\nPearson r={r_val:.3f} (n={int(np.sum(m))} sessions)"
+    ax1.set_title(ttl)
+
+    for ax_ in (ax0, ax1):
+        ax_.spines["top"].set_visible(False)
+        ax_.spines["right"].set_visible(False)
+
+    fig.tight_layout()
+
+    # ---------- save ----------
+    stem = f"{subject}_session_even_odd_similarity_vs_performance"
+    paths = {
+        "out_dir": str(out_dir),
+        "df_csv": str(out_dir / f"{stem}.csv"),
+        "df_parquet": str(out_dir / f"{stem}.parquet"),
+        "plot_png": str(out_dir / f"{stem}.png"),
+        "plot_svg": str(out_dir / f"{stem}.svg"),
+        "n_sessions": int(df.shape[0]),
+        "n_failures": int(len(failures)),
+        "failures": failures,
+    }
+
+    if save_outputs:
+        df.to_csv(paths["df_csv"], index=False)
+        try:
+            df.to_parquet(paths["df_parquet"], index=False)
+        except Exception:
+            # optional dependency might be missing; CSV is always saved
+            pass
+
+        fig.savefig(paths["plot_png"], dpi=180, bbox_inches="tight")
+        fig.savefig(paths["plot_svg"], bbox_inches="tight")
+
+        if verbose:
+            print(f"\n[saved] dataframe: {paths['df_csv']}")
+            print(f"[saved] plot: {paths['plot_png']}")
+            if failures:
+                print(f"[note] skipped {len(failures)} sessions")
+
+    return df, fig, paths
 
 
 #################
