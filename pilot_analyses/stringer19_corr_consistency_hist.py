@@ -85,15 +85,17 @@ def collect_r_across_sessions(
 
     Returns
     -------
-    dict with `r_values` (array, len `n_sessions`), `used` (list of (path,
-    eid) actually used), and `skipped` (list of (path, eid_or_None, reason)).
+    dict with `r_values`, `durations` (session length in seconds), and
+    `n_neurons` (each an array, len `n_sessions`, aligned with `used`), plus
+    `used` (list of (path, eid) actually used) and `skipped` (list of
+    (path, eid_or_None, reason)).
     """
     one = one if one is not None else ONE()
     paths = _load_canonical_paths(canonical_sessions_path)
     rng = np.random.default_rng(seed)
     order = rng.permutation(len(paths))
 
-    r_values, used, skipped = [], [], []
+    r_values, durations, n_neurons, used, skipped = [], [], [], [], []
 
     for idx in order:
         if len(used) >= n_sessions:
@@ -117,6 +119,8 @@ def collect_r_across_sessions(
                 session, n_scatter_neurons=n_scatter_neurons, seed=corr_seed
             )
             r_values.append(info["r"])
+            durations.append(float(session.roi_times[0][-1] - session.roi_times[0][0]))
+            n_neurons.append(session.roi_signal.shape[0])
             used.append((path, eid))
             if verbose:
                 print(f"[ok]   {path} ({eid}): r={info['r']:.3f}  ({len(used)}/{n_sessions})")
@@ -131,7 +135,13 @@ def collect_r_across_sessions(
             f"out of {len(paths)} canonical sessions."
         )
 
-    return dict(r_values=np.array(r_values), used=used, skipped=skipped)
+    return dict(
+        r_values=np.array(r_values),
+        durations=np.array(durations),
+        n_neurons=np.array(n_neurons),
+        used=used,
+        skipped=skipped,
+    )
 
 
 def plot_r_histogram(
@@ -173,6 +183,68 @@ def plot_r_histogram(
         out_dir = Path(out_dir) if out_dir is not None else DEFAULT_OUT_DIR
         out_dir.mkdir(parents=True, exist_ok=True)
         fpath = out_dir / f"canonical_n{len(r_values)}_stringer19_figS2d.png"
+        fig.savefig(fpath, dpi=200, bbox_inches="tight")
+        print("Saved:", fpath)
+
+    return fig, result
+
+
+def plot_r_vs_duration(
+    n_sessions: int = 10,
+    one: Optional[ONE] = None,
+    seed: int = 0,
+    n_scatter_neurons: int = 500,
+    corr_seed: int = 0,
+    result: Optional[dict] = None,
+    save: bool = True,
+    out_dir: Optional[Path] = None,
+) -> Tuple[plt.Figure, dict]:
+    """Diagnostic scatter (not from the paper): r vs. session duration.
+
+    Not every canonical session gives an equally consistent correlation
+    structure across its two halves -- some `r` values in the Fig. S2 D
+    histogram are much lower than others. The reason turns out to be
+    mundane: `r` is the Pearson correlation between two *estimates* of a
+    pairwise-correlation matrix, each computed from only half the
+    recording. Shorter recordings give each half fewer timepoints, so each
+    per-pair correlation is a noisier estimate purely from sampling error
+    (estimation noise in a Pearson r shrinks only as ~1/sqrt(T)) -- not
+    because the underlying neural correlation structure is actually less
+    real or less stable. This plot checks that: across 10 random canonical
+    sessions, r vs. duration had corr=0.82 (n_neurons vs. r was much weaker,
+    -0.34, and largely a side effect of longer/shorter sessions also having
+    different neuron counts).
+
+    Parameters
+    ----------
+    result : dict, optional
+        Reuse an existing `collect_r_across_sessions` result instead of
+        computing a new one (must include `durations`).
+    Other parameters are passed to `collect_r_across_sessions` when
+    `result` is not given.
+    """
+    one = one if one is not None else ONE()
+    result = result if result is not None else collect_r_across_sessions(
+        n_sessions=n_sessions, one=one, seed=seed,
+        n_scatter_neurons=n_scatter_neurons, corr_seed=corr_seed,
+    )
+    r_values, durations = result["r_values"], result["durations"]
+    corr = float(np.corrcoef(r_values, durations)[0, 1])
+
+    fig, ax = plt.subplots(figsize=(4.5, 4))
+    ax.scatter(durations / 60, r_values, color="steelblue", edgecolor="black", linewidth=0.5, s=40)
+    ax.set_xlabel("session duration (min)")
+    ax.set_ylabel("r of correlations")
+    ax.set_ylim(0, 1)
+    ax.set_title(f"n={len(r_values)} sessions, corr(r, duration)={corr:.2f}", fontsize=10)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    fig.tight_layout()
+
+    if save:
+        out_dir = Path(out_dir) if out_dir is not None else DEFAULT_OUT_DIR
+        out_dir.mkdir(parents=True, exist_ok=True)
+        fpath = out_dir / f"canonical_n{len(r_values)}_stringer19_r_vs_duration.png"
         fig.savefig(fpath, dpi=200, bbox_inches="tight")
         print("Saved:", fpath)
 

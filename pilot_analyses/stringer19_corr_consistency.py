@@ -6,11 +6,16 @@ Fig. S2 shows, for one example recording: (A,B) a pseudocolor correlation
 matrix between two disjoint sets of 10 neurons each, computed independently
 from the first and second half of the recording; (C) a scatter of every
 cell pair's correlation in the first half against the second half, with
-their Pearson r annotated. (Panel D, a histogram of that r value across many
-recordings, doesn't apply to a single session and isn't reproduced here.)
+their Pearson r annotated; (D) a histogram of that r value across many
+recordings.
 
 `plot_correlation_consistency` adapts this directly to IBL mesoscope data
 using the deconvolved ROI signal from `meso_loader.load_mesoscope_session`.
+Panel D (`include_histogram=True`, the default) draws on a random sample of
+other canonical sessions via `stringer19_corr_consistency_hist.py`, with
+this session's own r marked -- see that module's docstring for why some
+sessions land far lower than others (short recordings give a noisier r
+purely from having fewer timepoints per half, not "worse" data).
 """
 from __future__ import annotations
 
@@ -120,10 +125,14 @@ def plot_correlation_consistency(
     n_display: int = 10,
     n_scatter_neurons: int = 500,
     seed: int = 0,
+    include_histogram: bool = True,
+    n_hist_sessions: int = 10,
+    hist_seed: int = 0,
+    canonical_sessions_path: Optional[Path] = None,
     save: bool = True,
     out_dir: Optional[Path] = None,
 ):
-    """Reproduce Stringer et al. 2019 Fig. S2 A-C for one mesoscope session.
+    """Reproduce Stringer et al. 2019 Fig. S2 A-D for one mesoscope session.
 
     Parameters
     ----------
@@ -133,6 +142,14 @@ def plot_correlation_consistency(
         Pass an already-loaded session to avoid reloading.
     n_display, n_scatter_neurons, seed
         See `compute_correlation_consistency`.
+    include_histogram : bool, default True
+        Add panel D: a histogram of `r` across `n_hist_sessions` other
+        random canonical sessions (via `stringer19_corr_consistency_hist
+        .collect_r_across_sessions`), with this session's own r marked.
+        Set False to skip it and only reproduce panels A-C (much faster
+        the first time, since it avoids loading ~10 other sessions).
+    n_hist_sessions, hist_seed, canonical_sessions_path
+        Passed to `collect_r_across_sessions` when `include_histogram`.
     save : bool, default True
         Save the figure as a PNG under `out_dir`.
     out_dir : Path, optional
@@ -140,7 +157,9 @@ def plot_correlation_consistency(
 
     Returns
     -------
-    (fig, info) -- see `compute_correlation_consistency` for `info`'s keys.
+    (fig, info) -- see `compute_correlation_consistency` for `info`'s keys;
+    when `include_histogram`, `info` also has `hist_r_values`, `hist_used`,
+    and `hist_skipped` (see `collect_r_across_sessions`).
     """
     one = one if one is not None else ONE()
     session = session if session is not None else load_mesoscope_session(eid, one=one)
@@ -152,10 +171,25 @@ def plot_correlation_consistency(
     pair_c1, pair_c2, r = info["pair_corr_half1"], info["pair_corr_half2"], info["r"]
     n_scatter_neurons = len(info["scatter_idx"])
 
+    if include_histogram:
+        from stringer19_corr_consistency_hist import collect_r_across_sessions  # noqa: E402 (avoids circular import)
+
+        hist_kwargs = dict(n_sessions=n_hist_sessions, one=one, seed=hist_seed, n_scatter_neurons=n_scatter_neurons, corr_seed=seed)
+        if canonical_sessions_path is not None:
+            hist_kwargs["canonical_sessions_path"] = canonical_sessions_path
+        hist_result = collect_r_across_sessions(**hist_kwargs)
+        info["hist_r_values"] = hist_result["r_values"]
+        info["hist_durations"] = hist_result["durations"]
+        info["hist_n_neurons"] = hist_result["n_neurons"]
+        info["hist_used"] = hist_result["used"]
+        info["hist_skipped"] = hist_result["skipped"]
+
     vmax = max(float(np.nanmax(np.abs(np.concatenate([block1.ravel(), block2.ravel()])))), 1e-6)
 
-    fig = plt.figure(figsize=(15, 4.2))
-    gs = gridspec.GridSpec(1, 4, width_ratios=[1, 1, 1.3, 0.05], wspace=0.55)
+    ncols = 5 if include_histogram else 4
+    width_ratios = [1, 1, 1.3, 0.05, 1.3] if include_histogram else [1, 1, 1.3, 0.05]
+    fig = plt.figure(figsize=(18 if include_histogram else 15, 4.2))
+    gs = gridspec.GridSpec(1, ncols, width_ratios=width_ratios, wspace=0.55)
     ax_a = fig.add_subplot(gs[0])
     ax_b = fig.add_subplot(gs[1])
     ax_c = fig.add_subplot(gs[2])
@@ -188,6 +222,19 @@ def plot_correlation_consistency(
     ax_c.spines["top"].set_visible(False)
     ax_c.spines["right"].set_visible(False)
 
+    if include_histogram:
+        hist_r = info["hist_r_values"]
+        ax_d = fig.add_subplot(gs[4])
+        ax_d.hist(hist_r, bins=np.linspace(0, 1, 21), color="gray", edgecolor="black", linewidth=0.5)
+        ax_d.axvline(r, color="crimson", lw=1.5, ls="--")
+        ax_d.text(r, ax_d.get_ylim()[1], " this session", color="crimson", fontsize=8, va="top", ha="left" if r < 0.85 else "right")
+        ax_d.set_xlabel("r of correlations")
+        ax_d.set_ylabel("# of recordings")
+        ax_d.set_xlim(0, 1)
+        ax_d.set_title(f"n={len(hist_r)} sessions\nmean r={np.mean(hist_r):.2f}", fontsize=10)
+        ax_d.spines["top"].set_visible(False)
+        ax_d.spines["right"].set_visible(False)
+
     fig.suptitle(
         f"{eid}  —  correlation consistency across time "
         f"({n_scatter_neurons} neurons, {len(pair_c1)} pairs)"
@@ -196,7 +243,8 @@ def plot_correlation_consistency(
     if save:
         out_dir = Path(out_dir) if out_dir is not None else DEFAULT_OUT_DIR
         out_dir.mkdir(parents=True, exist_ok=True)
-        fpath = out_dir / f"{eid}_stringer19_figS2abc.png"
+        suffix = "figS2abcd" if include_histogram else "figS2abc"
+        fpath = out_dir / f"{eid}_stringer19_{suffix}.png"
         fig.savefig(fpath, dpi=200, bbox_inches="tight")
         print("Saved:", fpath)
 
