@@ -1,6 +1,7 @@
 """Reproduce Stringer et al. 2019 (Science) Fig. 2E for an IBL mesoscope
-session: how well facial-video motion-energy PCs, versus simple behavioral
-traces, predict shared (cross-population) neural variance.
+session, on the FULL recording: how well facial-video motion-energy PCs,
+versus simple behavioral traces, predict shared (cross-population) neural
+variance.
 
 Method (shared variance component analysis, SVCA; see the paper's Methods,
 "Shared variance component analysis" and "Predicting neural activity from
@@ -20,21 +21,65 @@ curves.
 Fig. 2E's blue curve uses ~1000-dim facial motion-energy PCA (from the
 whole face video); the green curve uses running + pupil area + whisking.
 IBL sessions don't have pupil or a comparable running measure, so here the
-green curve uses wheel speed + whisker-pad motion energy instead, and the
-blue curve uses a modest number of motion-energy PCs computed directly
-from the raw video (see `_compute_motion_energy_pcs`) rather than ~1000,
-since this is a pilot reproduction, not a full re-analysis.
+green curve uses wheel speed + whisker-pad motion energy instead.
+
+Efficiency for large matrices
+------------------------------
+Two things scale with the FULL session (~1h, ~30k neural timepoints, and a
+~320k-frame video) rather than a short window: the neuron-side covariance
+SVD, and the video motion-energy PCA. Both bottleneck on the same
+operation -- a truncated SVD -- so `_truncated_svd` (used by both) picks
+the fastest way to get it:
+
+- **GPU, when available** (checked once via `torch.cuda.is_available()`):
+  `torch.svd_lowrank`, a randomized low-rank SVD -- the same algorithm
+  family as `sklearn`'s, just running its matmuls on the GPU. This machine
+  has one, and it matters: benchmarked on this script's actual matrix
+  sizes, it's ~200x faster than CPU for the neuron-side ~3,500x3,500
+  covariance (k=128: 2.9s CPU vs 0.014s GPU warm) and ~40-140x faster for a
+  single video segment's ~18,000x2,700 motion-energy matrix (k=200: 6.8s
+  CPU vs 0.05-0.18s GPU). This is also what MouseLand/critical_init's
+  `SVCA()` does (`torch.linalg.eigh(cov @ cov.T)` on a torch tensor) --
+  same hardware target, different algorithm: `eigh` on the explicit Gram
+  matrix vs. `svd_lowrank`'s randomized projections, which avoids ever
+  forming that O(n^2) matrix and so stays cheap even if `cov` weren't
+  already a modest size.
+- **CPU fallback**: `sklearn.utils.extmath.randomized_svd` when no CUDA
+  device is present -- the same randomized algorithm, just on the CPU.
+
+For the video, GPU-accelerating the SVD step still leaves video *decoding*
+(cv2/ffmpeg, CPU-bound, unrelated to the SVD) as the slower part overall --
+but the SVD no longer adds meaningfully to it. Decoding the whole video at
+once would need `n_frames x n_pixels` ~= 320,000 x 2,700 (~3.5 GB as
+float32) in memory simultaneously; `_compute_motion_energy_pcs` instead
+uses the paper's own two-stage segmented-SVD trick (Methods, "Behavioral
+video acquisition and processing") regardless of GPU availability, since
+it bounds *memory* (one segment at a time), not compute: split the video
+into `video_segment_duration`-second segments; SVD each segment on its own
+and keep only its top `n_seg_pcs` *spatial* components scaled by their
+singular values (the paper's U_i = M_i @ V_i); concatenate those
+per-segment spatial summaries and SVD that much smaller matrix to get a
+session-wide spatial basis; then make a second decoding pass, projecting
+each segment's frames onto that shared basis to get the final components'
+full-session time course. Peak memory is one segment, not the whole video,
+at the cost of decoding the video twice.
+
+Neuron-set splitting also follows MouseLand/critical_init's `SVCA()` more
+closely than our earlier single-axis version: a true 2D spatial
+checkerboard (both ML and AP coordinates, not just ML strips), which more
+robustly keeps any two spatially adjacent neurons (a possible out-of-focus
+-fluorescence confound) in different sets.
 """
 from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import cv2
+import torch
 import matplotlib.pyplot as plt
-from sklearn.decomposition import TruncatedSVD
 from sklearn.utils.extmath import randomized_svd
 
 from one.api import ONE
@@ -45,23 +90,59 @@ from stringer19_figure import _load_wheel_speed, _load_whisker_motion_energy  # 
 
 DEFAULT_OUT_DIR = Path(__file__).resolve().parent.parent / "stringer19"
 
+_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-def _split_neurons_spatial(ml_coord: np.ndarray, n_strips: int = 16) -> Tuple[np.ndarray, np.ndarray]:
-    """Interleaved-strip split (paper's method): avoids any neuron in set A
-    having its closest neighbor (same-ish position, different depth -- a
-    possible out-of-focus-fluorescence confound) in set B.
+
+def _truncated_svd(x: np.ndarray, k: int, seed: int = 0) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Top-k SVD (u, s, vt), GPU-accelerated via `torch.svd_lowrank` when a
+    CUDA device is available (measured ~40-200x faster than `sklearn`'s
+    CPU-only randomized SVD for this script's matrix sizes -- see module
+    docstring), falling back to `sklearn.utils.extmath.randomized_svd` on
+    CPU otherwise. Both are randomized low-rank algorithms with the same
+    asymptotic cost; this only changes which hardware does the matmuls.
+
+    Returns (u, s, vt) in `sklearn.utils.extmath.randomized_svd`'s
+    convention: `u` is (n_samples, k), `s` is (k,), `vt` is (k, n_features)
+    -- `vt` alone matches `TruncatedSVD.components_` for callers that only
+    need the feature-space (e.g. spatial) directions.
     """
-    edges = np.linspace(ml_coord.min(), ml_coord.max(), n_strips + 1)
-    strip_idx = np.clip(np.digitize(ml_coord, edges[1:-1]), 0, n_strips - 1)
-    is_a = (strip_idx % 2) == 0
+    k = min(k, min(x.shape) - 1)
+    if _DEVICE == "cuda":
+        xt = torch.from_numpy(np.ascontiguousarray(x, dtype=np.float32)).cuda()
+        torch.manual_seed(seed)
+        u, s, v = torch.svd_lowrank(xt, q=k, niter=4)
+        return u.cpu().numpy(), s.cpu().numpy(), v.T.cpu().numpy()
+    return randomized_svd(x, n_components=k, random_state=seed)
+
+
+def _split_neurons_checkerboard(xyz: np.ndarray, spacing_um: float = 60.0) -> Tuple[np.ndarray, np.ndarray]:
+    """2D spatial checkerboard split (ML x AP), as in the paper's "16
+    nonoverlapping strips" method and MouseLand/critical_init's `SVCA()`
+    (its `dx`/`dy` checkerboard-by-both-axes logic) -- more robust against
+    any single-axis spatial confound than a one-axis strip split.
+    """
+    dx = (xyz[:, 0] % (2 * spacing_um) < spacing_um).astype(int)
+    dy = (xyz[:, 1] % (2 * spacing_um) < spacing_um).astype(int)
+    is_a = (dx + dy) % 2 == 0
     return np.where(is_a)[0], np.where(~is_a)[0]
 
 
-def _train_test_blocks(times: np.ndarray, block_duration: float) -> Tuple[np.ndarray, np.ndarray]:
-    """Alternating contiguous time blocks -> (train_mask, test_mask)."""
+def _train_test_blocks(times: np.ndarray, block_duration: float, pad_duration: float = 0.0) -> Tuple[np.ndarray, np.ndarray]:
+    """Alternating contiguous time blocks -> (train_mask, test_mask), with
+    an optional gap dropped at each block boundary (a lightweight version
+    of MouseLand/critical_init's `split_traintest` padding, which excludes
+    a few timepoints around each chunk to limit train/test leakage from
+    slow autocorrelation).
+    """
     block_idx = ((times - times[0]) // block_duration).astype(int)
     train_mask = (block_idx % 2) == 0
-    return train_mask, ~train_mask
+    test_mask = ~train_mask
+    if pad_duration > 0:
+        t_in_block = (times - times[0]) % block_duration
+        near_edge = (t_in_block < pad_duration) | (t_in_block > block_duration - pad_duration)
+        train_mask &= ~near_edge
+        test_mask &= ~near_edge
+    return train_mask, test_mask
 
 
 def _resample_nearest(times_src: np.ndarray, values_src: np.ndarray, times_dst: np.ndarray) -> np.ndarray:
@@ -71,24 +152,21 @@ def _resample_nearest(times_src: np.ndarray, values_src: np.ndarray, times_dst: 
     return values_src[idx_final]
 
 
-def _compute_motion_energy_pcs(
-    video_path: Path,
-    cam_times: np.ndarray,
-    t0: float,
-    t1: float,
-    n_pcs: int = 16,
-    resize: Tuple[int, int] = (60, 45),
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Motion-energy PCs of the raw video within [t0, t1].
+def _video_segments(t0: float, t1: float, segment_duration: float) -> List[Tuple[float, float]]:
+    edges = np.arange(t0, t1, segment_duration)
+    edges = np.append(edges, t1)
+    return list(zip(edges[:-1], edges[1:]))
 
-    Reads frames sequentially (fast on a local file; avoids per-frame
-    seeking), downsizes and grayscales each, takes the absolute
-    frame-to-frame difference ("motion energy", as in Fig. 2B), then PCA's
-    the resulting movie. Returns (pcs, pc_times): `pcs` is
-    (n_frames - 1, n_pcs), `pc_times` are the later frame's camera
-    timestamp for each motion-energy sample.
+
+def _decode_motion_energy_segment(
+    video_path: Path, cam_times: np.ndarray, s0: float, s1: float, resize: Tuple[int, int]
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """Decode one segment's motion-energy frames sequentially (fast on a
+    local file; avoids per-frame seeking). Returns (frames, times) with
+    `frames` of shape (n_frames_in_segment - 1, prod(resize)), or
+    (None, None) if the segment had fewer than 2 frames.
     """
-    idx0, idx1 = np.searchsorted(cam_times, [t0, t1])
+    idx0, idx1 = np.searchsorted(cam_times, [s0, s1])
     cap = cv2.VideoCapture(str(video_path))
     cap.set(cv2.CAP_PROP_POS_FRAMES, idx0)
 
@@ -105,14 +183,74 @@ def _compute_motion_energy_pcs(
         prev = small
     cap.release()
 
-    if len(me_frames) < n_pcs + 1:
-        raise RuntimeError(f"Only decoded {len(me_frames)} video frames in [{t0}, {t1}] -- too few for PCA")
+    if len(me_frames) < 2:
+        return None, None
+    return np.stack(me_frames, axis=0), np.asarray(me_times)
 
-    X = np.stack(me_frames, axis=0)
-    X -= X.mean(axis=0, keepdims=True)
-    svd = TruncatedSVD(n_components=n_pcs, random_state=0)
-    pcs = svd.fit_transform(X)
-    return pcs, np.asarray(me_times)
+
+def _compute_motion_energy_pcs(
+    video_path: Path,
+    cam_times: np.ndarray,
+    t0: float,
+    t1: float,
+    n_pcs: int = 16,
+    n_seg_pcs: int = 200,
+    video_segment_duration: float = 300.0,
+    resize: Tuple[int, int] = (60, 45),
+    seed: int = 0,
+    verbose: bool = True,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Motion-energy PCs of the raw video across [t0, t1], via the paper's
+    two-stage segmented SVD (see module docstring): per-segment SVD (stage
+    1) bounds peak memory to one segment; a second SVD (stage 2) merges
+    segments' spatial summaries into one session-wide spatial basis; a
+    second decoding pass (stage 3) projects the full video onto it.
+
+    Returns (pcs, pc_times): `pcs` is (n_frames - n_segments, n_pcs) --
+    each segment loses one frame to differencing -- `pc_times` are the
+    corresponding later-frame camera timestamps, in time order.
+    """
+    segments = _video_segments(t0, t1, video_segment_duration)
+
+    # --- stage 1: per-segment spatial summaries (bounded memory) ---
+    spatial_chunks = []
+    for i, (s0, s1) in enumerate(segments):
+        me, _ = _decode_motion_energy_segment(video_path, cam_times, s0, s1, resize)
+        if me is None:
+            continue
+        me -= me.mean(axis=0, keepdims=True)
+        _, singular_values, components = _truncated_svd(me, n_seg_pcs, seed=seed)
+        # paper's U_i = M_i @ V_i: spatial components scaled by singular value
+        spatial_chunks.append(components.T * singular_values[None, :])
+        if verbose:
+            print(f"  [video SVD, {_DEVICE}] segment {i + 1}/{len(segments)} ({me.shape[0]} frames) -> {len(singular_values)} components")
+        del me
+
+    if not spatial_chunks:
+        raise RuntimeError(f"No usable video segments decoded in [{t0}, {t1}]")
+
+    merged = np.concatenate(spatial_chunks, axis=1)  # (n_pixels, n_seg_pcs * n_segments)
+    del spatial_chunks
+
+    # --- stage 2: merge into one session-wide spatial basis ---
+    _, _, spatial_basis = _truncated_svd(merged.T, n_pcs, seed=seed)  # (n_pcs, n_pixels)
+    del merged
+
+    # --- stage 3: second pass, project the full video onto the shared basis ---
+    pcs_chunks, time_chunks = [], []
+    for i, (s0, s1) in enumerate(segments):
+        me, me_t = _decode_motion_energy_segment(video_path, cam_times, s0, s1, resize)
+        if me is None:
+            continue
+        pcs_chunks.append(me @ spatial_basis.T)
+        time_chunks.append(me_t)
+        if verbose:
+            print(f"  [video proj] segment {i + 1}/{len(segments)} projected")
+        del me
+
+    pcs = np.concatenate(pcs_chunks, axis=0)
+    pc_times = np.concatenate(time_chunks, axis=0)
+    return pcs, pc_times
 
 
 def _regress_and_residualize(proj_train: np.ndarray, proj_test: np.ndarray, x_train: np.ndarray, x_test: np.ndarray) -> np.ndarray:
@@ -129,14 +267,17 @@ def compute_svca_prediction(
     one: Optional[ONE] = None,
     session: Optional[MesoscopeSession] = None,
     window: Optional[Tuple[float, float]] = None,
-    window_duration: float = 300.0,
     n_svcs: int = 128,
-    n_strips: int = 16,
-    block_duration: float = 20.0,
+    spacing_um: float = 60.0,
+    block_duration: float = 72.0,
+    pad_duration: float = 2.0,
     n_video_pcs: int = 16,
+    n_seg_pcs: int = 200,
+    video_segment_duration: float = 300.0,
     video_resize: Tuple[int, int] = (60, 45),
     camera: str = "left",
     seed: int = 0,
+    verbose: bool = True,
 ) -> dict:
     """Compute Fig. 2E's three curves for one session (no plotting).
 
@@ -146,33 +287,41 @@ def compute_svca_prediction(
     one : ONE, optional
     session : MesoscopeSession, optional
     window : (float, float), optional
-        Analysis window in session seconds. If omitted, `window_duration`
-        seconds starting a third of the way into the recording are used.
-    window_duration : float, default 300.0
-        Length of the auto-picked window. SVCA and the video-PC decoding
-        are both restricted to this window -- the full ~1h recording (and
-        its ~10^5-frame video) is impractical to decode/regress in a pilot
-        script; 300s keeps video decoding and the SVD steps to well under
-        a minute while still giving ~1,500 neural timepoints.
+        Analysis window in session seconds. Defaults to the *entire*
+        session -- see the module docstring for how the video-PCA step
+        stays tractable at full length. Pass a shorter window for a quick
+        test run.
     n_svcs : int, default 128
         Number of shared variance components (matches the paper's default).
         Capped automatically by the smaller neuron set / time-block sizes.
-    n_strips : int, default 16
-        Number of alternating spatial strips (by ML coordinate) used to
-        assign neurons to the two SVCA sets (matches the paper's method).
-    block_duration : float, default 20.0
-        Length of each alternating train/test time block, in seconds.
+    spacing_um : float, default 60.0
+        Checkerboard square size (microns) used to assign neurons to the
+        two SVCA sets -- matches the paper's "16 nonoverlapping strips of
+        width 60 um", generalized to 2D as in MouseLand/critical_init's
+        `SVCA()`.
+    block_duration : float, default 72.0
+        Length of each alternating train/test time block, in seconds --
+        matches the paper's stated value ("alternating periods of 72 s").
+    pad_duration : float, default 2.0
+        Seconds excluded from both sides of each block boundary, reducing
+        train/test leakage from slow autocorrelation (a lightweight version
+        of MouseLand/critical_init's `split_traintest` padding).
     n_video_pcs : int, default 16
-        Number of motion-energy PCs computed from the raw video (the paper
-        uses ~1000; 16 is a pragmatic choice for a single-session pilot
-        script -- see module docstring).
+        Number of final motion-energy PCs (the paper uses ~1000; 16 is a
+        pragmatic choice for a pilot script -- see module docstring).
+    n_seg_pcs : int, default 200
+        Per-segment component count in the video PCA's first SVD stage
+        (matches the paper's own choice of 200).
+    video_segment_duration : float, default 300.0
+        Length of each video-PCA segment, in seconds.
     video_resize : (int, int), default (60, 45)
         Frame size (width, height) the video is downsized to before
         computing motion energy and its PCA.
     camera : {'left', 'right'}, default 'left'
     seed : int, default 0
-        RNG seed (only used if `n_svcs` truncation ties need breaking; kept
-        for reproducibility / future extensions).
+        RNG seed for the SVD steps (reproducible by default).
+    verbose : bool, default True
+        Print progress through the video-PCA segments (the slowest step).
 
     Returns
     -------
@@ -184,27 +333,23 @@ def compute_svca_prediction(
     session = session if session is not None else load_mesoscope_session(eid, one=one)
 
     times = np.asarray(session.roi_times[0], dtype=float)
-    if window is not None:
-        t0, t1 = window
-    else:
-        t0 = times[0] + (times[-1] - times[0]) / 3
-        t1 = min(t0 + window_duration, times[-1])
+    t0, t1 = window if window is not None else (times[0], times[-1])
 
     idx0, idx1 = np.searchsorted(times, [t0, t1])
     times_w = times[idx0:idx1]
     signal_w = session.roi_signal[:, idx0:idx1].astype(np.float64)
 
-    idx_a, idx_b = _split_neurons_spatial(session.xyz[:, 0], n_strips=n_strips)
+    idx_a, idx_b = _split_neurons_checkerboard(session.xyz, spacing_um=spacing_um)
     F = signal_w[idx_a] - signal_w[idx_a].mean(axis=1, keepdims=True)
     G = signal_w[idx_b] - signal_w[idx_b].mean(axis=1, keepdims=True)
 
-    train_mask, test_mask = _train_test_blocks(times_w, block_duration)
+    train_mask, test_mask = _train_test_blocks(times_w, block_duration, pad_duration)
     F_train, F_test = F[:, train_mask], F[:, test_mask]
     G_train, G_test = G[:, train_mask], G[:, test_mask]
 
     k = min(n_svcs, len(idx_a), len(idx_b), train_mask.sum(), test_mask.sum())
     cov_train = F_train @ G_train.T / train_mask.sum()
-    u, _, vt = randomized_svd(cov_train, n_components=k, random_state=seed)
+    u, _, vt = _truncated_svd(cov_train, k, seed=seed)
 
     proj1_train, proj2_train = u.T @ F_train, vt @ G_train
     proj1_test, proj2_test = u.T @ F_test, vt @ G_test
@@ -226,11 +371,13 @@ def compute_svca_prediction(
     s_res_behav = np.mean(resid1_b * resid2_b, axis=1)
     behav_var_explained = (s_hat - s_res_behav) / s_tot
 
-    # --- video motion-energy PCs ---
+    # --- video motion-energy PCs (segmented SVD, full session) ---
     video_path = one.load_dataset(eid, f"_iblrig_{camera}Camera.raw.mp4", collection="raw_video_data", download_only=True)
     cam_times = one.load_dataset(eid, f"_ibl_{camera}Camera.times.npy")
     video_pcs, video_pc_times = _compute_motion_energy_pcs(
-        Path(video_path), cam_times, t0, t1, n_pcs=n_video_pcs, resize=video_resize
+        Path(video_path), cam_times, t0, t1,
+        n_pcs=n_video_pcs, n_seg_pcs=n_seg_pcs, video_segment_duration=video_segment_duration,
+        resize=video_resize, seed=seed, verbose=verbose,
     )
     video_pcs_w = _resample_nearest(video_pc_times, video_pcs, times_w)  # (T, n_video_pcs)
     x_video = video_pcs_w.T
@@ -287,7 +434,7 @@ def plot_svca_behavior_prediction(
     ax.spines["right"].set_visible(False)
     t0, t1 = result["window"]
     ax.set_title(
-        f"{eid}\nwindow [{t0:.0f}, {t1:.0f}] s  "
+        f"{eid}\nfull session [{t0:.0f}, {t1:.0f}] s  "
         f"({result['n_neurons_a']}+{result['n_neurons_b']} neurons)",
         fontsize=10,
     )
@@ -296,7 +443,7 @@ def plot_svca_behavior_prediction(
     if save:
         out_dir = Path(out_dir) if out_dir is not None else DEFAULT_OUT_DIR
         out_dir.mkdir(parents=True, exist_ok=True)
-        fpath = out_dir / f"{eid}_stringer19_fig2e.png"
+        fpath = out_dir / f"{eid}_stringer19_fig2e_full.png"
         fig.savefig(fpath, dpi=200, bbox_inches="tight")
         print("Saved:", fpath)
 
