@@ -152,6 +152,28 @@ def _resample_nearest(times_src: np.ndarray, values_src: np.ndarray, times_dst: 
     return values_src[idx_final]
 
 
+def _resample_previous(times_src: np.ndarray, values_src: np.ndarray, times_dst: np.ndarray) -> np.ndarray:
+    """Step-function ("forward-fill") resampling: value at `times_dst` is
+    whatever was last set at or before it in `times_src`. Appropriate for
+    piecewise-constant signals like the task block, unlike `_resample_nearest`
+    (which could look ahead into the next block if it's closer in time).
+    """
+    idx = np.clip(np.searchsorted(times_src, times_dst, side="right") - 1, 0, len(times_src) - 1)
+    return values_src[idx]
+
+
+def _load_block_signal(eid: str, one: ONE) -> Tuple[np.ndarray, np.ndarray]:
+    """Per-trial `probabilityLeft` (the task block), as a step signal: the
+    trial start times at which it changes, and its value from each one
+    onward.
+    """
+    trials = one.load_object(eid, "trials")
+    starts = np.asarray(trials["intervals"][:, 0], dtype=float)
+    p_left = np.asarray(trials["probabilityLeft"], dtype=float)
+    order = np.argsort(starts)
+    return starts[order], p_left[order]
+
+
 def _video_segments(t0: float, t1: float, segment_duration: float) -> List[Tuple[float, float]]:
     edges = np.arange(t0, t1, segment_duration)
     edges = np.append(edges, t1)
@@ -262,6 +284,27 @@ def _regress_and_residualize(proj_train: np.ndarray, proj_test: np.ndarray, x_tr
     return proj_test - pred_test
 
 
+def _predictor_var_explained(
+    x: np.ndarray,
+    proj1_train: np.ndarray, proj2_train: np.ndarray,
+    proj1_test: np.ndarray, proj2_test: np.ndarray,
+    train_mask: np.ndarray, test_mask: np.ndarray,
+    s_hat: np.ndarray, s_tot: np.ndarray,
+) -> np.ndarray:
+    """Fraction of total per-SVC variance (`s_tot`) explained by predictor
+    matrix `x` (n_predictors, T, aligned with `train_mask`/`test_mask`):
+    z-score using train-set statistics, regress each cell set's SVCs
+    against it independently (train), and use the test-set residuals'
+    cross-covariance to see how much of the reliable variance `s_hat`
+    survives after removing what `x` explains.
+    """
+    x = (x - x[:, train_mask].mean(axis=1, keepdims=True)) / x[:, train_mask].std(axis=1, keepdims=True)
+    resid1 = _regress_and_residualize(proj1_train, proj1_test, x[:, train_mask], x[:, test_mask])
+    resid2 = _regress_and_residualize(proj2_train, proj2_test, x[:, train_mask], x[:, test_mask])
+    s_res = np.mean(resid1 * resid2, axis=1)
+    return (s_hat - s_res) / s_tot
+
+
 def compute_svca_prediction(
     eid: str,
     one: Optional[ONE] = None,
@@ -278,6 +321,7 @@ def compute_svca_prediction(
     camera: str = "left",
     seed: int = 0,
     verbose: bool = True,
+    use_video_cache: bool = True,
 ) -> dict:
     """Compute Fig. 2E's three curves for one session (no plotting).
 
@@ -322,12 +366,19 @@ def compute_svca_prediction(
         RNG seed for the SVD steps (reproducible by default).
     verbose : bool, default True
         Print progress through the video-PCA segments (the slowest step).
+    use_video_cache : bool, default True
+        Cache the (expensive, ~20 min for a full session) video motion-
+        energy PCs to `<ONE.cache_dir>/meso/svca_video_pcs/`, keyed by eid
+        and the video-PCA parameters, and reuse them on a later call with
+        the same parameters -- e.g. when only adding a new non-video
+        predictor and not wanting to re-decode the video.
 
     Returns
     -------
-    dict with `reliable_frac`, `video_var_explained`, `behav_var_explained`
-    (each length `n_svcs`, sorted by SVC rank), plus `window`, `n_neurons_a`,
-    `n_neurons_b`, `n_train`, `n_test`, `n_video_frames`.
+    dict with `reliable_frac`, `video_var_explained`, `behav_var_explained`,
+    `block_var_explained` (each length `n_svcs`, sorted by SVC rank), plus
+    `window`, `n_neurons_a`, `n_neurons_b`, `n_train`, `n_test`,
+    `n_video_frames`.
     """
     one = one if one is not None else ONE()
     session = session if session is not None else load_mesoscope_session(eid, one=one)
@@ -358,40 +409,55 @@ def compute_svca_prediction(
     s_tot = 0.5 * (np.mean(proj1_test ** 2, axis=1) + np.mean(proj2_test ** 2, axis=1))
     reliable_frac = s_hat / s_tot
 
+    def _var_explained(x):
+        return _predictor_var_explained(x, proj1_train, proj2_train, proj1_test, proj2_test, train_mask, test_mask, s_hat, s_tot)
+
     # --- behavior (wheel speed + whisker ME) ---
     wheel_times, wheel_speed = _load_wheel_speed(eid, one)
     whisk_times, whisk_me = _load_whisker_motion_energy(eid, one, camera=camera)
     wheel_w = _resample_nearest(wheel_times, wheel_speed, times_w)
     whisk_w = _resample_nearest(whisk_times, whisk_me, times_w)
-    x_behav = np.stack([wheel_w, whisk_w], axis=0)
-    x_behav = (x_behav - x_behav[:, train_mask].mean(axis=1, keepdims=True)) / x_behav[:, train_mask].std(axis=1, keepdims=True)
+    behav_var_explained = _var_explained(np.stack([wheel_w, whisk_w], axis=0))
 
-    resid1_b = _regress_and_residualize(proj1_train, proj1_test, x_behav[:, train_mask], x_behav[:, test_mask])
-    resid2_b = _regress_and_residualize(proj2_train, proj2_test, x_behav[:, train_mask], x_behav[:, test_mask])
-    s_res_behav = np.mean(resid1_b * resid2_b, axis=1)
-    behav_var_explained = (s_hat - s_res_behav) / s_tot
+    # --- task block (probabilityLeft), forward-filled per trial ---
+    block_times, block_vals = _load_block_signal(eid, one)
+    block_w = _resample_previous(block_times, block_vals, times_w)
+    block_var_explained = _var_explained(block_w[None, :])
 
     # --- video motion-energy PCs (segmented SVD, full session) ---
     video_path = one.load_dataset(eid, f"_iblrig_{camera}Camera.raw.mp4", collection="raw_video_data", download_only=True)
     cam_times = one.load_dataset(eid, f"_ibl_{camera}Camera.times.npy")
-    video_pcs, video_pc_times = _compute_motion_energy_pcs(
-        Path(video_path), cam_times, t0, t1,
-        n_pcs=n_video_pcs, n_seg_pcs=n_seg_pcs, video_segment_duration=video_segment_duration,
-        resize=video_resize, seed=seed, verbose=verbose,
-    )
-    video_pcs_w = _resample_nearest(video_pc_times, video_pcs, times_w)  # (T, n_video_pcs)
-    x_video = video_pcs_w.T
-    x_video = (x_video - x_video[:, train_mask].mean(axis=1, keepdims=True)) / x_video[:, train_mask].std(axis=1, keepdims=True)
 
-    resid1_v = _regress_and_residualize(proj1_train, proj1_test, x_video[:, train_mask], x_video[:, test_mask])
-    resid2_v = _regress_and_residualize(proj2_train, proj2_test, x_video[:, train_mask], x_video[:, test_mask])
-    s_res_video = np.mean(resid1_v * resid2_v, axis=1)
-    video_var_explained = (s_hat - s_res_video) / s_tot
+    video_cache_file = None
+    if use_video_cache:
+        cache_dir = Path(one.cache_dir) / "meso" / "svca_video_pcs"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        video_cache_file = cache_dir / (
+            f"{eid}_{camera}_pcs{n_video_pcs}_seg{n_seg_pcs}_dur{int(video_segment_duration)}_"
+            f"resize{video_resize[0]}x{video_resize[1]}_t{t0:.0f}-{t1:.0f}.npz"
+        )
+    if video_cache_file is not None and video_cache_file.exists():
+        with np.load(video_cache_file) as z:
+            video_pcs, video_pc_times = z["pcs"], z["times"]
+        if verbose:
+            print(f"  [video] loaded cached PCs from {video_cache_file}")
+    else:
+        video_pcs, video_pc_times = _compute_motion_energy_pcs(
+            Path(video_path), cam_times, t0, t1,
+            n_pcs=n_video_pcs, n_seg_pcs=n_seg_pcs, video_segment_duration=video_segment_duration,
+            resize=video_resize, seed=seed, verbose=verbose,
+        )
+        if video_cache_file is not None:
+            np.savez(video_cache_file, pcs=video_pcs, times=video_pc_times)
+
+    video_pcs_w = _resample_nearest(video_pc_times, video_pcs, times_w)  # (T, n_video_pcs)
+    video_var_explained = _var_explained(video_pcs_w.T)
 
     return dict(
         reliable_frac=reliable_frac,
         video_var_explained=video_var_explained,
         behav_var_explained=behav_var_explained,
+        block_var_explained=block_var_explained,
         window=(t0, t1),
         n_neurons_a=len(idx_a),
         n_neurons_b=len(idx_b),
@@ -425,6 +491,7 @@ def plot_svca_behavior_prediction(
     ax.plot(rank, 100 * np.clip(result["reliable_frac"], 0, None), color="gray", lw=1.5, label="max explainable")
     ax.plot(rank, 100 * np.clip(result["video_var_explained"], 0, None), color="tab:blue", lw=1.5, label="left video PCs")
     ax.plot(rank, 100 * np.clip(result["behav_var_explained"], 0, None), color="tab:green", lw=1.5, label="wheel + whisker ME")
+    ax.plot(rank, 100 * np.clip(result["block_var_explained"], 0, None), color="tab:purple", lw=1.5, label="task block (p(left))")
     ax.set_xscale("log")
     ax.set_xlabel("SVC dimension")
     ax.set_ylabel("% variance explained")
