@@ -48,52 +48,39 @@ def _cross_block(sig: np.ndarray, rows: np.ndarray, cols: np.ndarray) -> np.ndar
     return c[:n, n:]
 
 
-def plot_correlation_consistency(
-    eid: str,
-    one: Optional[ONE] = None,
-    session: Optional[MesoscopeSession] = None,
+def compute_correlation_consistency(
+    session: MesoscopeSession,
     n_display: int = 10,
     n_scatter_neurons: int = 500,
     seed: int = 0,
-    save: bool = True,
-    out_dir: Optional[Path] = None,
-):
-    """Reproduce Stringer et al. 2019 Fig. S2 A-C for one mesoscope session.
+) -> dict:
+    """Data half of Fig. S2 A-C: no plotting, so this is cheap to call in bulk
+    (e.g. once per session when building a histogram of `r` across sessions).
 
     Parameters
     ----------
-    eid : str
-    one : ONE, optional
-    session : MesoscopeSession, optional
-        Pass an already-loaded session to avoid reloading.
+    session : MesoscopeSession
     n_display : int, default 10
         Neurons per side of the panel A/B cross-correlation block (10x10,
         matching the paper's "neurons 1-10" x "neurons 11-20").
     n_scatter_neurons : int, default 500
-        Size of the random neuron pool used for panel C's pairwise-correlation
-        scatter. The paper uses "all cell pairs"; with ~7,000 neurons that's
-        ~24M pairs, impractical to compute and plot, so this instead uses all
-        pairs (n_scatter_neurons choose 2) within a random subset -- 500
-        neurons gives ~124,750 pairs, a representative sample at a
-        reasonable compute/plot cost. The panel A/B neurons are the first
+        Size of the random neuron pool used for the pairwise-correlation
+        comparison. The paper uses "all cell pairs"; with ~7,000 neurons
+        that's ~24M pairs, impractical to compute and plot, so this instead
+        uses all pairs (n_scatter_neurons choose 2) within a random subset --
+        500 neurons gives ~124,750 pairs, a representative sample at a
+        reasonable compute cost. The panel A/B neurons are the first
         `2 * n_display` of this same pool.
     seed : int, default 0
         RNG seed for the neuron subsample (reproducible by default).
-    save : bool, default True
-        Save the figure as a PNG under `out_dir`.
-    out_dir : Path, optional
-        Defaults to `<repo_root>/stringer19/`.
 
     Returns
     -------
-    (fig, info) where info holds `r` (Pearson correlation between the two
-    halves' pairwise correlations), `block1`/`block2` (the 10x10 panel A/B
-    matrices), `pair_corr_half1`/`pair_corr_half2` (panel C's scatter data),
-    and the neuron indices used (`row_idx`, `col_idx`, `scatter_idx`).
+    dict with `r` (Pearson correlation between the two halves' pairwise
+    correlations), `block1`/`block2` (the 10x10 panel A/B matrices),
+    `pair_corr_half1`/`pair_corr_half2` (pairwise-correlation vectors), and
+    the neuron indices used (`row_idx`, `col_idx`, `scatter_idx`).
     """
-    one = one if one is not None else ONE()
-    session = session if session is not None else load_mesoscope_session(eid, one=one)
-
     n_neurons = session.roi_signal.shape[0]
     n_scatter_neurons = min(n_scatter_neurons, n_neurons)
     if n_scatter_neurons < 2 * n_display:
@@ -113,6 +100,57 @@ def plot_correlation_consistency(
     pair_c1 = _upper_triangle(c1_full)
     pair_c2 = _upper_triangle(c2_full)
     r = float(np.corrcoef(pair_c1, pair_c2)[0, 1])
+
+    return dict(
+        r=r,
+        block1=block1,
+        block2=block2,
+        pair_corr_half1=pair_c1,
+        pair_corr_half2=pair_c2,
+        row_idx=row_idx,
+        col_idx=col_idx,
+        scatter_idx=pool,
+    )
+
+
+def plot_correlation_consistency(
+    eid: str,
+    one: Optional[ONE] = None,
+    session: Optional[MesoscopeSession] = None,
+    n_display: int = 10,
+    n_scatter_neurons: int = 500,
+    seed: int = 0,
+    save: bool = True,
+    out_dir: Optional[Path] = None,
+):
+    """Reproduce Stringer et al. 2019 Fig. S2 A-C for one mesoscope session.
+
+    Parameters
+    ----------
+    eid : str
+    one : ONE, optional
+    session : MesoscopeSession, optional
+        Pass an already-loaded session to avoid reloading.
+    n_display, n_scatter_neurons, seed
+        See `compute_correlation_consistency`.
+    save : bool, default True
+        Save the figure as a PNG under `out_dir`.
+    out_dir : Path, optional
+        Defaults to `<repo_root>/stringer19/`.
+
+    Returns
+    -------
+    (fig, info) -- see `compute_correlation_consistency` for `info`'s keys.
+    """
+    one = one if one is not None else ONE()
+    session = session if session is not None else load_mesoscope_session(eid, one=one)
+
+    info = compute_correlation_consistency(
+        session, n_display=n_display, n_scatter_neurons=n_scatter_neurons, seed=seed
+    )
+    block1, block2 = info["block1"], info["block2"]
+    pair_c1, pair_c2, r = info["pair_corr_half1"], info["pair_corr_half2"], info["r"]
+    n_scatter_neurons = len(info["scatter_idx"])
 
     vmax = max(float(np.nanmax(np.abs(np.concatenate([block1.ravel(), block2.ravel()])))), 1e-6)
 
@@ -162,16 +200,6 @@ def plot_correlation_consistency(
         fig.savefig(fpath, dpi=200, bbox_inches="tight")
         print("Saved:", fpath)
 
-    info = dict(
-        r=r,
-        block1=block1,
-        block2=block2,
-        pair_corr_half1=pair_c1,
-        pair_corr_half2=pair_c2,
-        row_idx=row_idx,
-        col_idx=col_idx,
-        scatter_idx=pool,
-    )
     return fig, info
 
 
