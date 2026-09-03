@@ -174,6 +174,36 @@ def _load_block_signal(eid: str, one: ONE) -> Tuple[np.ndarray, np.ndarray]:
     return starts[order], p_left[order]
 
 
+def _load_choice_events(eid: str, one: ONE) -> Tuple[np.ndarray, np.ndarray]:
+    """Per-trial choice (+1/-1) at `firstMovement_times`, excluding no-go
+    (choice==0) and no-movement (NaN) trials. Sorted by time.
+    """
+    trials = one.load_object(eid, "trials")
+    move_times = np.asarray(trials["firstMovement_times"], dtype=float)
+    choice = np.asarray(trials["choice"], dtype=float)
+    valid = np.isfinite(move_times) & (choice != 0)
+    move_times, choice = move_times[valid], choice[valid]
+    order = np.argsort(move_times)
+    return move_times[order], choice[order]
+
+
+def _resample_boxcar_kernel(
+    event_times: np.ndarray, event_values: np.ndarray, times_dst: np.ndarray, kernel_duration: float
+) -> np.ndarray:
+    """Event-locked boxcar: `event_values[i]` from `event_times[i]` for
+    `kernel_duration` seconds, 0 elsewhere (0 outside any event's window,
+    including before the first event). Appropriate for sparse, brief
+    trial events (e.g. choice at movement onset) that a single-frame
+    impulse would be too sparse to regress against meaningfully at this
+    mesoscope's ~0.18s native frame period.
+    """
+    idx = np.clip(np.searchsorted(event_times, times_dst, side="right") - 1, 0, len(event_times) - 1)
+    within = (times_dst >= event_times[idx]) & (times_dst - event_times[idx] < kernel_duration)
+    if len(event_times) > 0:
+        within &= times_dst >= event_times[0]
+    return np.where(within, event_values[idx], 0.0)
+
+
 def _video_segments(t0: float, t1: float, segment_duration: float) -> List[Tuple[float, float]]:
     edges = np.arange(t0, t1, segment_duration)
     edges = np.append(edges, t1)
@@ -465,8 +495,8 @@ def compute_svca_prediction(
     Returns
     -------
     dict with `reliable_frac`, `video_var_explained`, `behav_var_explained`,
-    `block_var_explained` (each length `n_svcs`, sorted by SVC rank), plus
-    `window`, `n_neurons_a`, `n_neurons_b`, `n_train`, `n_test`,
+    `block_var_explained`, `choice_var_explained` (each length `n_svcs`,
+    sorted by SVC rank), plus `window`, `n_neurons_a`, `n_neurons_b`, `n_train`, `n_test`,
     `n_video_frames`.
     """
     one = one if one is not None else ONE()
@@ -513,6 +543,11 @@ def compute_svca_prediction(
     block_w = _resample_previous(block_times, block_vals, times_w)
     block_var_explained = _var_explained(block_w[None, :])
 
+    # --- choice (+1/-1), boxcar kernel 0-0.5s after firstMovement_times ---
+    choice_times, choice_vals = _load_choice_events(eid, one)
+    choice_w = _resample_boxcar_kernel(choice_times, choice_vals, times_w, kernel_duration=0.5)
+    choice_var_explained = _var_explained(choice_w[None, :])
+
     # --- video motion-energy PCs (segmented SVD, full session) ---
     video_path = one.load_dataset(eid, f"_iblrig_{camera}Camera.raw.mp4", collection="raw_video_data", download_only=True)
     cam_times = one.load_dataset(eid, f"_ibl_{camera}Camera.times.npy")
@@ -547,6 +582,7 @@ def compute_svca_prediction(
         video_var_explained=video_var_explained,
         behav_var_explained=behav_var_explained,
         block_var_explained=block_var_explained,
+        choice_var_explained=choice_var_explained,
         window=(t0, t1),
         n_neurons_a=len(idx_a),
         n_neurons_b=len(idx_b),
@@ -581,6 +617,7 @@ def plot_svca_behavior_prediction(
     ax.plot(rank, 100 * np.clip(result["video_var_explained"], 0, None), color="tab:blue", lw=1.5, label="left video PCs")
     ax.plot(rank, 100 * np.clip(result["behav_var_explained"], 0, None), color="tab:green", lw=1.5, label="wheel + whisker ME")
     ax.plot(rank, 100 * np.clip(result["block_var_explained"], 0, None), color="tab:purple", lw=1.5, label="task block (p(left))")
+    ax.plot(rank, 100 * np.clip(result["choice_var_explained"], 0, None), color="tab:red", lw=1.5, label="choice (0-0.5s post-move)")
     ax.set_xscale("log")
     ax.set_xlabel("SVC dimension")
     ax.set_ylabel("% variance explained")
