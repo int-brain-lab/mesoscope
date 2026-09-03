@@ -98,7 +98,7 @@ def plot_stringer_figure(
     one: Optional[ONE] = None,
     session: Optional[MesoscopeSession] = None,
     window: Optional[Tuple[float, float]] = None,
-    window_duration: float = 120.0,
+    window_duration: float = 60.0,
     camera: str = "left",
     rastermap_kwargs: Optional[dict] = None,
     save: bool = True,
@@ -117,7 +117,7 @@ def plot_stringer_figure(
         Display window in seconds (session time). If omitted, a
         `window_duration`-second window is picked starting a third of the
         way into the recording (avoids the sometimes-atypical session start).
-    window_duration : float, default 120.0
+    window_duration : float, default 60.0
         Length of the auto-picked display window, in seconds. Ignored if
         `window` is given. PC1 and the Rastermap ordering are always
         computed on the full session regardless of this window.
@@ -202,10 +202,14 @@ def plot_stringer_figure(
         Line2D([0], [0], color="red", lw=1.5, alpha=0.7, label="reward"),
     ]
     handles, labels = ax_beh.get_legend_handles_labels()
-    ax_beh.legend(handles=handles + event_handles, loc="upper right", ncol=3, fontsize=8, frameon=False)
+    ax_beh.legend(
+        handles=handles + event_handles,
+        loc="lower center", bbox_to_anchor=(0.5, 1.0),
+        ncol=len(handles) + len(event_handles), fontsize=8, frameon=False,
+    )
     ax_beh.set_ylabel("normalized")
     ax_beh.set_xlim(t0, t1)
-    ax_beh.set_title(f"{eid}\nwindow [{t0:.0f}, {t1:.0f}] s, {session.roi_signal.shape[0]} neurons")
+    fig.suptitle(f"{eid}  —  window [{t0:.0f}, {t1:.0f}] s, {session.roi_signal.shape[0]} neurons", y=0.99)
     ax_beh.tick_params(labelbottom=False)
 
     def _imshow(ax, sig, ylabel):
