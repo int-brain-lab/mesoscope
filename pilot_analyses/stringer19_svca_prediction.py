@@ -305,6 +305,95 @@ def _predictor_var_explained(
     return (s_hat - s_res) / s_tot
 
 
+def _rebin_signal(times: np.ndarray, signal: np.ndarray, bin_seconds: float) -> Tuple[np.ndarray, np.ndarray]:
+    """Average `signal` (n_neurons, T) into non-overlapping `bin_seconds`-wide
+    bins -- e.g. to match the paper's 1.2-1.3s bins (vs. this mesoscope's
+    native ~0.18s frame period), reducing per-timepoint independent noise
+    relative to genuinely shared signal.
+    """
+    edges = np.arange(times[0], times[-1] + bin_seconds, bin_seconds)
+    bin_idx = np.clip(np.searchsorted(edges, times, side="right") - 1, 0, len(edges) - 2)
+    n_bins = bin_idx.max() + 1
+    counts = np.bincount(bin_idx, minlength=n_bins)
+    sums = np.zeros((signal.shape[0], n_bins), dtype=signal.dtype)
+    np.add.at(sums.T, bin_idx, signal.T)
+    binned = sums / np.clip(counts, 1, None)
+    bin_times = (edges[:n_bins] + edges[1 : n_bins + 1]) / 2
+    keep = counts > 0
+    return bin_times[keep], binned[:, keep]
+
+
+def compute_reliable_variance(
+    session: MesoscopeSession,
+    window: Optional[Tuple[float, float]] = None,
+    n_svcs: int = 128,
+    spacing_um: float = 60.0,
+    block_duration: float = 72.0,
+    pad_duration: float = 2.0,
+    bin_seconds: Optional[float] = None,
+    seed: int = 0,
+) -> dict:
+    """Just the neuron-side SVCA: the "max explainable" (reliable variance)
+    curve, with none of the (slow) video/behavior regression. Useful on its
+    own for exploring what changes the *ceiling* itself -- e.g. area
+    composition, session epoch, or temporal binning -- without paying for a
+    video decode each time.
+
+    Parameters
+    ----------
+    session : MesoscopeSession
+    window : (float, float), optional
+        Restrict to this time range (session seconds); defaults to the
+        whole session.
+    bin_seconds : float, optional
+        If given, average the signal into non-overlapping bins of this
+        width before running SVCA (see `_rebin_signal`) -- e.g. 1.2 to
+        roughly match the paper's own bin size, which is coarser than this
+        mesoscope's native ~0.18s frame period.
+    n_svcs, spacing_um, block_duration, pad_duration, seed
+        See `compute_svca_prediction`.
+
+    Returns
+    -------
+    dict with `reliable_frac`, `window`, `n_neurons_a`, `n_neurons_b`,
+    `n_train`, `n_test`, `bin_seconds`.
+    """
+    times = np.asarray(session.roi_times[0], dtype=float)
+    t0, t1 = window if window is not None else (times[0], times[-1])
+    idx0, idx1 = np.searchsorted(times, [t0, t1])
+    times_w = times[idx0:idx1]
+    signal_w = session.roi_signal[:, idx0:idx1].astype(np.float64)
+
+    if bin_seconds is not None:
+        times_w, signal_w = _rebin_signal(times_w, signal_w, bin_seconds)
+
+    idx_a, idx_b = _split_neurons_checkerboard(session.xyz, spacing_um=spacing_um)
+    F = signal_w[idx_a] - signal_w[idx_a].mean(axis=1, keepdims=True)
+    G = signal_w[idx_b] - signal_w[idx_b].mean(axis=1, keepdims=True)
+
+    train_mask, test_mask = _train_test_blocks(times_w, block_duration, pad_duration)
+    F_train, F_test = F[:, train_mask], F[:, test_mask]
+    G_train, G_test = G[:, train_mask], G[:, test_mask]
+
+    k = min(n_svcs, len(idx_a), len(idx_b), train_mask.sum(), test_mask.sum())
+    cov_train = F_train @ G_train.T / train_mask.sum()
+    u, _, vt = _truncated_svd(cov_train, k, seed=seed)
+
+    proj1_test, proj2_test = u.T @ F_test, vt @ G_test
+    s_hat = np.mean(proj1_test * proj2_test, axis=1)
+    s_tot = 0.5 * (np.mean(proj1_test ** 2, axis=1) + np.mean(proj2_test ** 2, axis=1))
+
+    return dict(
+        reliable_frac=s_hat / s_tot,
+        window=(t0, t1),
+        n_neurons_a=len(idx_a),
+        n_neurons_b=len(idx_b),
+        n_train=int(train_mask.sum()),
+        n_test=int(test_mask.sum()),
+        bin_seconds=bin_seconds,
+    )
+
+
 def compute_svca_prediction(
     eid: str,
     one: Optional[ONE] = None,
