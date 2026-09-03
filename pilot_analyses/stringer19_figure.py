@@ -98,7 +98,7 @@ def plot_stringer_figure(
     one: Optional[ONE] = None,
     session: Optional[MesoscopeSession] = None,
     window: Optional[Tuple[float, float]] = None,
-    window_duration: float = 60.0,
+    window_duration: float = 30.0,
     camera: str = "left",
     rastermap_kwargs: Optional[dict] = None,
     save: bool = True,
@@ -117,7 +117,7 @@ def plot_stringer_figure(
         Display window in seconds (session time). If omitted, a
         `window_duration`-second window is picked starting a third of the
         way into the recording (avoids the sometimes-atypical session start).
-    window_duration : float, default 60.0
+    window_duration : float, default 30.0
         Length of the auto-picked display window, in seconds. Ignored if
         `window` is given. PC1 and the Rastermap ordering are always
         computed on the full session regardless of this window.
@@ -194,12 +194,12 @@ def plot_stringer_figure(
     for t_ in motion_win:
         ax_beh.axvline(t_, color="black", lw=0.6, alpha=0.5, zorder=0)
     for t_ in reward_win:
-        ax_beh.axvline(t_, color="red", lw=0.6, alpha=0.5, zorder=0)
+        ax_beh.axvline(t_, color="darkred", lw=0.6, alpha=0.5, zorder=0)
 
     event_handles = [
         Line2D([0], [0], color="tab:blue", lw=1.5, alpha=0.7, label="stim on"),
         Line2D([0], [0], color="black", lw=1.5, alpha=0.7, label="motion on"),
-        Line2D([0], [0], color="red", lw=1.5, alpha=0.7, label="reward"),
+        Line2D([0], [0], color="darkred", lw=1.5, alpha=0.7, label="reward"),
     ]
     handles, labels = ax_beh.get_legend_handles_labels()
     ax_beh.legend(
@@ -228,6 +228,10 @@ def plot_stringer_figure(
     ax_pc.tick_params(labelbottom=False)
     _imshow(ax_rm, sig_rm, "neurons\n(sorted by Rastermap)")
     ax_rm.set_xlabel("time (s)")
+
+    for ax in (ax_beh, ax_pc, ax_rm):
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
 
     if save:
         out_dir = Path(out_dir) if out_dir is not None else DEFAULT_OUT_DIR
