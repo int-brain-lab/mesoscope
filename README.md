@@ -34,6 +34,8 @@ one.search()  # should return without auth errors
 
 ## Repo layout
 
+- `meso_loader.py` — clean, dependency-light loader for basic per-session ROI data (signal, per-ROI time, region, location); **start here**
+- `sanity_checks.py` — smoke test for a loaded session: does population activity rise after movement onset
 - `meso.py` — load or embed a mesoscope session into a cached dict (Rastermap ordering, ROI signals/metadata)
 - `meso_chronic.py` — mirror `mpciROIs.clusterUIDs.csv` (ROICaT) and align tracked neurons across days
 - `meso_decode.py` — trial-window feature extraction, neuron-dropping curves (NDCs), and cross-session decoding
@@ -56,6 +58,53 @@ By default files are cached under:
 ```
 
 `<prefix>` is derived from the EID list (date-sorted), `<target> ∈ {choice, feedback, stimulus, block}`.
+
+---
+
+## Basic session loading (clean loader, start here)
+
+For most analyses you just need per-ROI signal, per-ROI corrected time, brain region, and 3D location for a session — without pulling in matplotlib/rastermap. Use `meso_loader.py`:
+
+```python
+from meso_loader import load_mesoscope_session
+
+sess = load_mesoscope_session(eid)   # creates a default ONE() if none is given
+
+sess.roi_signal      # (n_rois, n_timepoints) float32
+sess.roi_times        # (n_rois, n_timepoints) float32, per-ROI time-corrected
+sess.region_labels     # (n_rois,) Allen acronyms
+sess.region_ids         # (n_rois,) Allen CCF structure ids
+sess.xyz                 # (n_rois, 3) mm, MLAPDV estimate
+sess.fov                  # (n_rois,) originating FOV, e.g. 'FOV_00'
+sess.signal_type           # 'deconvolved' or 'fluorescence'
+```
+
+Every FOV in the session is loaded and stacked into these flat, ROI-indexed arrays. Results are cached to `<ONE.cache_dir>/meso/basic_data/<eid>_filter_<filter_neurons>.npz`; pass `rerun=True` to force a fresh load, or `use_cache=False` to skip caching entirely.
+
+### Default loading decisions
+
+These are the defaults `load_mesoscope_session` makes for you, and why:
+
+- **Neuron-only ROIs by default** (`filter_neurons=True`). Non-neuronal / artifact ROIs (`mpciROITypes == 0`) are dropped before anything is stacked, so `roi_signal.shape[0]` is directly usable as a neuron count. Pass `filter_neurons=False` to keep every segmented ROI.
+- **Deconvolved signal preferred over raw fluorescence.** If `mpci.ROIActivityDeconvolved` exists it's used; otherwise the loader falls back to `mpci.ROIActivityF` and records which one it used in `sess.signal_type`. Deconvolved traces are closer to spiking activity and are what this repo's decoding/embedding code expects.
+- **Histology-registered brain regions preferred over the pipeline estimate.** `mpciROIs.brainLocationIds_ccf_2017` (final, histology-based) is used when present; the loader falls back to `mpciROIs.brainLocationIds_ccf_2017_estimate` (available before histology is done) otherwise.
+- **Per-ROI corrected timestamps, not one shared clock.** Mesoscope FOVs are scanned with a small, ROI-dependent sub-frame time offset (`mpciStack.timeshift`); `roi_times` bakes this in per-ROI rather than giving every ROI the same frame-time vector. If you need a single shared time axis for speed (e.g. windowed aggregation), `roi_times[0]` is a good approximation — the offsets are sub-frame and negligible over typical event windows (same approximation used in `meso.compute_sparseness`; see `sanity_checks.py` for a check that this holds up in practice).
+- **All FOVs are loaded and stacked, session-wide** — there's no partial-FOV mode. If you only need one FOV, load it directly with `one.load_object(eid, ..., collection='alf/FOV_XX')`.
+- **A signal-type mismatch across FOVs raises**, rather than silently mixing deconvolved and raw-fluorescence traces in one array — that's a strong signal the session's suite2p/deconvolution run is inconsistent and worth checking before use.
+- **Caching is on by default and keyed by `(eid, filter_neurons)`.** The cache directory (`meso/basic_data/`, plain `.npz`) is deliberately separate from the Rastermap-based cache in `meso.py` (`meso/data/`, pickled `.npy`) — the two loaders store different schemas and shouldn't be mixed up.
+
+### Sanity-checking a loaded session
+
+`sanity_checks.py` runs a quick physiological smoke test: population activity should rise shortly after movement onset. It samples random trials, compares mean population activity just before vs. just after each trial's `firstMovement_times`, and reports the fraction of trials that increased plus a paired Wilcoxon signed-rank test.
+
+```python
+from sanity_checks import check_motion_onset_response
+
+result = check_motion_onset_response(eid, n_trials=20)
+# [motion-onset check] <eid>: 20 trials, 90% increased, mean diff=3.57, wilcoxon p=1.9e-05 -> PASS
+```
+
+This isn't a scientific claim about any specific brain region — it's a fast way to catch a broken time alignment or a bad signal fallback after touching the loader.
 
 ---
 
