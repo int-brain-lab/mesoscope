@@ -361,6 +361,7 @@ def compute_reliable_variance(
     block_duration: float = 72.0,
     pad_duration: float = 2.0,
     bin_seconds: Optional[float] = None,
+    neuron_subset: Optional[np.ndarray] = None,
     seed: int = 0,
 ) -> dict:
     """Just the neuron-side SVCA: the "max explainable" (reliable variance)
@@ -380,6 +381,11 @@ def compute_reliable_variance(
         width before running SVCA (see `_rebin_signal`) -- e.g. 1.2 to
         roughly match the paper's own bin size, which is coarser than this
         mesoscope's native ~0.18s frame period.
+    neuron_subset : array of int, optional
+        Restrict to these neuron indices (into `session`'s full neuron
+        list) before the checkerboard split -- e.g. a single brain region's
+        neurons (see `select_region_neurons`), optionally pre-subsampled to
+        a matched count across sessions/regions.
     n_svcs, spacing_um, block_duration, pad_duration, seed
         See `compute_svca_prediction`.
 
@@ -393,11 +399,16 @@ def compute_reliable_variance(
     idx0, idx1 = np.searchsorted(times, [t0, t1])
     times_w = times[idx0:idx1]
     signal_w = session.roi_signal[:, idx0:idx1].astype(np.float64)
+    xyz = session.xyz
+
+    if neuron_subset is not None:
+        signal_w = signal_w[neuron_subset]
+        xyz = xyz[neuron_subset]
 
     if bin_seconds is not None:
         times_w, signal_w = _rebin_signal(times_w, signal_w, bin_seconds)
 
-    idx_a, idx_b = _split_neurons_checkerboard(session.xyz, spacing_um=spacing_um)
+    idx_a, idx_b = _split_neurons_checkerboard(xyz, spacing_um=spacing_um)
     F = signal_w[idx_a] - signal_w[idx_a].mean(axis=1, keepdims=True)
     G = signal_w[idx_b] - signal_w[idx_b].mean(axis=1, keepdims=True)
 
@@ -434,6 +445,7 @@ def compute_svca_prediction(
     block_duration: float = 72.0,
     pad_duration: float = 2.0,
     bin_seconds: Optional[float] = 1.25,
+    neuron_subset: Optional[np.ndarray] = None,
     n_video_pcs: int = 16,
     n_seg_pcs: int = 200,
     video_segment_duration: float = 300.0,
@@ -503,6 +515,13 @@ def compute_svca_prediction(
         and the video-PCA parameters, and reuse them on a later call with
         the same parameters -- e.g. when only adding a new non-video
         predictor and not wanting to re-decode the video.
+    neuron_subset : array of int, optional
+        Restrict to these neuron indices (into `session`'s full neuron
+        list) before the checkerboard split -- e.g. one brain region's
+        neurons (see `select_region_neurons`). The video cache key doesn't
+        depend on this, since the video PCs themselves don't depend on
+        which neurons are analyzed -- restricting to a region and reusing
+        an already-cached session's video is exactly the point.
 
     Returns
     -------
@@ -520,11 +539,16 @@ def compute_svca_prediction(
     idx0, idx1 = np.searchsorted(times, [t0, t1])
     times_w = times[idx0:idx1]
     signal_w = session.roi_signal[:, idx0:idx1].astype(np.float64)
+    xyz = session.xyz
+
+    if neuron_subset is not None:
+        signal_w = signal_w[neuron_subset]
+        xyz = xyz[neuron_subset]
 
     if bin_seconds is not None:
         times_w, signal_w = _rebin_signal(times_w, signal_w, bin_seconds)
 
-    idx_a, idx_b = _split_neurons_checkerboard(session.xyz, spacing_um=spacing_um)
+    idx_a, idx_b = _split_neurons_checkerboard(xyz, spacing_um=spacing_um)
     F = signal_w[idx_a] - signal_w[idx_a].mean(axis=1, keepdims=True)
     G = signal_w[idx_b] - signal_w[idx_b].mean(axis=1, keepdims=True)
 
@@ -546,12 +570,21 @@ def compute_svca_prediction(
     def _var_explained(x):
         return _predictor_var_explained(x, proj1_train, proj2_train, proj1_test, proj2_test, train_mask, test_mask, s_hat, s_tot)
 
-    # --- behavior (wheel speed + whisker ME) ---
+    # --- behavior (wheel speed + whisker ME, falling back to wheel-only if
+    # this session never had motion energy computed for either camera) ---
     wheel_times, wheel_speed = _load_wheel_speed(eid, one)
-    whisk_times, whisk_me = _load_whisker_motion_energy(eid, one, camera=camera)
     wheel_w = _resample_nearest(wheel_times, wheel_speed, times_w)
-    whisk_w = _resample_nearest(whisk_times, whisk_me, times_w)
-    behav_var_explained = _var_explained(np.stack([wheel_w, whisk_w], axis=0))
+    try:
+        whisk_times, whisk_me = _load_whisker_motion_energy(eid, one, camera=camera)
+        whisk_w = _resample_nearest(whisk_times, whisk_me, times_w)
+        behav_predictors_used = "wheel+whisker"
+        x_behav = np.stack([wheel_w, whisk_w], axis=0)
+    except Exception as e:
+        if verbose:
+            print(f"  [behavior] no whisker motion energy for {eid} ({type(e).__name__}); falling back to wheel-only")
+        behav_predictors_used = "wheel-only"
+        x_behav = wheel_w[None, :]
+    behav_var_explained = _var_explained(x_behav)
 
     # --- task block (probabilityLeft), forward-filled per trial ---
     block_times, block_vals = _load_block_signal(eid, one)
@@ -596,6 +629,7 @@ def compute_svca_prediction(
         reliable_frac=reliable_frac,
         video_var_explained=video_var_explained,
         behav_var_explained=behav_var_explained,
+        behav_predictors_used=behav_predictors_used,
         block_var_explained=block_var_explained,
         choice_var_explained=choice_var_explained,
         window=(t0, t1),
@@ -630,7 +664,8 @@ def plot_svca_behavior_prediction(
     fig, ax = plt.subplots(figsize=(5, 4.5))
     ax.plot(rank, 100 * np.clip(result["reliable_frac"], 0, None), color="gray", lw=1.5, label="max explainable")
     ax.plot(rank, 100 * np.clip(result["video_var_explained"], 0, None), color="tab:blue", lw=1.5, label="left video PCs")
-    ax.plot(rank, 100 * np.clip(result["behav_var_explained"], 0, None), color="tab:green", lw=1.5, label="wheel + whisker ME")
+    behav_label = "wheel + whisker ME" if result.get("behav_predictors_used") == "wheel+whisker" else "wheel (no whisker ME)"
+    ax.plot(rank, 100 * np.clip(result["behav_var_explained"], 0, None), color="tab:green", lw=1.5, label=behav_label)
     ax.plot(rank, 100 * np.clip(result["block_var_explained"], 0, None), color="tab:purple", lw=1.5, label="task block (p(left))")
     ax.plot(rank, 100 * np.clip(result["choice_var_explained"], 0, None), color="tab:red", lw=1.5, label="choice (0-0.5s post-move)")
     ax.set_xscale("log")
