@@ -99,6 +99,24 @@ def _load_fov(eid: str, fov: str, one: ONE, atlas: AllenAtlas) -> dict:
     # sub-frame offset per ROI (line/plane-dependent). This matches the
     # timeshift-indexing convention already used in meso.py.
     frame_times = _load("mpci.times.npy")
+    n_timepoints = roi_signal.shape[1]
+    if len(frame_times) != n_timepoints:
+        # Some sessions record mpci.times.npy per raw scan frame rather than
+        # per (already volume-averaged) signal sample -- e.g. multi-plane
+        # acquisitions where times has exactly n_planes as many entries as
+        # the signal. Confirmed on a real session: 27170 times vs 13585
+        # signal samples, ratio exactly 2. Detect an exact integer ratio and
+        # subsample accordingly (matches an equivalent fix in this pipeline's
+        # MATLAB loader, IBL_loadMesoData.m); anything else is a genuine,
+        # unrecoverable inconsistency.
+        ratio = len(frame_times) / n_timepoints
+        if ratio.is_integer() and ratio > 1:
+            frame_times = frame_times[:: int(ratio)]
+        else:
+            raise ValueError(
+                f"{fov} for {eid}: mpci.times.npy has {len(frame_times)} entries but the "
+                f"signal has {n_timepoints} timepoints (ratio {ratio:.3f}, not a clean multiple)"
+            )
     roi_stack_pos = _load("mpciROIs.stackPos.npy")
     timeshift = _load("mpciStack.timeshift.npy")
     roi_offsets = timeshift[roi_stack_pos[:, len(timeshift.shape)]]
