@@ -62,6 +62,7 @@ def collect_r_across_sessions(
     seed: int = 0,
     n_scatter_neurons: int = 500,
     corr_seed: int = 0,
+    bin_seconds: Optional[float] = None,
     canonical_sessions_path: Path = CANONICAL_SESSIONS_PATH,
     verbose: bool = True,
 ) -> dict:
@@ -76,7 +77,7 @@ def collect_r_across_sessions(
     seed : int, default 0
         RNG seed for shuffling the canonical session list (reproducible by
         default -- pass a different value for a different random draw).
-    n_scatter_neurons, corr_seed
+    n_scatter_neurons, corr_seed, bin_seconds
         Passed to `compute_correlation_consistency` for each session.
     canonical_sessions_path : Path
         Defaults to `canonical_sessions.txt` at the repo root.
@@ -116,7 +117,7 @@ def collect_r_across_sessions(
 
             session = load_mesoscope_session(eid, one=one)
             info = compute_correlation_consistency(
-                session, n_scatter_neurons=n_scatter_neurons, seed=corr_seed
+                session, n_scatter_neurons=n_scatter_neurons, seed=corr_seed, bin_seconds=bin_seconds
             )
             r_values.append(info["r"])
             durations.append(float(session.roi_times[0][-1] - session.roi_times[0][0]))
@@ -150,6 +151,7 @@ def plot_r_histogram(
     seed: int = 0,
     n_scatter_neurons: int = 500,
     corr_seed: int = 0,
+    bin_seconds: Optional[float] = None,
     save: bool = True,
     out_dir: Optional[Path] = None,
 ) -> Tuple[plt.Figure, dict]:
@@ -164,7 +166,7 @@ def plot_r_histogram(
     one = one if one is not None else ONE()
     result = collect_r_across_sessions(
         n_sessions=n_sessions, one=one, seed=seed,
-        n_scatter_neurons=n_scatter_neurons, corr_seed=corr_seed,
+        n_scatter_neurons=n_scatter_neurons, corr_seed=corr_seed, bin_seconds=bin_seconds,
     )
     r_values = result["r_values"]
 
@@ -195,6 +197,7 @@ def plot_r_vs_duration(
     seed: int = 0,
     n_scatter_neurons: int = 500,
     corr_seed: int = 0,
+    bin_seconds: Optional[float] = None,
     result: Optional[dict] = None,
     save: bool = True,
     out_dir: Optional[Path] = None,
@@ -226,7 +229,7 @@ def plot_r_vs_duration(
     one = one if one is not None else ONE()
     result = result if result is not None else collect_r_across_sessions(
         n_sessions=n_sessions, one=one, seed=seed,
-        n_scatter_neurons=n_scatter_neurons, corr_seed=corr_seed,
+        n_scatter_neurons=n_scatter_neurons, corr_seed=corr_seed, bin_seconds=bin_seconds,
     )
     r_values, durations = result["r_values"], result["durations"]
     corr = float(np.corrcoef(r_values, durations)[0, 1])

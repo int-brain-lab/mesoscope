@@ -433,6 +433,7 @@ def compute_svca_prediction(
     spacing_um: float = 60.0,
     block_duration: float = 72.0,
     pad_duration: float = 2.0,
+    bin_seconds: Optional[float] = 1.25,
     n_video_pcs: int = 16,
     n_seg_pcs: int = 200,
     video_segment_duration: float = 300.0,
@@ -454,6 +455,17 @@ def compute_svca_prediction(
         session -- see the module docstring for how the video-PCA step
         stays tractable at full length. Pass a shorter window for a quick
         test run.
+    bin_seconds : float, optional, default 1.25
+        Average the neural signal into non-overlapping bins of this width
+        before anything else (checkerboard split, train/test blocks, SVD) --
+        matches the paper's own ~1.2-1.3s bins, coarser than this
+        mesoscope's native ~0.18s frame period. Raises the reliable-
+        variance ceiling substantially (see
+        `stringer19_reliable_variance_explore.py`: 61%->81% at SVC1 on the
+        example session) by averaging down independent per-timepoint noise.
+        All behavioral/task predictors are resampled onto the *binned*
+        time grid, so this affects them too. Pass `None` for the native
+        frame rate (the old default).
     n_svcs : int, default 128
         Number of shared variance components (matches the paper's default).
         Capped automatically by the smaller neuron set / time-block sizes.
@@ -508,6 +520,9 @@ def compute_svca_prediction(
     idx0, idx1 = np.searchsorted(times, [t0, t1])
     times_w = times[idx0:idx1]
     signal_w = session.roi_signal[:, idx0:idx1].astype(np.float64)
+
+    if bin_seconds is not None:
+        times_w, signal_w = _rebin_signal(times_w, signal_w, bin_seconds)
 
     idx_a, idx_b = _split_neurons_checkerboard(session.xyz, spacing_um=spacing_um)
     F = signal_w[idx_a] - signal_w[idx_a].mean(axis=1, keepdims=True)

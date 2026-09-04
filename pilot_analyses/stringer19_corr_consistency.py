@@ -31,6 +31,7 @@ from one.api import ONE
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from meso_loader import load_mesoscope_session, MesoscopeSession  # noqa: E402
+from stringer19_svca_prediction import _rebin_signal  # noqa: E402
 
 DEFAULT_OUT_DIR = Path(__file__).resolve().parent.parent / "stringer19"
 
@@ -58,6 +59,7 @@ def compute_correlation_consistency(
     n_display: int = 10,
     n_scatter_neurons: int = 500,
     seed: int = 0,
+    bin_seconds: Optional[float] = None,
 ) -> dict:
     """Data half of Fig. S2 A-C: no plotting, so this is cheap to call in bulk
     (e.g. once per session when building a histogram of `r` across sessions).
@@ -78,6 +80,15 @@ def compute_correlation_consistency(
         `2 * n_display` of this same pool.
     seed : int, default 0
         RNG seed for the neuron subsample (reproducible by default).
+    bin_seconds : float, optional
+        If given, average the signal into non-overlapping bins of this
+        width before splitting into halves (see
+        `stringer19_svca_prediction._rebin_signal`) -- e.g. 1.2-1.3s to
+        match the paper's own bin size, coarser than this mesoscope's
+        native ~0.18s frame period. Coarser bins average down independent
+        per-timepoint noise, which raises the half1-vs-half2 correlation
+        `r` for the same reason it raises SVCA's reliable variance (see
+        `stringer19_reliable_variance_explore.py`).
 
     Returns
     -------
@@ -95,7 +106,11 @@ def compute_correlation_consistency(
     pool = rng.choice(n_neurons, size=n_scatter_neurons, replace=False)
     row_idx, col_idx = pool[:n_display], pool[n_display : 2 * n_display]
 
-    sig_half1, sig_half2 = _half_split(session.roi_signal)
+    signal = session.roi_signal
+    if bin_seconds is not None:
+        _, signal = _rebin_signal(np.asarray(session.roi_times[0], dtype=float), signal, bin_seconds)
+
+    sig_half1, sig_half2 = _half_split(signal)
 
     block1 = _cross_block(sig_half1, row_idx, col_idx)
     block2 = _cross_block(sig_half2, row_idx, col_idx)
@@ -125,6 +140,7 @@ def plot_correlation_consistency(
     n_display: int = 10,
     n_scatter_neurons: int = 500,
     seed: int = 0,
+    bin_seconds: Optional[float] = None,
     include_histogram: bool = True,
     n_hist_sessions: int = 10,
     hist_seed: int = 0,
@@ -140,8 +156,9 @@ def plot_correlation_consistency(
     one : ONE, optional
     session : MesoscopeSession, optional
         Pass an already-loaded session to avoid reloading.
-    n_display, n_scatter_neurons, seed
-        See `compute_correlation_consistency`.
+    n_display, n_scatter_neurons, seed, bin_seconds
+        See `compute_correlation_consistency`. `bin_seconds` also applies
+        to the panel D histogram sessions when `include_histogram`.
     include_histogram : bool, default True
         Add panel D: a histogram of `r` across `n_hist_sessions` other
         random canonical sessions (via `stringer19_corr_consistency_hist
@@ -165,7 +182,7 @@ def plot_correlation_consistency(
     session = session if session is not None else load_mesoscope_session(eid, one=one)
 
     info = compute_correlation_consistency(
-        session, n_display=n_display, n_scatter_neurons=n_scatter_neurons, seed=seed
+        session, n_display=n_display, n_scatter_neurons=n_scatter_neurons, seed=seed, bin_seconds=bin_seconds
     )
     block1, block2 = info["block1"], info["block2"]
     pair_c1, pair_c2, r = info["pair_corr_half1"], info["pair_corr_half2"], info["r"]
@@ -174,7 +191,10 @@ def plot_correlation_consistency(
     if include_histogram:
         from stringer19_corr_consistency_hist import collect_r_across_sessions  # noqa: E402 (avoids circular import)
 
-        hist_kwargs = dict(n_sessions=n_hist_sessions, one=one, seed=hist_seed, n_scatter_neurons=n_scatter_neurons, corr_seed=seed)
+        hist_kwargs = dict(
+            n_sessions=n_hist_sessions, one=one, seed=hist_seed, n_scatter_neurons=n_scatter_neurons,
+            corr_seed=seed, bin_seconds=bin_seconds,
+        )
         if canonical_sessions_path is not None:
             hist_kwargs["canonical_sessions_path"] = canonical_sessions_path
         hist_result = collect_r_across_sessions(**hist_kwargs)
