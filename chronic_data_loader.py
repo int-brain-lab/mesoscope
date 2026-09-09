@@ -13,6 +13,7 @@ import pynapple as nap
 from one.api import ONE
 
 from iblatlas.atlas import AllenAtlas
+from uuid import UUID
 
 BASE_FOLDER = Path("/mnt/s0/Data/Subjects")
 
@@ -78,9 +79,13 @@ def get_chronic_fov_mapping(
         # because at least here scanimage fov == suite2p fov
         suite2p_files = roicat_rundata["data"]["paths_stat"]
         for i, file_ in enumerate(suite2p_files):
-            file_ = file_.replace("\\", "/")  # WARNING this is sensitive to where roicat was
+            file_ = file_.replace(
+                "\\", "/"
+            )  # WARNING this is sensitive to where roicat was
             pattern = r"Subjects/([^/]+)/(\d{4}-\d{2}-\d{2})/(\d{3})/alf/(FOV_\d{2})"
-            subject_extracted, date, number, fov = re.search(pattern, str(file_)).groups()
+            subject_extracted, date, number, fov = re.search(
+                pattern, str(file_)
+            ).groups()
             assert subject == subject_extracted
             eid = one.path2eid(f"{subject}/{date}/{number}")
             chronic_fov_map.append(
@@ -101,12 +106,15 @@ def get_chronic_fov_mapping(
 
 
 def load_imaging_FOV(
-    eid: str,
+    eid: str | UUID,
     fov: str,  # scanimage fov
     dataset: str = "mpci.ROIActivityDeconvolved.npy",
+    mlapdv_file: str = "mpciROIs.mlapdv.npy",
     processing_fn: Optional[callable] = None,
     # sort: bool = False,
     one: Optional[ONE] = None,
+    location: str = "server",
+    metadata_only: bool = False,
 ) -> nap.TsdFrame:
     """loads data from a single field of view (scanimage / suite2p) into a pynapple
     TsdFrame. Metadata from suite2p and roicat is stored as a dataframe in
@@ -128,20 +136,32 @@ def load_imaging_FOV(
 
     # establish mapping between scanimage and roicat FOVs
     FOV_map = get_chronic_fov_mapping(subject, load=True, one=one)
-    row = FOV_map.groupby(["eid", "scanimage_fov"]).get_group((eid, fov))
+    row = FOV_map.groupby(["eid", "scanimage_fov"]).get_group((str(eid), fov))
     assert row.shape[0] == 1
     roicat_fov = row["roicat_fov"].values[0]
     session_index = row["session_index"].values[0]
 
     # get the corresponding roicat results file and read it
-    roicat_results_file = next(chronic_folder.glob(f"*{roicat_fov}.ROICaT.tracking.results.pkl"))
+    if location == "server":
+        roicat_results_file = next(
+            chronic_folder.glob(f"*{roicat_fov}.ROICaT.tracking.results.pkl")
+        )
+    else:
+        roicat_results_file = one.load_dataset(
+            eid, f"*{roicat_fov}.ROICaT.tracking.results.pkl", download_only=True
+        )
     with open(roicat_results_file, "rb") as fH:
         roicat_results = pickle.load(fH)
     # the indices of roicat results -> individual FOV in session (suite2p output)
     ix = roicat_results["clusters"]["labels_bySession"][session_index]
 
     # get the roicat cluster ucids
-    file = next(chronic_folder.glob(f"*{roicat_fov}.clusterUIDs_all.csv"))
+    if location == "server":
+        file = next(chronic_folder.glob(f"*{roicat_fov}.clusterUIDs_all.csv"))
+    else:
+        file = one.load_dataset(
+            eid, f"*{roicat_fov}.clusterUIDs_all.csv", download_only=True
+        )
     roicat_ucids_all = pd.read_csv(
         file,
         header=None,
@@ -152,47 +172,119 @@ def load_imaging_FOV(
     roicat_ucids_fov = roicat_ucids_all.loc[ix].reset_index(drop=True)
 
     # combine with our uuids
-    ibl_uuids_fov = pd.read_csv(session_path / fov_collection / "mpciROIs.uuids.csv")
+    if location == "server":
+        filepath = session_path / fov_collection / "mpciROIs.uuids.csv"
+    else:
+        filepath = one.load_dataset(
+            eid, "mpciROIs.uuids.csv", collection=fov_collection, download_only=True
+        )
+    ibl_uuids_fov = pd.read_csv(filepath)
     roi_info = pd.concat([ibl_uuids_fov, roicat_ucids_fov], axis=1)
 
     # loading other suite2p info: cell classifier
-    roi_info["iscell"] = np.load(session_path / fov_collection / "mpciROIs.cellClassifier.npy")
+    if 0:
+        if location == "server":
+            filepath = session_path / fov_collection / "mpciROIs.cellClassifier.npy"
+        else:
+            filepath = one.load_dataset(
+                eid,
+                "mpciROIs.cellClassifier.npy",
+                collection=fov_collection,
+                download_only=True,
+            )
+        roi_info["iscell"] = np.load(filepath)
 
     # brain region estimate
-    if (session_path / fov_collection / "mpciROIs.brainLocationIds_ccf_2017.npy").exists():
-        roi_info["region_ids"] = np.load(session_path / fov_collection / "mpciROIs.brainLocationIds_ccf_2017.npy")
-    else:
-        roi_info["region_ids"] = np.load(session_path / fov_collection / "mpciROIs.brainLocationIds_ccf_2017_estimate.npy")
+    if 0:
+        keys = ["region_ids", "region_ids_est"]
+        filenames = [
+            "mpciROIs.brainLocationIds_ccf_2017.npy",
+            "mpciROIs.brainLocationIds_ccf_2017_estimate.npy",
+        ]
+        for key, filename in zip(keys, filenames):
+            if location == "server":
+                filepath = session_path / fov_collection / filename
+                if not filepath.exists():
+                    continue
+            else:
+                datasets = one.list_datasets(eid)
+                (dataset,) = [d for d in datasets if filename in d]
+                filepath = one.load_dataset(dataset, download_only=True)
+            roi_info[key] = np.load(filepath)
 
-    atlas = AllenAtlas()
-    roi_info["region_labels"] = atlas.regions.id2acronym(roi_info["region_ids"].values)
+    # mlapdv
+    if location == "server":
+        filepath = session_path / fov_collection / mlapdv_file
+        roi_info[["ml", "ap", "dv"]] = np.load(filepath)
+    else:
+        raise NotImplementedError
+
+    # old loading code
+    # if (session_path / fov_collection / "mpciROIs.brainLocationIds_ccf_2017.npy").exists():
+    #     roi_info["region_ids"] = np.load(session_path / fov_collection / "mpciROIs.brainLocationIds_ccf_2017.npy")
+    # else:
+    #     roi_info["region_ids"] = np.load(session_path / fov_collection / "mpciROIs.brainLocationIds_ccf_2017_estimate.npy")
+
+    # can add several parcellations here
+    if 0:
+        atlas = AllenAtlas()
+        roi_info["region_labels"] = atlas.regions.id2acronym(
+            roi_info["region_ids"].values
+        )
     roi_info["fov"] = fov
 
     # getting the roicat QC metrics
-    file = next(chronic_folder.glob(f"*{roicat_fov}*tracking.results.pkl"))
-    with open(file, "rb") as fH:
-        roicat_output = pickle.load(fH)
-    roicat_metrics = ["cluster_intra_means", "cluster_intra_maxs", "cluster_intra_mins", "cluster_silhouette"]
-    roicat_qc_df = pd.DataFrame({metric: roicat_output["quality_metrics"][metric] for metric in roicat_metrics})
-    roicat_qc_df.index = np.array(roicat_output["quality_metrics"]["cluster_labels_unique"], dtype="int32")
+    if 0:
+        if location == "server":
+            filepath = next(chronic_folder.glob(f"*{roicat_fov}*tracking.results.pkl"))
+        else:
+            filepath = one.load_dataset(
+                eid, f"*{roicat_fov}*tracking.results.pkl", download_only=True
+            )
+        with open(filepath, "rb") as fH:
+            roicat_output = pickle.load(fH)
+        roicat_metrics = [
+            "cluster_intra_means",
+            "cluster_intra_maxs",
+            "cluster_intra_mins",
+            "cluster_silhouette",
+        ]
+        roicat_qc_df = pd.DataFrame(
+            {
+                metric: roicat_output["quality_metrics"][metric]
+                for metric in roicat_metrics
+            }
+        )
+        roicat_qc_df.index = np.array(
+            roicat_output["quality_metrics"]["cluster_labels_unique"], dtype="int32"
+        )
 
-    # merge with cluster_uids / combine roi_info with roicat metrics
-    roicat_qc_df["roicat_UCID"] = roicat_ucids_all
-    roi_info = pd.merge(roi_info, roicat_qc_df, on="roicat_UCID", how="left")
+        # merge with cluster_uids / combine roi_info with roicat metrics
+        roicat_qc_df["roicat_UCID"] = roicat_ucids_all
+        roi_info = pd.merge(roi_info, roicat_qc_df, on="roicat_UCID", how="left")
 
     # fluorescence data : load all traces (suite2p) for one FOV
-    suite2p_data_fov = np.load(session_path / fov_collection / dataset)
-    times = np.load(session_path / fov_collection / "mpci.times.npy")
-    assert suite2p_data_fov.shape[1] == roi_info.shape[0]
+    if not metadata_only:
+        if location == "server":
+            filepath = session_path / fov_collection / dataset
+        else:
+            filepath = one.load_dataset(
+                eid, dataset, collection=fov_collection, download_only=True
+            )
+        suite2p_data_fov = np.load(filepath)
+        times = np.load(session_path / fov_collection / "mpci.times.npy")
+        assert suite2p_data_fov.shape[1] == roi_info.shape[0]
 
-    # as a pynapple object, merged with the metadata
-    fov_data = nap.TsdFrame(t=times, d=suite2p_data_fov, metadata=roi_info)
+        # as a pynapple object, merged with the metadata
+        fov_data = nap.TsdFrame(t=times, d=suite2p_data_fov, metadata=roi_info)
 
-    # apply optional processing_fning
-    if processing_fn is not None:
-        fov_data = processing_fn(fov_data)
+        # apply optional processing_fning
+        if processing_fn is not None:
+            fov_data = processing_fn(fov_data)
 
-    return fov_data
+        return fov_data
+    else:
+        return roi_info
 
 
 def qc_imaging_data_by_query(
@@ -240,22 +332,24 @@ def select_chronic_data_by_roicat_UCIDs(
     chronic_data: List[nap.TsdFrame],
     roicat_UCIDs: List[str],
 ) -> List[nap.TsdFrame]:
-    return [select_imaging_data_by_roicat_UCIDs(data, roicat_UCIDs) for data in chronic_data]
+    return [
+        select_imaging_data_by_roicat_UCIDs(data, roicat_UCIDs) for data in chronic_data
+    ]
 
 
 def load_imaging_session(
-    eid: str,
+    eid: str | UUID,
     FOVs: Optional[list[str]] = None,  # if None, infer
     one: Optional[ONE] = None,
     **kwargs,
 ) -> List[nap.TsdFrame]:
     """ """
     one = ONE() if one is None else one
-    FOVs = FOVs if FOVs is not None else get_session_FOVs(eid)
+    FOVs = FOVs if FOVs is not None else get_session_FOVs(eid, one=one)
     session_data = {}
     for fov in tqdm(FOVs):
         _logger.info(f"loading FOV {fov} for {eid}")
-        session_data[fov] = load_imaging_FOV(eid, fov, **kwargs)
+        session_data[fov] = load_imaging_FOV(eid, fov, one=one, **kwargs)
     return session_data
 
 
@@ -276,7 +370,7 @@ def load_chronic_imaging(
 
 
 def get_session_FOVs(
-    eid: str,
+    eid: str | UUID,
     one: Optional[ONE] = None,
 ) -> np.ndarray:
     """helper to get all FOVs for a session"""
@@ -287,7 +381,7 @@ def get_session_FOVs(
     return sorted([folder.parts[-1] for folder in fov_folders])
 
 
-def get_common_ROIs(
+def get_common_FOVs(
     eids: List[str],
     one: Optional[ONE] = None,
 ) -> List:
