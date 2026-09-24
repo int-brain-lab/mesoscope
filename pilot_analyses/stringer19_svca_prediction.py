@@ -328,7 +328,15 @@ def _predictor_var_explained(
     cross-covariance to see how much of the reliable variance `s_hat`
     survives after removing what `x` explains.
     """
-    x = (x - x[:, train_mask].mean(axis=1, keepdims=True)) / x[:, train_mask].std(axis=1, keepdims=True)
+    train_mean = x[:, train_mask].mean(axis=1, keepdims=True)
+    train_std = x[:, train_mask].std(axis=1, keepdims=True)
+    varying = np.isfinite(train_std[:, 0]) & (train_std[:, 0] > 1e-12)
+    if not np.any(varying):
+        # A predictor that is constant in the training interval explains no
+        # out-of-sample variance. This can occur for a task block within a
+        # short analysis window and should not poison unrelated predictors.
+        return np.zeros_like(s_hat)
+    x = (x[varying] - train_mean[varying]) / train_std[varying]
     resid1 = _regress_and_residualize(proj1_train, proj1_test, x[:, train_mask], x[:, test_mask])
     resid2 = _regress_and_residualize(proj2_train, proj2_test, x[:, train_mask], x[:, test_mask])
     s_res = np.mean(resid1 * resid2, axis=1)
@@ -451,6 +459,7 @@ def compute_svca_prediction(
     video_segment_duration: float = 300.0,
     video_resize: Tuple[int, int] = (60, 45),
     camera: str = "left",
+    use_whisker: bool = True,
     seed: int = 0,
     verbose: bool = True,
     use_video_cache: bool = True,
@@ -575,12 +584,14 @@ def compute_svca_prediction(
     wheel_times, wheel_speed = _load_wheel_speed(eid, one)
     wheel_w = _resample_nearest(wheel_times, wheel_speed, times_w)
     try:
+        if not use_whisker:
+            raise FileNotFoundError("whisker predictor disabled for matched analysis")
         whisk_times, whisk_me = _load_whisker_motion_energy(eid, one, camera=camera)
         whisk_w = _resample_nearest(whisk_times, whisk_me, times_w)
         behav_predictors_used = "wheel+whisker"
         x_behav = np.stack([wheel_w, whisk_w], axis=0)
     except Exception as e:
-        if verbose:
+        if verbose and use_whisker:
             print(f"  [behavior] no whisker motion energy for {eid} ({type(e).__name__}); falling back to wheel-only")
         behav_predictors_used = "wheel-only"
         x_behav = wheel_w[None, :]

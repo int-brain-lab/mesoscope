@@ -186,7 +186,16 @@ def run_tier1_dimensionality(
 
 
 def _plot_tier1(records: List[dict], save: bool = True):
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4.5))
+    plt.rcParams.update({
+        "font.family": "sans-serif", "font.sans-serif": ["Arial", "Liberation Sans", "DejaVu Sans"],
+        "font.size": 6, "axes.labelsize": 6, "xtick.labelsize": 5.5,
+        "ytick.labelsize": 5.5, "legend.fontsize": 5.2, "axes.linewidth": 0.5,
+        "lines.linewidth": 0.8, "pdf.fonttype": 42,
+    })
+    fig, axes = plt.subplots(
+        1, 3, figsize=(183 / 25.4, 53 / 25.4),
+        gridspec_kw={"width_ratios": [1.35, 1, 1], "wspace": 0.38},
+    )
 
     ax = axes[0]
     for region, color in REGION_COLORS.items():
@@ -197,13 +206,18 @@ def _plot_tier1(records: List[dict], save: bool = True):
         rank = np.arange(1, rs.shape[1] + 1)
         mean_r = rs.mean(axis=0)
         sem_r = rs.std(axis=0) / np.sqrt(rs.shape[0])
-        ax.plot(rank, 100 * mean_r, color=color, lw=1.5, label=f"{region} (n={rs.shape[0]})")
+        ax.plot(rank, 100 * mean_r, color=color, label=f"{region}, n={rs.shape[0]}")
         ax.fill_between(rank, 100 * (mean_r - sem_r), 100 * (mean_r + sem_r), color=color, alpha=0.2)
     ax.set_xscale("log")
     ax.set_xlabel("SVC dimension")
-    ax.set_ylabel("% reliable variance")
-    ax.set_title("reliable-variance spectrum\n(mean +/- SEM across sessions)")
-    ax.legend(frameon=False, fontsize=8)
+    ax.set_xlim(1, len(rank))
+    ax.set_xticks([1, 10, 100])
+    spectrum_max = max(100 * np.nanmax(r["reliable_frac"]) for r in records)
+    spectrum_ymax = 10 * np.ceil(spectrum_max / 10)
+    ax.set_ylim(0, spectrum_ymax)
+    ax.set_yticks([0, spectrum_ymax / 2, spectrum_ymax])
+    ax.set_ylabel("Reliable variance (%)")
+    ax.legend(frameon=False, handlelength=1.6, labelspacing=0.25)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
 
@@ -211,34 +225,48 @@ def _plot_tier1(records: List[dict], save: bool = True):
     regions = list(REGION_COLORS.keys())
     for i, region in enumerate(regions):
         alphas = [r["alpha"] for r in records if r["region"] == region]
-        ax.scatter([i] * len(alphas), alphas, color=REGION_COLORS[region], s=40, zorder=2)
+        offsets = np.linspace(-0.08, 0.08, len(alphas))
+        ax.scatter(i + offsets, alphas, color=REGION_COLORS[region], s=10, zorder=2)
         if alphas:
-            ax.scatter([i], [np.mean(alphas)], color="black", marker="_", s=400, zorder=3)
+            ax.plot([i - 0.15, i + 0.15], [np.mean(alphas)] * 2, color="black", lw=1, zorder=3)
     ax.set_xticks(range(len(regions)))
-    ax.set_xticklabels(regions, rotation=30)
-    ax.set_ylabel("power-law exponent (alpha)")
-    ax.set_title("SVCA spectrum decay rate")
+    ax.set_xticklabels(regions, rotation=25, ha="right")
+    alpha_values = np.asarray([r["alpha"] for r in records])
+    alpha_lo = np.floor(alpha_values.min() * 10) / 10
+    alpha_hi = np.ceil(alpha_values.max() * 10) / 10
+    ax.set_ylim(alpha_lo, alpha_hi)
+    ax.set_yticks([alpha_lo, (alpha_lo + alpha_hi) / 2, alpha_hi])
+    ax.set_ylabel(r"Power-law exponent, $\alpha$")
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
 
     ax = axes[2]
     for i, region in enumerate(regions):
         dims = [r["dim50"] for r in records if r["region"] == region]
-        ax.scatter([i] * len(dims), dims, color=REGION_COLORS[region], s=40, zorder=2)
+        offsets = np.linspace(-0.08, 0.08, len(dims))
+        ax.scatter(i + offsets, dims, color=REGION_COLORS[region], s=10, zorder=2)
         if dims:
-            ax.scatter([i], [np.mean(dims)], color="black", marker="_", s=400, zorder=3)
+            ax.plot([i - 0.15, i + 0.15], [np.mean(dims)] * 2, color="black", lw=1, zorder=3)
     ax.set_xticks(range(len(regions)))
-    ax.set_xticklabels(regions, rotation=30)
-    ax.set_ylabel("dimensions for 50% of reliable variance")
-    ax.set_title("effective dimensionality")
+    ax.set_xticklabels(regions, rotation=25, ha="right")
+    dim_values = np.asarray([r["dim50"] for r in records])
+    dim_lo = 5 * np.floor(dim_values.min() / 5)
+    dim_hi = 5 * np.ceil(dim_values.max() / 5)
+    ax.set_ylim(dim_lo, dim_hi)
+    ax.set_yticks([dim_lo, (dim_lo + dim_hi) / 2, dim_hi])
+    ax.set_ylabel("Dimensions explaining 50%")
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
 
-    fig.tight_layout()
+    for label, ax in zip("abc", axes):
+        ax.text(-0.18, 1.04, label, transform=ax.transAxes, fontsize=8,
+                fontweight="bold", va="bottom", ha="left")
+    fig.subplots_adjust(left=0.065, right=0.995, bottom=0.25, top=0.92, wspace=0.38)
     if save:
         OUT_DIR.mkdir(parents=True, exist_ok=True)
-        fig.savefig(OUT_DIR / "tier1_dimensionality_by_region.png", dpi=200, bbox_inches="tight")
-        print("Saved:", OUT_DIR / "tier1_dimensionality_by_region.png")
+        stem = OUT_DIR / "tier1_dimensionality_by_region"
+        fig.savefig(stem.with_suffix(".pdf"), bbox_inches="tight")
+        print("Saved:", stem.with_suffix(".pdf"))
     return fig
 
 
@@ -270,34 +298,56 @@ def run_tier2_behavior_by_region(
 
 
 def _plot_tier2(records: List[dict], save: bool = True):
-    fig, axes = plt.subplots(1, len(records), figsize=(4.5 * len(records), 4.5), sharey=True)
+    plt.rcParams.update({
+        "font.family": "sans-serif", "font.sans-serif": ["Arial", "Liberation Sans", "DejaVu Sans"],
+        "font.size": 6, "axes.labelsize": 6, "axes.titlesize": 7,
+        "xtick.labelsize": 5.5, "ytick.labelsize": 5.5, "legend.fontsize": 5.2,
+        "axes.linewidth": 0.5, "lines.linewidth": 0.8, "pdf.fonttype": 42,
+    })
+    fig, axes = plt.subplots(
+        1, len(records), figsize=(183 / 25.4, 48 / 25.4), sharey=True,
+        gridspec_kw={"wspace": 0.12},
+    )
     if len(records) == 1:
         axes = [axes]
 
     for ax, rec in zip(axes, records):
         rank = np.arange(1, len(rec["reliable_frac"]) + 1)
-        ax.plot(rank, 100 * np.clip(rec["reliable_frac"], 0, None), color="gray", lw=1.5, label="max explainable")
-        ax.plot(rank, 100 * np.clip(rec["video_var_explained"], 0, None), color="tab:blue", lw=1.5, label="video PCs")
+        ax.plot(rank, 100 * np.clip(rec["reliable_frac"], 0, None), color="gray", label="Maximum explainable")
+        ax.plot(rank, 100 * np.clip(rec["video_var_explained"], 0, None), color="tab:blue", label="Face-video PCs")
         behav_label = "wheel+whisker" if rec.get("behav_predictors_used") == "wheel+whisker" else "wheel only"
-        ax.plot(rank, 100 * np.clip(rec["behav_var_explained"], 0, None), color="tab:green", lw=1.5, label=behav_label)
-        ax.plot(rank, 100 * np.clip(rec["block_var_explained"], 0, None), color="tab:purple", lw=1.2, label="block")
-        ax.plot(rank, 100 * np.clip(rec["choice_var_explained"], 0, None), color="tab:red", lw=1.2, label="choice")
+        ax.plot(rank, 100 * np.clip(rec["behav_var_explained"], 0, None), color="#009E73", label=behav_label)
+        ax.plot(rank, 100 * np.clip(rec["block_var_explained"], 0, None), color="#CC79A7", label="Block")
+        ax.plot(rank, 100 * np.clip(rec["choice_var_explained"], 0, None), color="#D55E00", label="Choice")
         ax.set_xscale("log")
+        ax.set_xlim(1, len(rank))
+        ax.set_xticks([1, 10, 100])
         ax.set_xlabel("SVC dimension")
-        ax.set_title(rec["region"], fontsize=11)
+        ax.set_title(rec["region"], pad=2)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
 
-    axes[0].set_ylabel("% variance explained")
-    axes[0].set_ylim(0, 100)
-    axes[-1].legend(frameon=False, fontsize=8, loc="upper right")
-    fig.suptitle("Behavioral/task contribution to shared variance, by region", y=1.02)
-    fig.tight_layout()
+    observed_max = max(
+        np.nanmax(100 * np.clip(rec[key], 0, None))
+        for rec in records
+        for key in ("reliable_frac", "video_var_explained", "behav_var_explained",
+                    "block_var_explained", "choice_var_explained")
+    )
+    ymax = max(10, 10 * np.ceil(observed_max / 10))
+    axes[0].set_ylabel("Variance explained (%)")
+    axes[0].set_ylim(0, ymax)
+    axes[0].set_yticks([0, ymax / 2, ymax])
+    axes[-1].legend(frameon=False, loc="upper right", handlelength=1.8)
+    for label, ax in zip("abcd", axes):
+        ax.text(-0.18, 1.04, label, transform=ax.transAxes, fontsize=8,
+                fontweight="bold", va="bottom", ha="left")
+    fig.subplots_adjust(left=0.055, right=0.995, bottom=0.25, top=0.91, wspace=0.12)
 
     if save:
         OUT_DIR.mkdir(parents=True, exist_ok=True)
-        fig.savefig(OUT_DIR / "tier2_behavior_by_region.png", dpi=200, bbox_inches="tight")
-        print("Saved:", OUT_DIR / "tier2_behavior_by_region.png")
+        stem = OUT_DIR / "tier2_behavior_by_region"
+        fig.savefig(stem.with_suffix(".pdf"), bbox_inches="tight")
+        print("Saved:", stem.with_suffix(".pdf"))
     return fig
 
 
