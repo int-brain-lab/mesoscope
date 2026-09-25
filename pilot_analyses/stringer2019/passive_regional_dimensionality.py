@@ -84,6 +84,11 @@ def mean_in(me, t0, t1):
     return float(np.nanmean(me[1][m]))
 
 
+def spont_seconds(spont, window):
+    """Seconds of the spontaneous-activity block inside `window`."""
+    return float(max(0., min(spont[1], window[1]) - max(spont[0], window[0])))
+
+
 def analyse(session, idx, window):
     res = compute_reliable_variance(session, window=window, bin_seconds=BIN_SECONDS,
                                     neuron_subset=idx)
@@ -114,12 +119,12 @@ def compute():
                 continue
             passive = (t_first, t_first + DURATION)
             task = (TASK_START, TASK_START + DURATION)
-            spont_end = tab.loc["stop", "spontaneousActivity"]
+            spont = (tab.loc["start", "spontaneousActivity"], tab.loc["stop", "spontaneousActivity"])
             idx = select_region_neurons(session, region, n_total=N_TOTAL)
             me = motion_energy(one, eid)
             assert len(idx) == N_TOTAL
             rec = dict(region=region, eid=eid, n_neurons=len(idx),
-                       spont_s=float(np.clip(spont_end - passive[0], 0, DURATION)))
+                       spont_s=spont_seconds(spont, passive))
             for name, window in (("passive", passive), ("task", task)):
                 r, alpha, dim50, split = analyse(session, idx, window)
                 rec.update({f"{name}_reliable_frac": r, f"{name}_alpha": alpha,

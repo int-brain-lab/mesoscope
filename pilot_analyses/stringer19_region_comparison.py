@@ -33,6 +33,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.ticker import ScalarFormatter
 from scipy.stats import zscore
 
 from one.api import ONE
@@ -212,6 +213,8 @@ def _plot_tier1(records: List[dict], save: bool = True):
     ax.set_xlabel("SVC dimension")
     ax.set_xlim(1, len(rank))
     ax.set_xticks([1, 10, 100])
+    ax.xaxis.set_major_formatter(ScalarFormatter())
+    ax.tick_params(which="minor", width=0.4, length=1.5)
     spectrum_max = max(100 * np.nanmax(r["reliable_frac"]) for r in records)
     spectrum_ymax = 10 * np.ceil(spectrum_max / 10)
     ax.set_ylim(0, spectrum_ymax)
@@ -250,8 +253,8 @@ def _plot_tier1(records: List[dict], save: bool = True):
     ax.set_xticks(range(len(regions)))
     ax.set_xticklabels(regions, rotation=25, ha="right")
     dim_values = np.asarray([r["dim50"] for r in records])
-    dim_lo = 5 * np.floor(dim_values.min() / 5)
-    dim_hi = 5 * np.ceil(dim_values.max() / 5)
+    dim_lo = 10 * np.floor(dim_values.min() / 10)
+    dim_hi = 10 * np.ceil(dim_values.max() / 10)
     ax.set_ylim(dim_lo, dim_hi)
     ax.set_yticks([dim_lo, (dim_lo + dim_hi) / 2, dim_hi])
     ax.set_ylabel("Dimensions explaining 50%")
@@ -314,7 +317,7 @@ def _plot_tier2(records: List[dict], save: bool = True):
     for ax, rec in zip(axes, records):
         rank = np.arange(1, len(rec["reliable_frac"]) + 1)
         ax.plot(rank, 100 * np.clip(rec["reliable_frac"], 0, None), color="gray", label="Maximum explainable")
-        ax.plot(rank, 100 * np.clip(rec["video_var_explained"], 0, None), color="tab:blue", label="Face-video PCs")
+        ax.plot(rank, 100 * np.clip(rec["video_var_explained"], 0, None), color="tab:blue", label="Left-camera video PCs")
         behav_label = "wheel+whisker" if rec.get("behav_predictors_used") == "wheel+whisker" else "wheel only"
         ax.plot(rank, 100 * np.clip(rec["behav_var_explained"], 0, None), color="#009E73", label=behav_label)
         ax.plot(rank, 100 * np.clip(rec["block_var_explained"], 0, None), color="#CC79A7", label="Block")
@@ -322,6 +325,8 @@ def _plot_tier2(records: List[dict], save: bool = True):
         ax.set_xscale("log")
         ax.set_xlim(1, len(rank))
         ax.set_xticks([1, 10, 100])
+        ax.xaxis.set_major_formatter(ScalarFormatter())
+        ax.tick_params(which="minor", width=0.4, length=1.5)
         ax.set_xlabel("SVC dimension")
         ax.set_title(rec["region"], pad=2)
         ax.spines["top"].set_visible(False)

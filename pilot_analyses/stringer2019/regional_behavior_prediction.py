@@ -102,7 +102,7 @@ def plot(data, show_sessions=False):
     fig, axes = plt.subplots(1, 4, figsize=(183 / 25.4, 48 / 25.4), sharey=True,
                              gridspec_kw={"wspace": .12})
     specs = [("Maximum explainable", "reliable_frac", "#777777"),
-             ("Face-video PCs", "video_var_explained", "#0072B2"),
+             ("Left-camera video PCs", "video_var_explained", "#0072B2"),
              ("Wheel speed", "behav_var_explained", "#009E73"),
              ("Block", "block_var_explained", "#CC79A7"),
              ("Choice", "choice_var_explained", "#D55E00")]

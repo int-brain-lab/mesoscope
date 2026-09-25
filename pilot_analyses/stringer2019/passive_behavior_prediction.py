@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Face-video prediction of shared neural variance during the passive protocol.
+"""Left-camera video prediction of shared neural variance during the passive protocol.
 
 Passive-epoch equivalent of `regional_behavior_prediction.py`: same
 SVCA and video-PC regression (`stringer19_svca_prediction`), 1,000 neurons
-per region-session, native frame rate, 128 components, 16 face-video motion
-PCs; the window is the first `DURATION` s of imaged passive protocol, as in
+per region-session, native frame rate, 128 components, 16 left-camera video
+motion PCs; the window is the first `DURATION` s of imaged passive protocol, as in
 `passive_regional_dimensionality.py`. Block and choice do not exist outside
 the task, and extracted wheel data cover the passive epoch in only 2 of the
-sessions, so the face video is the only predictor.
+sessions, so the left-camera video is the only predictor.
 """
 from pathlib import Path
 import sys
@@ -108,7 +108,7 @@ def plot(data):
     })
     fig, axes = plt.subplots(1, 4, figsize=(183 / 25.4, 48 / 25.4), sharey=True)
     specs = [("Maximum explainable", "reliable_frac", "#777777"),
-             ("Face-video PCs", "video_var_explained", "#0072B2")]
+             ("Left-camera video PCs", "video_var_explained", "#0072B2")]
     upper = []
     for letter, region, ax in zip("abcd", ["MOp", "MOs", "VISp", "SSp-bfd"], axes):
         for label, key, color in specs:
