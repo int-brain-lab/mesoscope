@@ -8,7 +8,7 @@ not found.
 | figure (`output/`) | content |
 |---|---|
 | `dorsal_counts` | neurons per bin; sessions with >= 10 neurons per bin |
-| `dorsal_decoding_n10` / `_all` | decoding of stim side, choice, feedback (balanced accuracy) and wheel speed (R^2) per (session, bin), averaged over sessions; 10 random neurons / all neurons |
+| `dorsal_decoding_n10` / `_all` (+ `_scatter`: per-bin BWM vs meso) | decoding of stim side, choice, feedback (balanced accuracy) and wheel speed (R^2) per (session, bin), averaged over sessions; 10 random neurons / all neurons |
 | `dorsal_tuning` / `_unfolded` | fraction of neurons significantly tuned to stim side, choice, feedback; hemispheres folded / as recorded (`_unfolded` is the `drawing.svg` replica) |
 
 Each figure comes as `<name>.pdf` (panels plus LaTeX caption, compiled with

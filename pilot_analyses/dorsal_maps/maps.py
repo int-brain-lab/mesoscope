@@ -20,7 +20,7 @@ from matplotlib.colors import LogNorm, Normalize
 from common import (ALPHA, HEX_SIZE, MIN_NEURONS, N_SHUF, OUT, VARIABLES, WHEEL_EDGES, WINDOWS,
                     bin_neurons, hex_center, hex_unkey, top_boundaries)
 from decode import MIN_TRIALS, N_DRAWS
-from plotstyle import NATURE_DOUBLE_COL_IN, save_with_caption
+from plotstyle import NATURE_DOUBLE_COL_IN, save_with_caption, style_axes
 
 MODS = ("meso", "bwm")
 ROW_NAME = {"meso": "Mesoscope", "bwm": "BWM (Neuropixels)"}
@@ -170,6 +170,7 @@ def main():
                 d = dec[m][dec[m].target == t]
                 summary.append(dict(modality=m, measure=f"decoding_{ver}_{t}",
                                     session_bins=len(d), mean=d[ver].mean()))
+        summary += decoding_scatter(dec, ver, targets)
 
     # ---- 3. tuning --------------------------------------------------------
     for m in MODS:
@@ -180,6 +181,74 @@ def main():
     tuning_maps(tun, "dorsal_tuning_unfolded", fold=False)
     pd.DataFrame(summary).to_csv(OUT / "dorsal_maps_summary.csv", index=False)
     print(pd.DataFrame(summary).to_string())
+
+
+def decoding_scatter(dec, ver, targets):
+    """Per hex bin: session-averaged decoding score from BWM (x) vs mesoscope
+    (y), for bins that have both. Returns summary rows (Spearman r per target)."""
+    from scipy.stats import spearmanr
+    g = {m: dec[m].groupby(["target", "hex"])[ver].agg(["mean", "size"]) for m in MODS}
+    w = NATURE_DOUBLE_COL_IN
+    fig, axs = plt.subplots(1, len(targets), figsize=(w, w / len(targets) + 0.55))
+    rows, stats = [], []
+    for c, (ax, t) in enumerate(zip(axs, targets)):
+        both = g["bwm"].loc[t].join(g["meso"].loc[t], lsuffix="_bwm", rsuffix="_meso", how="inner").dropna()
+        x, y = both["mean_bwm"].values, both["mean_meso"].values
+        _, ap = hex_center(*hex_unkey(both.index.values))
+        sc = ax.scatter(x, y, c=ap, cmap="viridis", vmin=-5, vmax=3, s=7, lw=0, alpha=0.85)
+        lo = min(x.min(), y.min())
+        hi = max(x.max(), y.max())
+        pad = 0.05 * (hi - lo)
+        lim = (lo - pad, hi + pad)
+        ax.plot(lim, lim, color="0.6", lw=0.5, ls="--", zorder=0)
+        chance = 0.5 if t != "wheel" else 0.0
+        ax.axhline(chance, color="0.85", lw=0.5, zorder=0)
+        ax.axvline(chance, color="0.85", lw=0.5, zorder=0)
+        ax.set_xlim(lim)
+        ax.set_ylim(lim)
+        ax.set_aspect("equal")
+        style_axes(ax)
+        r, p = spearmanr(x, y)
+        ax.text(0.04, 0.97, f"$r_s$ = {r:.2f}\nn = {len(x)}", transform=ax.transAxes, va="top",
+                fontsize=6)
+        ax.set_title(TARGET_LABEL[t].capitalize())
+        ax.set_xlabel("BWM " + ("$R^2$" if t == "wheel" else "bal. acc."))
+        if c == 0:
+            ax.set_ylabel("Mesoscope score")
+        ax.text(-0.12 if c else -0.3, 1.1, chr(ord("a") + c), transform=ax.transAxes,
+                fontsize=8, fontweight="bold", va="bottom")
+        rows.append(dict(modality="both", measure=f"scatter_{ver}_{t}", session_bins=len(x),
+                         mean=r, p=p))
+        stats.append((r, p, len(x)))
+    fig.tight_layout()
+    cb = fig.colorbar(sc, ax=axs, orientation="vertical", fraction=0.015, pad=0.02, aspect=20)
+    cb.set_label("AP (mm)", fontsize=6)
+    cb.ax.tick_params(labelsize=5)
+    cb.locator = plt.MaxNLocator(3)
+    cb.update_ticks()
+    who = ("all neurons of the session in the bin" if ver == "all" else
+           f"{MIN_NEURONS} randomly drawn neurons of the session in the bin (mean of {N_DRAWS} draws)")
+    def fmt(i):
+        r, p, n = stats[i]
+        m, e = f"{p:.1e}".split("e")
+        ptex = f"{p:.2g}" if p >= 1e-3 else f"{m}\\times 10^{{{int(e)}}}"
+        return f"Spearman $r_s = {r:.2f}$, $p = {ptex}$, {n} bins"
+    save_with_caption(
+        fig, OUT / f"dorsal_decoding_{ver}_scatter",
+        [f"Stimulus side ({fmt(0)}).", f"Choice ({fmt(1)}).", f"Feedback ({fmt(2)}).",
+         f"Wheel speed, cross-validated $R^2$ ({fmt(3)})."],
+        label=f"dorsal_decoding_{ver}_scatter",
+        intro=(f"Decoding per spatial bin, BWM Neuropixels (x) vs mesoscope (y), decoded from {who}. "
+               f"Each point is one hexagonal bin (0.4\\,mm, hemispheres folded) with at least one "
+               f"session of each modality contributing $\\geq${MIN_NEURONS} neurons; its value is the "
+               f"score averaged across those sessions (same values as the decoding maps). Colour: "
+               f"AP position of the bin. Dashed line: identity; grey lines: chance (0.5 balanced "
+               f"accuracy, 0 for $R^2$). The $p$-values ignore spatial autocorrelation between "
+               f"neighbouring bins and are therefore optimistic."
+               + (" With all neurons, mesoscope bins hold far more neurons than BWM bins, which "
+                  "inflates the mesoscope scores." if ver == "all" else "")))
+    plt.close(fig)
+    return rows
 
 
 def tuning_maps(tun, out_stem, fold):
