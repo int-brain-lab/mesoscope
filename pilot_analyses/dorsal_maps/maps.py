@@ -20,7 +20,7 @@ from matplotlib.colors import LogNorm, Normalize
 from common import (ALPHA, HEX_SIZE, MIN_NEURONS, N_SHUF, OUT, VARIABLES, WHEEL_EDGES, WINDOWS,
                     bin_neurons, hex_center, hex_unkey, top_boundaries)
 from decode import MIN_TRIALS, N_DRAWS
-from plotstyle import NATURE_DOUBLE_COL_IN, save_with_caption, style_axes
+from plotstyle import NATURE_DOUBLE_COL_IN, NATURE_ONEHALF_COL_IN, save_with_caption, style_axes
 
 MODS = ("meso", "bwm")
 ROW_NAME = {"meso": "Mesoscope", "bwm": "BWM (Neuropixels)"}
@@ -120,6 +120,7 @@ def main():
     for m in MODS:
         tun[m]["hex"] = bin_neurons(tun[m][["x", "y", "z"]].values)
     summary = []
+    windows_figure()
 
     # ---- 1. counts ------------------------------------------------------
     per = {}
@@ -181,6 +182,54 @@ def main():
     tuning_maps(tun, "dorsal_tuning_unfolded", fold=False)
     pd.DataFrame(summary).to_csv(OUT / "dorsal_maps_summary.csv", index=False)
     print(pd.DataFrame(summary).to_string())
+
+
+def windows_figure():
+    """Analysis windows per variable and modality, relative to the aligning event."""
+    from matplotlib.patches import Rectangle
+    ev = {"stimOn_times": "stimulus onset", "firstMovement_times": "movement onset",
+          "feedback_times": "feedback"}
+    col = {"bwm": "0.25", "meso": plt.get_cmap(CMAP)(0.6)}
+    rows = [(v, {m: [WINDOWS[m][v][1:]] for m in MODS}, ev[WINDOWS["bwm"][v][0]]) for v in VARIABLES]
+    wb = list(zip(WHEEL_EDGES[:-1], WHEEL_EDGES[1:]))
+    rows.append(("wheel", {m: wb for m in MODS}, "movement onset"))
+    fig, axs = plt.subplots(len(rows), 1, figsize=(NATURE_ONEHALF_COL_IN, 2.6), sharex=True)
+    for i, (ax, (v, wins, event)) in enumerate(zip(axs, rows)):
+        ax.text(-0.2, 1.02, chr(ord("a") + i), transform=ax.transAxes, fontsize=8,
+                fontweight="bold", va="bottom")
+        for yi, m in enumerate(("meso", "bwm")):
+            for a, b in wins[m]:
+                ax.add_patch(Rectangle((a, yi + 0.15), b - a, 0.7, facecolor=col[m],
+                                       edgecolor="white", lw=0.6))
+        ax.axvline(0, color="k", lw=0.6)
+        ax.set_ylim(0, 2)
+        ax.set_yticks([0.5, 1.5])
+        ax.set_yticklabels(["Mesoscope", "BWM"], fontsize=6)
+        ax.tick_params(axis="y", length=0)
+        for sp in ("top", "right", "left"):
+            ax.spines[sp].set_visible(False)
+        ax.set_title(f"{TARGET_LABEL[v].capitalize()}, aligned to {event}", fontsize=7, loc="left",
+                     pad=2)
+    axs[-1].set_xlim(-0.45, 1.05)
+    axs[-1].set_xticks([-0.2, 0, 0.5, 1])
+    axs[-1].set_xlabel("time from event (s)")
+    fig.tight_layout(h_pad=0.4)
+    save_with_caption(
+        fig, OUT / "dorsal_windows",
+        [f"Stimulus side: activity in {_win('stim')}.",
+         f"Choice: {_win('choice')}.",
+         f"Feedback: {_win('feedback')}.",
+         f"Wheel speed: six 0.2\\,s bins from ${WHEEL_EDGES[0]:g}$ to ${WHEEL_EDGES[-1]:g}$\\,s "
+         f"around movement onset, identical for both modalities; each bin's activity is paired "
+         f"with the mean absolute wheel velocity in the same bin."],
+        label="dorsal_windows",
+        intro=("Analysis windows used for decoding and for the single-neuron tuning test. BWM "
+               "windows follow the Brain Wide Map single-cell analyses. Mesoscope frames are about "
+               "0.2\\,s apart, so the mesoscope stimulus, choice and feedback windows are widened to "
+               "0.3\\,s to always contain at least one frame; the mesoscope value is the mean of the "
+               "deconvolved trace, linearly interpolated at each neuron's own sampling times, over "
+               "the window. BWM values are firing rates (spike count / window length)."))
+    plt.close(fig)
 
 
 def decoding_scatter(dec, ver, targets):
