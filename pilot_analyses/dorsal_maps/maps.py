@@ -1,0 +1,255 @@
+#!/usr/bin/env python3
+"""Side-by-side dorsal cortex maps, meso (top row) vs BWM (bottom row).
+
+Inputs: output/tuning_<modality>.pqt (one row per neuron, also used for the
+neuron/session counts) and output/decoding_<modality>.pqt.
+
+Figures (each as <name>_panels.pdf, <name>.tex, <name>.pdf with caption):
+- dorsal_counts: neurons per bin; sessions with >= MIN_NEURONS neurons per bin
+- dorsal_decoding_all / dorsal_decoding_n10: mean decoding score across
+  sessions per bin, all neurons / MIN_NEURONS random neurons
+- dorsal_tuning: fraction of neurons with p < ALPHA per bin
+Also writes output/dorsal_maps_summary.csv with the headline numbers.
+"""
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib.collections import PolyCollection
+from matplotlib.colors import LogNorm, Normalize
+
+from common import (ALPHA, HEX_SIZE, MIN_NEURONS, N_SHUF, OUT, VARIABLES, WHEEL_EDGES, WINDOWS,
+                    bin_neurons, hex_center, hex_unkey, top_boundaries)
+from decode import MIN_TRIALS, N_DRAWS
+from plotstyle import NATURE_DOUBLE_COL_IN, save_with_caption
+
+MODS = ("meso", "bwm")
+ROW_NAME = {"meso": "Mesoscope", "bwm": "BWM (Neuropixels)"}
+XLIM, YLIM = (-0.4, 5.6), (-5.8, 3.9)
+CMAP = "magma"
+_ANG = np.deg2rad(30 + 60 * np.arange(6))
+HEX_VERTS = HEX_SIZE * np.c_[np.cos(_ANG), np.sin(_ANG)]
+TARGET_LABEL = {"stim": "stimulus side", "choice": "choice", "feedback": "feedback",
+                "wheel": "wheel speed"}
+
+_BND = None
+
+
+def outline(ax):
+    global _BND
+    if _BND is None:
+        _BND = top_boundaries()
+    bnd, xs, ys = _BND
+    ax.imshow(np.ma.masked_where(bnd == 0, bnd), extent=[xs[0], xs[-1], ys[-1], ys[0]],
+              origin="upper", cmap="Greys", vmin=0, vmax=1.6, interpolation="antialiased",
+              zorder=3, alpha=0.6)
+    ax.axvline(0, color="0.55", lw=0.25)
+
+
+def hexmap(ax, keys, values, norm, cmap=CMAP):
+    q, r = hex_unkey(np.asarray(keys))
+    cx, cy = hex_center(q, r)
+    verts = np.stack([np.c_[x + HEX_VERTS[:, 0], y + HEX_VERTS[:, 1]] for x, y in zip(cx, cy)]) \
+        if len(cx) else np.zeros((0, 6, 2))
+    pc = PolyCollection(verts, array=np.asarray(values, float), cmap=cmap, norm=norm,
+                        edgecolors="none", zorder=2)
+    ax.add_collection(pc)
+    return pc
+
+
+def style_map(ax, row, col, nrows, xlim=XLIM):
+    ax.set_xlim(*xlim)
+    ax.set_ylim(*YLIM)
+    ax.set_aspect("equal")
+    for s in ("top", "right"):
+        ax.spines[s].set_visible(False)
+    ax.set_xticks([0, 2.5, 5] if xlim[0] > -1 else [-5, 0, 5])
+    ax.set_yticks([-5, 0, 2.5])
+    if row == nrows - 1:
+        ax.set_xlabel("ML (mm)")
+    else:
+        ax.set_xticklabels([])
+    if col == 0:
+        ax.set_ylabel("AP (mm)")
+    else:
+        ax.set_yticklabels([])
+
+
+def map_grid(per_mod, titles, cbar_labels, norms, out_stem, captions, label, intro, xlim=XLIM):
+    """per_mod[m][c] = (keys, values) for modality m and column c."""
+    ncol = len(titles)
+    w = NATURE_DOUBLE_COL_IN if ncol > 2 else NATURE_DOUBLE_COL_IN * 0.6
+    aspect = (YLIM[1] - YLIM[0]) / (xlim[1] - xlim[0])
+    fig, axs = plt.subplots(2, ncol, figsize=(w, w / ncol * 2 * aspect + 0.6), squeeze=False)
+    for c in range(ncol):
+        for r, m in enumerate(MODS):
+            ax = axs[r, c]
+            outline(ax)
+            keys, vals = per_mod[m][c]
+            pc = hexmap(ax, keys, vals, norms[c])
+            style_map(ax, r, c, 2, xlim)
+            if r == 0:
+                ax.set_title(titles[c])
+                ax.text(-0.12 if c else -0.3, 1.1, chr(ord("a") + c), transform=ax.transAxes,
+                        fontsize=8, fontweight="bold", va="bottom")
+            if c == 0:
+                ax.text(-0.42, 0.5, ROW_NAME[m], transform=ax.transAxes, rotation=90,
+                        va="center", ha="center", fontsize=7)
+        cb = fig.colorbar(pc, ax=axs[:, c], orientation="horizontal", fraction=0.04, pad=0.09,
+                          aspect=15)
+        cb.set_label(cbar_labels[c], fontsize=6)
+        cb.ax.tick_params(labelsize=5)
+        if not isinstance(norms[c], LogNorm):
+            cb.locator = plt.MaxNLocator(3)
+            cb.update_ticks()
+    save_with_caption(fig, OUT / out_stem, captions, label=label, intro=intro)
+    plt.close(fig)
+
+
+def joint_norm(arrays, log=False, lo=None, pct=(1, 99)):
+    v = np.concatenate([np.asarray(a, float) for a in arrays])
+    v = v[np.isfinite(v)]
+    if log:
+        return LogNorm(vmin=max(1, v.min()), vmax=v.max())
+    a = np.percentile(v, pct[0]) if lo is None else lo
+    return Normalize(vmin=a, vmax=np.percentile(v, pct[1]))
+
+
+def main():
+    tun = {m: pd.read_parquet(OUT / f"tuning_{m}.pqt") for m in MODS}
+    dec = {m: pd.read_parquet(OUT / f"decoding_{m}.pqt") for m in MODS}
+    for m in MODS:
+        tun[m]["hex"] = bin_neurons(tun[m][["x", "y", "z"]].values)
+    summary = []
+
+    # ---- 1. counts ------------------------------------------------------
+    per = {}
+    for m in MODS:
+        n = tun[m].groupby("hex").size()
+        ns = tun[m].groupby(["hex", "session"]).size()
+        ses = (ns >= MIN_NEURONS).groupby("hex").sum()
+        ses = ses[ses > 0]
+        per[m] = [(n.index, n.values), (ses.index, ses.values)]
+        summary.append(dict(modality=m, neurons=len(tun[m]), sessions=tun[m].session.nunique(),
+                            bins_with_neurons=len(n), bins_with_session=len(ses)))
+    norms = [joint_norm([per[m][0][1] for m in MODS], log=True),
+             joint_norm([per[m][1][1] for m in MODS], log=True)]
+    sm = {d["modality"]: d for d in summary}
+    map_grid(per, ["Neurons", f"Sessions ($\\geq${MIN_NEURONS} neurons)"],
+             ["neurons per bin", "sessions per bin"], norms, "dorsal_counts",
+             [f"Total number of isocortex neurons recorded in each spatial bin; mesoscope "
+              f"(top; {sm['meso']['neurons']:,} neurons, {sm['meso']['sessions']} sessions) and BWM "
+              f"(bottom; {sm['bwm']['neurons']:,} good units, {sm['bwm']['sessions']} sessions).",
+              f"Number of sessions contributing at least {MIN_NEURONS} neurons to each bin."],
+             "dorsal_counts", intro=_intro())
+
+    # ---- 2. decoding ----------------------------------------------------
+    targets = ["stim", "choice", "feedback", "wheel"]
+    for ver in ("all", "n10"):
+        per = {}
+        for m in MODS:
+            g = dec[m].groupby(["target", "hex"])[ver].mean()
+            per[m] = [(g[t].dropna().index, g[t].dropna().values) for t in targets]
+        norms = [joint_norm([per[m][i][1] for m in MODS], lo=0.5 if t != "wheel" else None)
+                 for i, t in enumerate(targets)]
+        who = ("all neurons of the session in the bin" if ver == "all" else
+               f"{MIN_NEURONS} randomly drawn neurons of the session in the bin (mean of {N_DRAWS} draws)")
+        map_grid(per, [TARGET_LABEL[t].capitalize() for t in targets],
+                 ["balanced accuracy"] * 3 + ["$R^2$"], norms, f"dorsal_decoding_{ver}",
+                 [f"Stimulus side (left vs right, including 0\\% contrast) decoded from {who}: "
+                  f"cross-validated balanced accuracy (chance 0.5), averaged across sessions with "
+                  f"$\\geq${MIN_NEURONS} neurons in the bin; activity in the {_win('stim')}.",
+                  f"Same for choice (left vs right wheel turn), {_win('choice')}.",
+                  f"Same for feedback (reward vs error), {_win('feedback')}.",
+                  f"Wheel speed (mean absolute wheel velocity) in 0.2\\,s bins from "
+                  f"${WHEEL_EDGES[0]:g}$ to ${WHEEL_EDGES[-1]:g}$\\,s around movement onset, decoded "
+                  f"from the activity in the same bins: cross-validated $R^2$ of ridge regression "
+                  f"(chance 0)."],
+                 f"dorsal_decoding_{ver}", intro=_intro() + " " + _decoding_methods(ver))
+        for m in MODS:
+            for t in targets:
+                d = dec[m][dec[m].target == t]
+                summary.append(dict(modality=m, measure=f"decoding_{ver}_{t}",
+                                    session_bins=len(d), mean=d[ver].mean()))
+
+    # ---- 3. tuning --------------------------------------------------------
+    for m in MODS:
+        for v in VARIABLES:
+            summary.append(dict(modality=m, measure=f"frac_sig_{v}",
+                                mean=float(np.mean(tun[m][f"p_{v}"] < ALPHA))))
+    tuning_maps(tun, "dorsal_tuning", fold=True)
+    tuning_maps(tun, "dorsal_tuning_unfolded", fold=False)
+    pd.DataFrame(summary).to_csv(OUT / "dorsal_maps_summary.csv", index=False)
+    print(pd.DataFrame(summary).to_string())
+
+
+def tuning_maps(tun, out_stem, fold):
+    """Fraction of significantly tuned neurons per bin (the original
+    meso-vs-BWM figure); fold=False keeps both hemispheres as recorded."""
+    per = {}
+    for m in MODS:
+        keys = bin_neurons(tun[m][["x", "y", "z"]].values, fold=fold)
+        cols = []
+        for v in VARIABLES:
+            g = (tun[m][f"p_{v}"] < ALPHA).groupby(keys)
+            frac = g.mean()[g.count() >= MIN_NEURONS]
+            cols.append((frac.index, frac.values))
+        per[m] = cols
+    norms = [joint_norm([per[m][i][1] for m in MODS], lo=0) for i in range(3)]
+    map_grid(per, ["Stimulus side", "Choice", "Feedback"],
+             ["fraction significant"] * 3, norms, out_stem,
+             [f"Fraction of neurons in each bin significantly tuned to stimulus side "
+              f"($p<{ALPHA}$; bins with $\\geq${MIN_NEURONS} neurons pooled across sessions); "
+              f"left vs right stimulus, compared within block $\\times$ choice; {_win('stim')}.",
+              f"Same for choice (left vs right turn, within block $\\times$ stimulus side); "
+              f"{_win('choice')}.",
+              f"Same for feedback (reward vs error, within block $\\times$ stimulus side); "
+              f"{_win('feedback')}."],
+             out_stem,
+             intro=_intro(fold) + " " + _tuning_methods(),
+             xlim=XLIM if fold else (-5.8, 5.8))
+
+
+def _intro(fold=True):
+    return (f"Dorsal cortex maps, mesoscope two-photon imaging (top row; deconvolved activity "
+            f"of isocortex neurons, canonical sessions) vs Brain Wide Map Neuropixels recordings "
+            f"(bottom row; good isocortex units, 2023 release). Each neuron is assigned to a "
+            f"hexagonal bin ({HEX_SIZE*2:.1f}\\,mm vertex to vertex) by its medio-lateral (ML) and "
+            f"antero-posterior (AP) Allen CCF position relative to bregma; "
+            + ("both hemispheres are folded onto the right one (ML $\\to$ $|$ML$|$). " if fold
+               else "both hemispheres shown as recorded. ")
+            + "Grey lines: Allen top-view region boundaries. Trials: choice made and reaction time "
+              "0.08--2\\,s (BWM criteria). Colour scales are shared between the two rows.")
+
+
+def _win(v):
+    """Caption text for the analysis windows of variable v, both modalities."""
+    ev = {"stimOn_times": "stimulus onset", "firstMovement_times": "movement onset",
+          "feedback_times": "feedback"}
+    rng = lambda w: f"$[{w[1]:g}, {w[2]:g}]$\\,s"  # noqa: E731
+    b, m = WINDOWS["bwm"][v], WINDOWS["meso"][v]
+    return f"window {rng(b)} (BWM) or {rng(m)} (mesoscope) relative to {ev[b[0]]}"
+
+
+def _tuning_methods():
+    return (f"Single-neuron tuning: the BWM single-cell test (brainwidemap single\\_cell\\_stats, "
+            f"re-implemented on the GPU and checked against the original), applied identically to "
+            f"both modalities to the mean activity in each window. Mann--Whitney $U$ statistics are "
+            f"computed within condition strata, summed and normalised; the null distribution comes "
+            f"from {N_SHUF} permutations of the condition labels within consecutive blocks, and $p$ "
+            f"is the rank of the observed statistic. Mesoscope windows are 0.3\\,s long because "
+            f"the frame period is about 0.2\\,s.")
+
+
+def _decoding_methods(ver):
+    return (f"Decoding per session and bin, for every session with $\\geq${MIN_TRIALS} trials "
+            f"and $\\geq${MIN_NEURONS} neurons in the bin: 5-fold stratified cross-validation; "
+            f"binary variables with L2-regularised logistic regression (balanced class weights, "
+            f"regularisation chosen by inner 3-fold cross-validation), wheel speed with ridge "
+            f"regression (penalty chosen by leave-one-out error, folds split by trial)."
+            + (" With all neurons, mesoscope bins hold far more neurons than BWM bins, so scores "
+               "are not comparable across rows; see the 10-neuron version." if ver == "all" else
+               " A fixed population size makes the two rows comparable."))
+
+
+if __name__ == "__main__":
+    main()
