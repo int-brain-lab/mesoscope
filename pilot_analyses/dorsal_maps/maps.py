@@ -45,7 +45,8 @@ def outline(ax):
     ax.axvline(0, color="0.55", lw=0.25)
 
 
-def hexmap(ax, keys, values, norm, cmap=CMAP, size=HEX_SIZE):
+def hexmap(ax, keys, values, norm, cmap=CMAP, size=HEX_SIZE, alpha=None):
+    """alpha: optional per-bin opacity (array)."""
     q, r = hex_unkey(np.asarray(keys))
     cx, cy = hex_center(q, r, size)
     hv = HEX_VERTS * size / HEX_SIZE
@@ -53,6 +54,8 @@ def hexmap(ax, keys, values, norm, cmap=CMAP, size=HEX_SIZE):
         if len(cx) else np.zeros((0, 6, 2))
     pc = PolyCollection(verts, array=np.asarray(values, float), cmap=cmap, norm=norm,
                         edgecolors="none", zorder=2)
+    if alpha is not None:
+        pc.set_alpha(np.asarray(alpha, float))
     ax.add_collection(pc)
     return pc
 
@@ -76,8 +79,10 @@ def style_map(ax, row, col, nrows, xlim=XLIM):
 
 
 def map_grid(per_mod, titles, cbar_labels, norms, out_stem, captions, label, intro, xlim=XLIM,
-             rows=MODS, row_names=ROW_NAME, size=HEX_SIZE, out_dir=None):
-    """per_mod[row][c] = (keys, values) for row (modality or session) and column c."""
+             rows=MODS, row_names=ROW_NAME, size=HEX_SIZE, out_dir=None, cmap=CMAP):
+    """per_mod[row][c] = (keys, values) or (keys, values, alpha) for row
+    (modality or session) and column c."""
+    from matplotlib.cm import ScalarMappable
     ncol, nrow = len(titles), len(rows)
     w = NATURE_DOUBLE_COL_IN if ncol > 2 else NATURE_DOUBLE_COL_IN * 0.6
     aspect = (YLIM[1] - YLIM[0]) / (xlim[1] - xlim[0])
@@ -86,8 +91,9 @@ def map_grid(per_mod, titles, cbar_labels, norms, out_stem, captions, label, int
         for r, m in enumerate(rows):
             ax = axs[r, c]
             outline(ax)
-            keys, vals = per_mod[m][c]
-            pc = hexmap(ax, keys, vals, norms[c], size=size)
+            keys, vals, *alpha = per_mod[m][c]
+            hexmap(ax, keys, vals, norms[c], cmap=cmap, size=size, alpha=alpha[0] if alpha else None)
+            pc = ScalarMappable(norm=norms[c], cmap=cmap)
             style_map(ax, r, c, nrow, xlim)
             if r == 0:
                 ax.set_title(titles[c])
@@ -299,7 +305,9 @@ def decoding_scatter(dec, ver, targets):
                f"score averaged across those sessions (same values as the decoding maps). Colour: "
                f"AP position of the bin. Dashed line: identity; grey lines: chance (0.5 balanced "
                f"accuracy, 0 for $R^2$). The $p$-values ignore spatial autocorrelation between "
-               f"neighbouring bins and are therefore optimistic."
+               f"neighbouring bins and are far too small; tested against surrogate maps that keep the "
+               f"spatial autocorrelation, none of these correlations is significant at $p<0.05$ except "
+               f"wheel speed with 10 neurons ($p=0.044$; Supplementary Information, spatial null)."
                + (" With all neurons, mesoscope bins hold far more neurons than BWM bins, which "
                   "inflates the mesoscope scores." if ver == "all" else "")))
     plt.close(fig)

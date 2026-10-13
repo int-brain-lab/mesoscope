@@ -20,7 +20,7 @@
 \maketitle
 
 \section*{Summary}
-We compare dorsal cortex maps of single-neuron tuning and population decoding between two-photon mesoscope imaging (153 sessions, 1{,}080{,}309 isocortex neurons) and Brain Wide Map Neuropixels recordings (288 sessions, 13{,}002 good isocortex units). Each neuron is assigned to one hexagonal bin (0.4\,mm vertex to vertex) by its medio-lateral and antero-posterior position, and both datasets go through the same trial selection, tuning test and decoders (Fig.~\ref{fig:fig1_windows}--\ref{fig:fig7_decoding_all_scatter}). The Supplementary Information addresses the questions raised on the first version (Section~\ref{sec:controls}, Figs.~S1--S10).
+We compare dorsal cortex maps of single-neuron tuning and population decoding between two-photon mesoscope imaging (153 sessions, 1{,}080{,}309 isocortex neurons) and Brain Wide Map Neuropixels recordings (288 sessions, 13{,}002 good isocortex units). Each neuron is assigned to one hexagonal bin (0.4\,mm vertex to vertex) by its medio-lateral and antero-posterior position, and both datasets go through the same trial selection, tuning test and decoders (Fig.~\ref{fig:fig1_windows}--\ref{fig:fig7_decoding_all_scatter}). The Supplementary Information addresses the questions raised on the first version (Section~\ref{sec:controls}, Figs.~S1--S10) and on the second version (Section~\ref{sec:controls2}, Figs.~S11--S19).
 
 \begin{table}[h]
 \centering\small
@@ -40,6 +40,8 @@ Decoding, 10 neurons: wheel speed $R^2$ & 0.01 & 0.14 \\
 \end{table}
 
 \textbf{Main findings.} Both datasets show a frontal hotspot of feedback tuning, and the mesoscope shows a visual-cortex hotspot for stimulus side (Fig.~\ref{fig:fig3_tuning}, \ref{fig:fig4_decoding_n10}). With matched population size (10 neurons), stimulus side decodes equally well in both datasets, while choice, feedback and especially wheel speed decode better from BWM. Across the 150 bins covered by both datasets, the bins that decode feedback and wheel speed better in BWM also do so in the mesoscope (Spearman $r_s = 0.26$ and $0.31$), while stimulus side and choice show no bin-level agreement (Fig.~\ref{fig:fig5_decoding_n10_scatter}).
+
+\textbf{Second round of controls (Figs.~S11--S19).} (i) The bin-wise correlations between the modalities are not significant once spatial autocorrelation is taken into account (1 of 27 comparisons at $p<0.05$), although almost all are positive and of the size allowed by the moderate reliability of each map across animals. (ii) The mesoscope stimulus-side hotspot in SSp-ul / lateral MOp comes mainly from one mouse (SP075). (iii) Restricting stimulus side to high contrasts brings out visual cortex in both modalities. (iv) Decoding from the 10 most selective or the 10 most active neurons of a bin raises mesoscope scores a lot (wheel $R^2$ 0.01 $\to$ 0.07, feedback 0.61 $\to$ 0.74), but with the selection pool matched to the BWM bin size the mesoscope stays below BWM for choice, feedback and wheel speed.
 
 \textbf{Correction to the first version.} 55 of the 153 mesoscope sessions have no biased blocks. The BWM tuning test only compares conditions within the 0.8 and 0.2 blocks, so in the first version these neurons received no $p$-value and were counted as untuned. They are now tested within their 0.5 block, and neurons without a $p$-value are excluded from the maps. Mesoscope fractions tuned rose from 0.080 / 0.067 / 0.150 to 0.147 / 0.107 / 0.254 (stimulus side / choice / feedback); BWM numbers and all decoding results are unchanged. The decoding maps now also share one colour scale across the three binary variables.
 
@@ -90,6 +92,24 @@ No. Re-analysing the same BWM units with the 0.3\,s mesoscope windows leaves cho
 \paragraph{5. Why is wheel speed so much worse in the mesoscope?}
 The wheel bins are the same 0.2\,s in both datasets, and frame sampling of BWM spikes (one sample per 0.205\,s, read out like a mesoscope trace) barely changes BWM wheel decoding ($R^2$ 0.144 $\to$ 0.133; Fig.~\ref{fig:si_windows}b), so slow sampling is not the reason. Recording depth contributes: within the same BWM sessions, superficial units (L1--2/3, the layers the mesoscope records) decode wheel speed worse than deep units (L5--6; $R^2$ 0.10 vs 0.16, $p<10^{-4}$, 49 sessions), and the same holds for choice and feedback (Fig.~\ref{fig:si_layers}). But superficial BWM units still decode far better than mesoscope neurons ($R^2$ 0.09--0.10 vs 0.01; choice 0.57 vs 0.52), also when frame-sampled with 0.3\,s windows. The remaining gap is therefore most likely in the signal itself: deconvolved calcium activity is a noisier and nonlinear readout of spiking, and the mesoscope population includes many weakly active or silent ROIs (60\,\% of window values are zero), whereas BWM good units are selected for quality.
 
+
+\subsection*{Second round of controls}
+\label{sec:controls2}
+\paragraph{6. Stricter inclusion and a colour map that shows data support.}
+Figs.~\ref{fig:si_strict_tuning}--\ref{fig:si_strict_hex1mm_decoding} keep only bins with $\geq$3 sessions from $\geq$2 animals (each session contributing $\geq$10 neurons), use an isoluminant colour map and let the opacity encode the number of animals (2: 50\,\%, 3: 75\,\%, $\geq$4: 100\,\%). This keeps 177 of 224 mesoscope bins but only 45 of 194 BWM bins at 0.4\,mm (39 and 41 bins at 1\,mm); only 26 bins pass in both modalities at 0.4\,mm. The mean scores barely change.
+
+\paragraph{7. Is the mesoscope stimulus-side hotspot (SSp-ul / lateral MOp) driven by one animal?}
+Mostly, yes (Fig.~\ref{fig:si_stim_hotspot}). Six of 12 mice have sessions there, but 75\,\% of the hotspot sessions come from two mice, SP075 (all 15 of its sessions) and SP081 (12). SP075 decodes stimulus side well everywhere and best in the hotspot. Without SP075 the hotspot's advantage over the rest of cortex drops from 0.059 to 0.018 balanced accuracy. Without both mice, the hotspot bins score no higher than the other bins of the same session (mean difference $-0.005$), and the hotspot has fewer stimulus-tuned neurons than the rest of cortex (0.095 vs 0.142).
+
+\paragraph{8. Are the bin-wise Spearman correlations significant?}
+Not individually (Fig.~\ref{fig:si_spatial_null}). Both maps are spatially smooth, so neighbouring bins are not independent and the naive $p$-values are far too small: for two independent smooth random maps on the same 150 bins (1\,mm length scale), naive $p<0.05$ occurred in 47\,\% of 100 simulations. We therefore compared each observed correlation with surrogate maps that keep the spatial autocorrelation (variogram) of either map (Burt et al.\ 2020), which gave 6\,\% false positives in the same simulation. Of 27 comparisons (decoding from random, all or the most selective neurons; original, strict and 1\,mm bins; fraction tuned), 12 have naive $p<0.05$ but only one has spatial $p<0.05$ (wheel speed, 10 random neurons, $r_s=0.31$, $p=0.044$, uncorrected). Still, 25 of the 27 correlations are positive, and for feedback and wheel speed they reach 0.2--0.4. The maps themselves are only moderately reproducible across animals (split-half reliability 0.06--0.71 per modality), which caps any cross-modality correlation at about 0.3--0.6. So the data are compatible with shared patterns for feedback and wheel speed, but these maps cannot establish them.
+
+\paragraph{9. Unit selection.}
+The new mesoscope QC metrics and the maskNMF outputs are not on Alyx yet, so this point is open; we can rerun everything once they are available. As stand-ins, decoders were fit on the 10 neurons of each session $\times$ bin with the highest fraction of non-zero activity (label-free) or on the 10 most selective neurons, a cheap approximation to a sparse L1 decoder, with the selection made inside each training fold (Fig.~\ref{fig:si_selection}, \ref{fig:si_strict_decoding_top}). Both raise mesoscope decoding substantially: most selective vs random, stimulus side 0.532 $\to$ 0.591, choice 0.520 $\to$ 0.558, feedback 0.614 $\to$ 0.740, wheel $R^2$ 0.014 $\to$ 0.072. BWM gains less (0.529 $\to$ 0.542, 0.585 $\to$ 0.625, 0.638 $\to$ 0.695, 0.144 $\to$ 0.226). Part of the mesoscope gain comes from pool size: a mesoscope session has a median of 140 neurons in a bin vs 24 for BWM. Selecting from 24 random neurons gives 0.549, 0.532, 0.660 and $R^2$ 0.026, so at matched pool size the mesoscope matches BWM for stimulus side and stays below it for choice, feedback and, by far, wheel speed. That most of the gain comes from label-free activity selection supports the idea that many mesoscope ROIs carry little signal.
+
+\paragraph{10. High-contrast stimuli.}
+With trials at contrast $\geq$25\,\% only (Fig.~\ref{fig:si_high_contrast}), stimulus side decodes better in both modalities (all neurons: mesoscope 0.63, BWM 0.56). Visual cortex stands out more clearly: decoding from bins dominated by VIS neurons exceeds other bins by 0.033 in the mesoscope (0.011 with all contrasts) and by 0.078 in BWM (0.034). The fraction of tuned neurons does not show this, because with 40\,\% of the trials the test has less power.
+
 \input{si/dorsal_tuning.tex}
 \input{si/si_tuning_sessions.tex}
 \input{si/si_tuning_variance.tex}
@@ -100,5 +120,14 @@ The wheel bins are the same 0.2\,s in both datasets, and frame sampling of BWM s
 \input{si/si_hex1mm_decoding.tex}
 \input{si/si_windows.tex}
 \input{si/si_layers.tex}
+\input{si/si_strict_tuning.tex}
+\input{si/si_strict_decoding_n10.tex}
+\input{si/si_strict_decoding_all.tex}
+\input{si/si_strict_hex1mm_decoding.tex}
+\input{si/si_stim_hotspot.tex}
+\input{si/si_spatial_null.tex}
+\input{si/si_selection.tex}
+\input{si/si_strict_decoding_top.tex}
+\input{si/si_high_contrast.tex}
 
 \end{document}

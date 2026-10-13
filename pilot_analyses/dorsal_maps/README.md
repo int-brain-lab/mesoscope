@@ -34,13 +34,22 @@ python decode.py bwm_w03 && python decode.py bwm_w03 --features _fr
 python decode.py bwm meso --hex 0.5 --n10-only   # 1 mm bins
 python layers.py bwm meso bwm_w03 && python layers.py bwm_w03 --features _fr
 python controls.py                        # si_* figures, output/controls_summary.csv
+
+# second round of controls
+python selection.py meso bwm              # top-10 / most-active / high-contrast decoding
+python selection.py meso --pool 24        # pool-size control
+python tuning.py meso bwm --min-contrast 0.25
+python controls2.py                       # si_strict_*, si_stim_hotspot, si_spatial_null,
+                                          # si_selection, si_high_contrast; output/controls2_summary.csv
 python build_report.py                    # report/: LaTeX report, compiled with tectonic
 ```
 
 `report/` holds the LaTeX report: `main.tex` (text), one folder per main
 figure in `report/figures/`, all supplementary figures in `report/si/`.
 Figure panels and captions are copied from `output/` by `build_report.py`,
-so captions are edited in `maps.py` / `controls.py`.
+so captions are edited in `maps.py` / `controls.py` / `controls2.py`.
+`controls2.py` needs `output/session_subjects.csv` (session -> subject, from
+`one.eid2path`).
 
 `FEATURE_ROOT` is `~/Downloads/ONE/alyx.internationalbrainlab.org/dorsal_maps`.
 Signal and spike files downloaded by the extraction are deleted afterwards
@@ -51,6 +60,14 @@ to save disk space.
 - `gpu_decode.py`: batched torch decoders. They match the sklearn references
   at tight solver tolerance.
 - `sessions.py`: loads the per-session feature files.
+- `selection.py`: decoding from the 10 most selective neurons of a bin. They
+  are picked on the training trials of each outer fold, so held-out trials
+  never influence the selection; with shuffled labels the scores are at
+  chance. Fold-specific neuron sets are supported by `gpu_decode`.
+- `controls2.py`: spatial null for map correlations. Variogram-matched
+  surrogate maps (Burt et al. 2020, BrainSMASH "Base" algorithm, in torch).
+  On independent smooth random maps over the real bin layout it gives 6%
+  false positives at p < 0.05, against 47% for the naive Spearman p.
 
 ## Choices and caveats
 

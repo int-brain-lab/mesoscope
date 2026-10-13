@@ -26,6 +26,10 @@ constant columns). For one set all 5 folds x (3 inner + 1 outer fit) x
 len(Cs) logistic fits are solved at once by batched Newton steps; sets are
 grouped into chunks bounded by GPU memory. Folds depend only on the labels
 and are computed once per label vector.
+
+Fold-specific sets: a set may also be an int array (n_folds, p), one index
+row per outer fold (e.g. neurons selected on that fold's training trials,
+see selection.py); outer_train() gives the training masks to select on.
 """
 from functools import lru_cache
 
@@ -43,7 +47,13 @@ MAX_ELEMS = 1.5e8  # per chunk: bound on the largest intermediate (floats)
 # ---------------------------------------------------------------------------
 def _gather(F, sets):
     """F (N, n) tensor, sets: list of index arrays -> (G, N, pmax) with zero
-    padding, plus the number of non-constant columns per set."""
+    padding, plus the number of non-constant columns per set. Fold-specific
+    sets (all (n_folds, p) arrays) give (G, n_folds, N, p) and the smallest
+    number of non-constant columns over folds."""
+    if np.ndim(sets[0]) == 2:
+        idx = torch.as_tensor(np.stack(sets), device=F.device)         # (G, k, p)
+        X = F[:, idx].permute(1, 2, 0, 3)                              # (G, k, N, p)
+        return X, (X.std(2) > 0).sum(2).min(1).values
     pmax = max(len(s) for s in sets)
     pad = F.shape[1]
     idx = np.full((len(sets), pmax), pad)
@@ -55,12 +65,17 @@ def _gather(F, sets):
     return X, n_var
 
 
+def _size(s):
+    """Number of neurons in a set; fold-specific sets count once per fold."""
+    return np.shape(s)[-1] * (np.shape(s)[0] if np.ndim(s) == 2 else 1)
+
+
 def _chunks(sets, cost):
     """Greedy chunks of set indices (sorted by size) with sum of cost(pmax) per set bounded."""
-    order = np.argsort([len(s) for s in sets], kind="stable")
+    order = np.argsort([_size(s) for s in sets], kind="stable")
     chunks, cur = [], []
     for g in order:
-        p = len(sets[g])
+        p = _size(sets[g])
         if cur and (len(cur) + 1) * cost(p) > MAX_ELEMS:
             chunks.append(cur)
             cur = []
@@ -71,14 +86,17 @@ def _chunks(sets, cost):
 
 
 def _standardise(X, train):
-    """X (G, N, p) float64, train (k, N) bool -> (G, k, N, p): standardised on
-    each fold's training rows (population sd, sd 0 -> 1, as StandardScaler)."""
+    """X (G, N, p) or fold-specific (G, k, N, p) float64, train (k, N) bool
+    -> (G, k, N, p): standardised on each fold's training rows (population
+    sd, sd 0 -> 1, as StandardScaler)."""
+    if X.dim() == 3:
+        X = X[:, None]
     w = train.to(X.dtype)[None, :, :, None]                    # (1, k, N, 1)
     n = w.sum(2, keepdim=True)
-    mu = (X[:, None] * w).sum(2, keepdim=True) / n             # (G, k, 1, p)
-    sd = (((X[:, None] - mu) ** 2) * w).sum(2, keepdim=True).div(n).sqrt()
+    mu = (X * w).sum(2, keepdim=True) / n                      # (G, k, 1, p)
+    sd = (((X - mu) ** 2) * w).sum(2, keepdim=True).div(n).sqrt()
     sd = torch.where(sd == 0, torch.ones_like(sd), sd)
-    return (X[:, None] - mu) / sd
+    return (X - mu) / sd
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +168,17 @@ def _binary_folds(y_bytes, n, seed, n_folds):
     return train, W, test
 
 
+def outer_train(y, seed=0, n_folds=5):
+    """Outer-fold training masks (n_folds, n_trials) used by decode_binary."""
+    y = np.asarray(y).astype(np.int64)
+    return _binary_folds(y.tobytes(), len(y), seed, n_folds)[0]
+
+
+def outer_train_wheel(nt, nb, seed=0, n_folds=5):
+    """Outer-fold training masks (n_folds, nt * nb) used by decode_wheel."""
+    return _trial_folds(nt, nb, seed, n_folds)
+
+
 def _bal_acc(y, pred, mask):
     """Balanced accuracy over the last axis restricted to mask; y (N,)."""
     acc = 0
@@ -181,7 +210,7 @@ def decode_binary(F, sets, y, seed=0, n_folds=5, Cs=CS, dtype=torch.float32):
     cost = lambda p: n_folds * K * max(N * (p + 1), (p + 1) ** 2)  # noqa: E731
     for chunk in _chunks(sets, cost):
         X, n_var = _gather(F, [sets[g] for g in chunk])
-        G, _, p = X.shape
+        G, p = X.shape[0], X.shape[-1]
         Xo = _standardise(X, train).to(dtype)                    # (G, k, N, p)
         Xa = torch.cat([Xo, torch.ones(G, n_folds, N, 1, dtype=dtype, device=DEVICE)], 3)
         Xa = Xa.reshape(G * n_folds, N, p + 1)
@@ -233,7 +262,7 @@ def decode_wheel(F, sets, y, seed=0, n_folds=5, alphas=ALPHAS):
         pred = torch.empty(G, n, dtype=torch.float64, device=DEVICE)
         for k in range(n_folds):
             itr = train[k]
-            Xs = _standardise(X, itr[None])[:, 0]                 # (G, n, p)
+            Xs = _standardise(X[:, k] if X.dim() == 4 else X, itr[None])[:, 0]  # (G, n, p)
             A, b = Xs[:, itr], yf[itr]
             Am, bm = A.mean(1, keepdim=True), b.mean()
             Ac, bc = A - Am, b - bm

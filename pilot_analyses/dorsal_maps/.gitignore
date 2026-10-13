@@ -4,3 +4,6 @@ output/*_panels.pdf
 !output/dorsal_maps_summary.csv
 !output/meso_region_sources.csv
 !output/controls_summary.csv
+!output/controls2_summary.csv
+!output/si_spatial_null.csv
+!output/session_subjects.csv

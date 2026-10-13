@@ -35,6 +35,16 @@ SI = [
     "si_hex1mm_decoding",       # S8
     "si_windows",               # S9
     "si_layers",                # S10
+    # second round (controls2.py)
+    "si_strict_tuning",         # S11
+    "si_strict_decoding_n10",   # S12
+    "si_strict_decoding_all",   # S13
+    "si_strict_hex1mm_decoding",  # S14
+    "si_stim_hotspot",          # S15
+    "si_spatial_null",          # S16
+    "si_selection",             # S17
+    "si_strict_decoding_top",   # S18
+    "si_high_contrast",         # S19
 ]
 
 
