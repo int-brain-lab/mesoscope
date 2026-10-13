@@ -20,13 +20,17 @@ def session_files(modality):
     return dict(groups)
 
 
-def load_session(files):
+def load_session(files, features=""):
     """Dict with xyz, atlas_id, X_task (n, T, 3), X_wheel (n, T, 6),
-    wheel_y (T, 6) and the trial labels; neurons of all files concatenated."""
+    wheel_y (T, 6) and the trial labels; neurons of all files concatenated.
+    features: suffix of the stored feature arrays to load as X_task / X_wheel
+    (e.g. "_fr" for the frame-sampled BWM control)."""
     zs = [dict(np.load(f)) for f in files]
     T = {len(z["choice"]) for z in zs}
     assert len(T) == 1, f"trial count differs across probes of one session: {files}"
     out = {k: zs[0][k] for k in LABEL_KEYS + ("wheel_y",)}
-    for k in ("xyz", "atlas_id", "X_task", "X_wheel"):
+    for k in ("xyz", "atlas_id"):
         out[k] = np.concatenate([z[k] for z in zs])
+    for k in ("X_task", "X_wheel"):
+        out[k] = np.concatenate([z[k + features] for z in zs])
     return out

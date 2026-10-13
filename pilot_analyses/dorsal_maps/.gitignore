@@ -3,3 +3,4 @@ output/*
 output/*_panels.pdf
 !output/dorsal_maps_summary.csv
 !output/meso_region_sources.csv
+!output/controls_summary.csv

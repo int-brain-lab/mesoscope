@@ -18,7 +18,6 @@ threads. Sessions with fewer than MIN_TRIALS valid trials are skipped.
 
 Writes output/decoding_<modality>.pqt.
 """
-import sys
 import warnings
 import zlib
 from concurrent.futures import ThreadPoolExecutor
@@ -27,7 +26,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-from common import MIN_NEURONS, OUT, bin_neurons
+from common import HEX_SIZE, MIN_NEURONS, OUT, bin_neurons
 from gpu_decode import DEVICE, decode_binary, decode_wheel
 from sessions import load_session, session_files
 
@@ -36,50 +35,74 @@ MIN_TRIALS = 50
 TARGETS = ("stim", "choice", "feedback", "wheel")
 
 
-def run_session(sid, s):
+def decode_sets(s, sets):
+    """Scores of every neuron set (index arrays into the session's neurons)
+    for each target, decoded together on the GPU -> {target: (len(sets),)}."""
+    Xt = torch.as_tensor(s["X_task"], device=DEVICE)  # (n, T, 3)
+    return {"stim": decode_binary(Xt[:, :, 0].T, sets, s["stim_left"]),
+            "choice": decode_binary(Xt[:, :, 1].T, sets, (s["choice"] == 1).astype(int)),
+            "feedback": decode_binary(Xt[:, :, 2].T, sets, s["reward"]),
+            "wheel": decode_wheel(torch.as_tensor(s["X_wheel"], device=DEVICE).permute(1, 2, 0),
+                                  sets, s["wheel_y"])}
+
+
+def run_session(sid, s, hex_size=HEX_SIZE, n10_only=False):
     if len(s["choice"]) < MIN_TRIALS:
         return pd.DataFrame()
-    keys = bin_neurons(s["xyz"])
+    keys = bin_neurons(s["xyz"], size=hex_size)
     rng = np.random.default_rng(zlib.crc32(sid.encode()))
-    bins, sets = [], []  # per bin: the full set, then N_DRAWS random subsets
+    bins, sets = [], []  # per bin: the full set (unless n10_only), then N_DRAWS random subsets
     for k in np.unique(keys):
         idx = np.flatnonzero(keys == k)
         if idx.size < MIN_NEURONS:
             continue
         bins.append((int(k), idx.size))
-        sets += [idx] + [rng.choice(idx, MIN_NEURONS, replace=False) for _ in range(N_DRAWS)]
+        sets += ([] if n10_only else [idx]) + [rng.choice(idx, MIN_NEURONS, replace=False)
+                                               for _ in range(N_DRAWS)]
     if not bins:
         return pd.DataFrame()
-    Xt = torch.as_tensor(s["X_task"], device=DEVICE)  # (n, T, 3); all sets decoded at once on the GPU
-    sc = {"stim": decode_binary(Xt[:, :, 0].T, sets, s["stim_left"]),
-          "choice": decode_binary(Xt[:, :, 1].T, sets, (s["choice"] == 1).astype(int)),
-          "feedback": decode_binary(Xt[:, :, 2].T, sets, s["reward"]),
-          "wheel": decode_wheel(torch.as_tensor(s["X_wheel"], device=DEVICE).permute(1, 2, 0),
-                                sets, s["wheel_y"])}
+    sc = decode_sets(s, sets)
+    per = N_DRAWS + (0 if n10_only else 1)
     rows = []
     for b, (k, n) in enumerate(bins):
         for t in TARGETS:
-            v = sc[t][b * (N_DRAWS + 1):(b + 1) * (N_DRAWS + 1)]
+            v = sc[t][b * per:(b + 1) * per]
             rows.append(dict(session=sid, hex=k, n_neurons=n, n_trials=len(s["choice"]),
-                             target=t, all=v[0], n10=np.nanmean(v[1:])))
+                             target=t, all=np.nan if n10_only else v[0],
+                             n10=np.nanmean(v[-N_DRAWS:])))
     return pd.DataFrame(rows)
 
 
-def run(modality):
+def out_name(modality, features="", hex_size=HEX_SIZE):
+    tag = modality + features + ("" if hex_size == HEX_SIZE else f"_hex{hex_size:g}")
+    return OUT / f"decoding_{tag}.pqt"
+
+
+def run(modality, features="", hex_size=HEX_SIZE, n10_only=False):
+    """features: suffix of the feature arrays to use (e.g. "_fr" for the
+    frame-sampled BWM control)."""
     warnings.filterwarnings("ignore")
     groups = list(session_files(modality).items())
     res = []
     with ThreadPoolExecutor(2) as pool:  # load ahead while the GPU decodes
-        loaded = pool.map(lambda g: load_session(g[1]), groups)
+        loaded = pool.map(lambda g: load_session(g[1], features), groups)
         for i, ((sid, _), s) in enumerate(zip(groups, loaded)):
-            df = run_session(sid, s)
+            df = run_session(sid, s, hex_size, n10_only)
             res.append(df)
-            print(modality, i + 1, len(groups), sid, len(df), flush=True)
+            print(modality, features, i + 1, len(groups), sid, len(df), flush=True)
     out = pd.concat(res, ignore_index=True)
-    out.to_parquet(OUT / f"decoding_{modality}.pqt")
+    out.to_parquet(out_name(modality, features, hex_size))
     return out
 
 
 if __name__ == "__main__":
-    for m in (sys.argv[1:] or ["meso", "bwm"]):
-        run(m)
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("modality", nargs="*", default=["meso", "bwm"],
+                    help="meso, bwm, or bwm_w03 (BWM with the mesoscope windows)")
+    ap.add_argument("--features", default="", help='feature suffix, e.g. "_fr"')
+    ap.add_argument("--hex", type=float, default=HEX_SIZE, help="hexagon centre-to-vertex size, mm")
+    ap.add_argument("--n10-only", action="store_true", help="skip the all-neuron decoders")
+    a = ap.parse_args()
+    for m in a.modality:
+        run(m, a.features, a.hex, a.n10_only)

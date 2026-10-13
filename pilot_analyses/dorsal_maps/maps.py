@@ -45,10 +45,11 @@ def outline(ax):
     ax.axvline(0, color="0.55", lw=0.25)
 
 
-def hexmap(ax, keys, values, norm, cmap=CMAP):
+def hexmap(ax, keys, values, norm, cmap=CMAP, size=HEX_SIZE):
     q, r = hex_unkey(np.asarray(keys))
-    cx, cy = hex_center(q, r)
-    verts = np.stack([np.c_[x + HEX_VERTS[:, 0], y + HEX_VERTS[:, 1]] for x, y in zip(cx, cy)]) \
+    cx, cy = hex_center(q, r, size)
+    hv = HEX_VERTS * size / HEX_SIZE
+    verts = np.stack([np.c_[x + hv[:, 0], y + hv[:, 1]] for x, y in zip(cx, cy)]) \
         if len(cx) else np.zeros((0, 6, 2))
     pc = PolyCollection(verts, array=np.asarray(values, float), cmap=cmap, norm=norm,
                         edgecolors="none", zorder=2)
@@ -74,25 +75,26 @@ def style_map(ax, row, col, nrows, xlim=XLIM):
         ax.set_yticklabels([])
 
 
-def map_grid(per_mod, titles, cbar_labels, norms, out_stem, captions, label, intro, xlim=XLIM):
-    """per_mod[m][c] = (keys, values) for modality m and column c."""
-    ncol = len(titles)
+def map_grid(per_mod, titles, cbar_labels, norms, out_stem, captions, label, intro, xlim=XLIM,
+             rows=MODS, row_names=ROW_NAME, size=HEX_SIZE, out_dir=None):
+    """per_mod[row][c] = (keys, values) for row (modality or session) and column c."""
+    ncol, nrow = len(titles), len(rows)
     w = NATURE_DOUBLE_COL_IN if ncol > 2 else NATURE_DOUBLE_COL_IN * 0.6
     aspect = (YLIM[1] - YLIM[0]) / (xlim[1] - xlim[0])
-    fig, axs = plt.subplots(2, ncol, figsize=(w, w / ncol * 2 * aspect + 0.6), squeeze=False)
+    fig, axs = plt.subplots(nrow, ncol, figsize=(w, w / ncol * nrow * aspect + 0.6), squeeze=False)
     for c in range(ncol):
-        for r, m in enumerate(MODS):
+        for r, m in enumerate(rows):
             ax = axs[r, c]
             outline(ax)
             keys, vals = per_mod[m][c]
-            pc = hexmap(ax, keys, vals, norms[c])
-            style_map(ax, r, c, 2, xlim)
+            pc = hexmap(ax, keys, vals, norms[c], size=size)
+            style_map(ax, r, c, nrow, xlim)
             if r == 0:
                 ax.set_title(titles[c])
                 ax.text(-0.12 if c else -0.3, 1.1, chr(ord("a") + c), transform=ax.transAxes,
                         fontsize=8, fontweight="bold", va="bottom")
             if c == 0:
-                ax.text(-0.42, 0.5, ROW_NAME[m], transform=ax.transAxes, rotation=90,
+                ax.text(-0.42, 0.5, row_names[m], transform=ax.transAxes, rotation=90,
                         va="center", ha="center", fontsize=7)
         cb = fig.colorbar(pc, ax=axs[:, c], orientation="horizontal", fraction=0.04, pad=0.09,
                           aspect=15)
@@ -101,7 +103,7 @@ def map_grid(per_mod, titles, cbar_labels, norms, out_stem, captions, label, int
         if not isinstance(norms[c], LogNorm):
             cb.locator = plt.MaxNLocator(3)
             cb.update_ticks()
-    save_with_caption(fig, OUT / out_stem, captions, label=label, intro=intro)
+    save_with_caption(fig, (out_dir or OUT) / out_stem, captions, label=label, intro=intro)
     plt.close(fig)
 
 
@@ -150,7 +152,11 @@ def main():
         for m in MODS:
             g = dec[m].groupby(["target", "hex"])[ver].mean()
             per[m] = [(g[t].dropna().index, g[t].dropna().values) for t in targets]
-        norms = [joint_norm([per[m][i][1] for m in MODS], lo=0.5 if t != "wheel" else None)
+        # one scale for the three binary targets (0.5 = chance), so colour differences
+        # between variables are not exaggerated by per-panel scales
+        binary = joint_norm([per[m][i][1] for m in MODS for i, t in enumerate(targets) if t != "wheel"],
+                            lo=0.5)
+        norms = [binary if t != "wheel" else joint_norm([per[m][i][1] for m in MODS], lo=0)
                  for i, t in enumerate(targets)]
         who = ("all neurons of the session in the bin" if ver == "all" else
                f"{MIN_NEURONS} randomly drawn neurons of the session in the bin (mean of {N_DRAWS} draws)")
@@ -177,7 +183,7 @@ def main():
     for m in MODS:
         for v in VARIABLES:
             summary.append(dict(modality=m, measure=f"frac_sig_{v}",
-                                mean=float(np.mean(tun[m][f"p_{v}"] < ALPHA))))
+                                mean=float(np.mean(tun[m][f"p_{v}"].dropna() < ALPHA))))
     tuning_maps(tun, "dorsal_tuning", fold=True)
     tuning_maps(tun, "dorsal_tuning_unfolded", fold=False)
     pd.DataFrame(summary).to_csv(OUT / "dorsal_maps_summary.csv", index=False)
@@ -308,7 +314,8 @@ def tuning_maps(tun, out_stem, fold):
         keys = bin_neurons(tun[m][["x", "y", "z"]].values, fold=fold)
         cols = []
         for v in VARIABLES:
-            g = (tun[m][f"p_{v}"] < ALPHA).groupby(keys)
+            ok = tun[m][f"p_{v}"].notna().values  # neurons the test could be run on
+            g = (tun[m][f"p_{v}"][ok] < ALPHA).groupby(keys[ok])
             frac = g.mean()[g.count() >= MIN_NEURONS]
             cols.append((frac.index, frac.values))
         per[m] = cols
@@ -363,7 +370,8 @@ def _decoding_methods(ver):
             f"and $\\geq${MIN_NEURONS} neurons in the bin: 5-fold stratified cross-validation; "
             f"binary variables with L2-regularised logistic regression (balanced class weights, "
             f"regularisation chosen by inner 3-fold cross-validation), wheel speed with ridge "
-            f"regression (penalty chosen by leave-one-out error, folds split by trial)."
+            f"regression (penalty chosen by leave-one-out error, folds split by trial). The three "
+            f"binary variables share one colour scale starting at chance (0.5)."
             + (" With all neurons, mesoscope bins hold far more neurons than BWM bins, so scores "
                "are not comparable across rows; see the 10-neuron version." if ver == "all" else
                " A fixed population size makes the two rows comparable."))

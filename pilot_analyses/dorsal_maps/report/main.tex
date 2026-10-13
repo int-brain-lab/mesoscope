@@ -1,0 +1,104 @@
+\documentclass[10pt]{article}
+\usepackage[T1]{fontenc}
+\usepackage{helvet}
+\renewcommand{\familydefault}{\sfdefault}
+\usepackage[a4paper,margin=0.65in]{geometry}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage[font={sf,footnotesize},labelfont={sf,bf,footnotesize},justification=justified,singlelinecheck=false]{caption}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=black,urlcolor=blue!50!black}
+\setlength{\parskip}{0.4em}
+\setlength{\parindent}{0pt}
+
+\title{Mesoscope vs BWM: supervised decoding of task variables}
+\author{Michael Schartner}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section*{Summary}
+We compare dorsal cortex maps of single-neuron tuning and population decoding between two-photon mesoscope imaging (153 sessions, 1{,}080{,}309 isocortex neurons) and Brain Wide Map Neuropixels recordings (288 sessions, 13{,}002 good isocortex units). Each neuron is assigned to one hexagonal bin (0.4\,mm vertex to vertex) by its medio-lateral and antero-posterior position, and both datasets go through the same trial selection, tuning test and decoders (Fig.~\ref{fig:fig1_windows}--\ref{fig:fig7_decoding_all_scatter}). The Supplementary Information addresses the questions raised on the first version (Section~\ref{sec:controls}, Figs.~S1--S10).
+
+\begin{table}[h]
+\centering\small
+\begin{tabular}{lrr}
+\toprule
+ & Mesoscope & BWM \\
+\midrule
+Sessions & 153 & 288 \\
+Isocortex neurons & 1{,}080{,}309 & 13{,}002 \\
+Session $\times$ bin pairs with $\geq$10 neurons & 6{,}396 & 377 \\
+Fraction tuned: stimulus side / choice / feedback & 0.147 / 0.107 / 0.254 & 0.069 / 0.108 / 0.294 \\
+Decoding, 10 neurons: stimulus side / choice / feedback & 0.53 / 0.52 / 0.61 & 0.53 / 0.58 / 0.64 \\
+Decoding, 10 neurons: wheel speed $R^2$ & 0.01 & 0.14 \\
+\bottomrule
+\end{tabular}
+\caption*{Headline numbers. Fractions tuned are pooled over testable neurons ($p<0.05$); decoding scores are balanced accuracy (chance 0.5) or $R^2$ (chance 0), averaged over session $\times$ bin pairs.}
+\end{table}
+
+\textbf{Main findings.} Both datasets show a frontal hotspot of feedback tuning, and the mesoscope shows a visual-cortex hotspot for stimulus side (Fig.~\ref{fig:fig3_tuning}, \ref{fig:fig4_decoding_n10}). With matched population size (10 neurons), stimulus side decodes equally well in both datasets, while choice, feedback and especially wheel speed decode better from BWM. Across the 150 bins covered by both datasets, the bins that decode feedback and wheel speed better in BWM also do so in the mesoscope (Spearman $r_s = 0.26$ and $0.31$), while stimulus side and choice show no bin-level agreement (Fig.~\ref{fig:fig5_decoding_n10_scatter}).
+
+\textbf{Correction to the first version.} 55 of the 153 mesoscope sessions have no biased blocks. The BWM tuning test only compares conditions within the 0.8 and 0.2 blocks, so in the first version these neurons received no $p$-value and were counted as untuned. They are now tested within their 0.5 block, and neurons without a $p$-value are excluded from the maps. Mesoscope fractions tuned rose from 0.080 / 0.067 / 0.150 to 0.147 / 0.107 / 0.254 (stimulus side / choice / feedback); BWM numbers and all decoding results are unchanged. The decoding maps now also share one colour scale across the three binary variables.
+
+\section*{Methods}
+\paragraph{Data selection.}
+\emph{Mesoscope:} 153 of the 165 canonical sessions; 9 sessions (subjects SP072, SP075, SP076) have no region or position datasets on Alyx and 3 have inconsistent frame times. Neurons are ROIs classified as neurons, labelled isocortex (Allen Cosmos level) and with a valid position; region labels and positions are the latest on Alyx (histology-registered in 25 sessions, estimates otherwise). Activity is the deconvolved trace. \emph{BWM:} 2023 release, 351 insertions in 288 sessions; good units labelled isocortex; activity is the firing rate (spike count / window length). \emph{Trials:} BWM criteria for both datasets: all event times present, a choice was made and reaction time 0.08--2\,s. Sessions need at least 50 such trials.
+
+\paragraph{Windows and features.}
+One value per neuron and trial: its mean activity in a window around the relevant task event (Fig.~\ref{fig:fig1_windows}). The wheel-speed bins are identical for both datasets; the stimulus, choice and feedback windows are 0.3\,s for the mesoscope (frame period about 0.2\,s) and the BWM single-cell windows otherwise. Mesoscope traces are linearly interpolated at each neuron's own sampling times (including the per-plane time offset) before averaging.
+
+\paragraph{Single-neuron tuning test.}
+The BWM single-cell test (\texttt{brainwidemap} \texttt{single\_cell\_stats}), re-implemented on the GPU and checked against the original, applied identically to both datasets. Mann--Whitney $U$ statistics compare the two conditions within strata (block $\times$ choice for stimulus side, block $\times$ stimulus side for choice and feedback) and are summed and normalised; the null distribution comes from 3{,}000 permutations of the labels within consecutive blocks. The BWM test uses the biased blocks only; mesoscope sessions without biased blocks (55 sessions, all trials at $p_\text{left}=0.5$) are tested within their single 0.5 block.
+
+\paragraph{Decoding.}
+A decoder is fit for every session $\times$ bin with at least 10 neurons, from all neurons of that session in the bin or from 10 randomly drawn neurons (3 draws, averaged). Outer 5-fold cross-validation over trials (stratified for binary targets; the same folds for every bin of a session); features z-scored on training trials. Binary targets (stimulus side including 0\,\% contrast, choice, feedback): L2-regularised logistic regression with balanced class weights, regularisation strength ($C \in 10^{-4}\ldots10$, 6 values) chosen by inner 3-fold cross-validation on balanced accuracy; score: balanced accuracy of the pooled held-out predictions (chance 0.5). Wheel speed (mean absolute wheel velocity per 0.2\,s bin, all bins of all trials decoded together, folds keeping trials together): ridge regression with the penalty (7 values, $0.1\ldots10^5$) chosen by leave-one-out error; score: $R^2$ of the pooled held-out predictions. The GPU decoders reproduce scikit-learn's \texttt{LogisticRegressionCV} and \texttt{RidgeCV} pipelines.
+
+\paragraph{Averaging.}
+Decoding maps show, per bin, the mean score over sessions with $\geq$10 neurons in the bin; scatter plots use the same per-bin means; headline numbers are means over session $\times$ bin pairs. Tuning maps pool neurons across sessions within a bin and show the fraction with $p<0.05$ for bins with $\geq$10 testable neurons.
+
+\section*{Main figures}
+\input{figures/fig1_windows/figure.tex}
+\input{figures/fig2_coverage/figure.tex}
+\input{figures/fig3_tuning/figure.tex}
+\input{figures/fig4_decoding_n10/figure.tex}
+\input{figures/fig5_decoding_n10_scatter/figure.tex}
+\input{figures/fig6_decoding_all/figure.tex}
+\input{figures/fig7_decoding_all_scatter/figure.tex}
+\clearpage
+
+\section*{Supplementary information}
+\label{sec:controls}
+\setcounter{figure}{0}
+\renewcommand{\thefigure}{S\arabic{figure}}
+
+\subsection*{Controls}
+\paragraph{1. Are the similar mesoscope tuning maps driven by session differences?}
+Partly. Single-session maps (Fig.~\ref{fig:si_tuning_sessions}) differ visibly in their overall level. Across all (session, bin) cells with $\geq$20 testable neurons, session identity explains 64\,\%, 43\,\% and 73\,\% of the variance of the fraction tuned (stimulus side, choice, feedback), bin location only 16\,\%, 15\,\% and 27\,\%, and fractions vary more across sessions recording the same bin than across bins of one session (Fig.~\ref{fig:si_tuning_variance}a,b). Session effects do not explain the similarity of the three maps, however: after removing them with an additive session + bin model, the variable maps still correlate at $r_s \approx 0.7$ across bins (Fig.~\ref{fig:si_tuning_variance}c, \ref{fig:si_tuning_corrected}), whereas the BWM maps barely correlate ($r_s$ between $-0.08$ and $0.21$). Mesoscope neurons are also more often tuned to several variables: a neuron tuned to stimulus side is 2.4 times more likely than average to be tuned to choice (BWM: 1.5). The shared bin-level factor is not the neurons' activity level (bin medians of mean activity or fraction of active trials correlate with the fraction tuned at $r_s$ between $-0.13$ and $0.30$) and not the window length (next point); it remains unexplained.
+
+\paragraph{2. Tuning strength instead of fraction tuned.}
+Maps of the median and 90th percentile of the shuffle-corrected tuning strength (Fig.~\ref{fig:si_tuning_strength}) differ more between variables than the fraction maps (median-strength map correlations 0.56, 0.52 and 0.22). The 90th-percentile maps show a lateral-posterior (visual) hotspot for stimulus side and a frontal hotspot for feedback in the mesoscope.
+
+\paragraph{3. Larger bins.}
+With 1\,mm bins the BWM coverage has no holes (Fig.~\ref{fig:si_hex1mm_counts}); tuning and decoding maps (Fig.~\ref{fig:si_hex1mm_tuning}, \ref{fig:si_hex1mm_decoding}) show the same patterns as with 0.4\,mm bins, and the mean decoding scores are unchanged (mesoscope 0.53 / 0.52 / 0.61, $R^2$ 0.01; BWM 0.53 / 0.59 / 0.64, $R^2$ 0.14).
+
+\paragraph{4. Is the choice-decoding difference due to the windows?}
+No. Re-analysing the same BWM units with the 0.3\,s mesoscope windows leaves choice decoding essentially unchanged (0.585 $\to$ 0.574; Fig.~\ref{fig:si_windows}), and frame-sampling the spikes like a mesoscope trace does not lower it either (0.591). The longer window does raise BWM stimulus-side decoding (0.53 $\to$ 0.60) and feedback decoding (0.64 $\to$ 0.67), so with equal windows the mesoscope is below BWM for every variable. The longer window also does not make the BWM tuning maps of different variables similar (map correlations 0.03, $-0.03$, 0.24).
+
+\paragraph{5. Why is wheel speed so much worse in the mesoscope?}
+The wheel bins are the same 0.2\,s in both datasets, and frame sampling of BWM spikes (one sample per 0.205\,s, read out like a mesoscope trace) barely changes BWM wheel decoding ($R^2$ 0.144 $\to$ 0.133; Fig.~\ref{fig:si_windows}b), so slow sampling is not the reason. Recording depth contributes: within the same BWM sessions, superficial units (L1--2/3, the layers the mesoscope records) decode wheel speed worse than deep units (L5--6; $R^2$ 0.10 vs 0.16, $p<10^{-4}$, 49 sessions), and the same holds for choice and feedback (Fig.~\ref{fig:si_layers}). But superficial BWM units still decode far better than mesoscope neurons ($R^2$ 0.09--0.10 vs 0.01; choice 0.57 vs 0.52), also when frame-sampled with 0.3\,s windows. The remaining gap is therefore most likely in the signal itself: deconvolved calcium activity is a noisier and nonlinear readout of spiking, and the mesoscope population includes many weakly active or silent ROIs (60\,\% of window values are zero), whereas BWM good units are selected for quality.
+
+\input{si/dorsal_tuning.tex}
+\input{si/si_tuning_sessions.tex}
+\input{si/si_tuning_variance.tex}
+\input{si/si_tuning_corrected.tex}
+\input{si/si_tuning_strength.tex}
+\input{si/si_hex1mm_counts.tex}
+\input{si/si_hex1mm_tuning.tex}
+\input{si/si_hex1mm_decoding.tex}
+\input{si/si_windows.tex}
+\input{si/si_layers.tex}
+
+\end{document}

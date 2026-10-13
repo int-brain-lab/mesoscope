@@ -206,8 +206,12 @@ def _strata(lab, variable):
     """Condition strata (list of (x_mask, y_mask)) exactly as in the
     brainwidemap single_cell_stats example scripts."""
     blk, cL, cR, ch, rw = lab["block"], lab["c_L"], lab["c_R"], lab["choice"], lab["reward"]
+    # BWM uses the biased blocks only. Sessions without biased blocks (all
+    # trials at probabilityLeft 0.5, a third of the mesoscope sessions) would
+    # get no test at all, so there the single 0.5 block is used instead.
+    levels = (0.8, 0.2) if np.isin(blk, (0.8, 0.2)).any() else (0.5,)
     out = []
-    for b in (0.8, 0.2):
+    for b in levels:
         if variable == "stim":      # left vs right stimulus, within block x choice
             for c in (1, -1):
                 m = (blk == b) & (ch == c)
@@ -228,7 +232,7 @@ def block_ids(block):
     return np.r_[0, np.cumsum(np.abs(np.diff(block)) > 0)]
 
 
-def tuning_pvalues(rates, lab, variable, n_shuf=N_SHUF, seed=0, device=None):
+def tuning_pvalues(rates, lab, variable, n_shuf=N_SHUF, seed=0, device=None, return_stat=False):
     """p-value per neuron for `variable` (stim / choice / feedback).
 
     Vectorised version of `get_{stim,choice,feedback}_time_shuffle` from
@@ -242,6 +246,11 @@ def tuning_pvalues(rates, lab, variable, n_shuf=N_SHUF, seed=0, device=None):
     same permutations are shared by all neurons of a session.
 
     rates: (n_trials, n_neurons).
+    With return_stat=True also returns the tuning strength: the mean of the
+    shuffled statistics minus the observed one. The statistic is
+    0.5 - |AUC - 0.5| pooled over strata, so this is the separation of the
+    two conditions (|AUC - 0.5|) in excess of its chance level, which grows
+    with fewer trials. 0 = chance; at most 0.5.
     """
     import torch
     from scipy.stats import rankdata
@@ -276,13 +285,15 @@ def tuning_pvalues(rates, lab, variable, n_shuf=N_SHUF, seed=0, device=None):
         num += torch.minimum(Ux, Uy)
         den += nx * ny
     if den == 0:
-        return np.full(n, np.nan)
+        nan = np.full(n, np.nan)
+        return (nan, nan) if return_stat else nan
     cp = num / den
     obs = cp[0]
     less = (cp[1:] < obs).sum(0)
     eq = (cp[1:] == obs).sum(0)
     rank = less + (eq + 2) / 2  # average rank of the observed value
-    return (rank / (n_shuf + 1)).cpu().numpy()
+    p = (rank / (n_shuf + 1)).cpu().numpy()
+    return (p, (cp[1:].mean(0) - obs).cpu().numpy()) if return_stat else p
 
 
 # ---------------------------------------------------------------------------

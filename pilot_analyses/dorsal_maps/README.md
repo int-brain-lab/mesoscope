@@ -26,7 +26,21 @@ python extract_bwm.py    # BWM insertions with isocortex units -> FEATURE_ROOT/b
 python tuning.py         # output/tuning_<modality>.pqt, one row per neuron (GPU)
 python decode.py         # output/decoding_<modality>.pqt, one row per session x bin x target (GPU)
 python maps.py           # figures + summary
+
+# controls (Supplementary Information)
+python extract_bwm.py w03                 # BWM with mesoscope windows + frame-sampled features
+python tuning.py bwm_w03 && python tuning.py bwm_w03 --features _fr
+python decode.py bwm_w03 && python decode.py bwm_w03 --features _fr
+python decode.py bwm meso --hex 0.5 --n10-only   # 1 mm bins
+python layers.py bwm meso bwm_w03 && python layers.py bwm_w03 --features _fr
+python controls.py                        # si_* figures, output/controls_summary.csv
+python build_report.py                    # report/: LaTeX report, compiled with tectonic
 ```
+
+`report/` holds the LaTeX report: `main.tex` (text), one folder per main
+figure in `report/figures/`, all supplementary figures in `report/si/`.
+Figure panels and captions are copied from `output/` by `build_report.py`,
+so captions are edited in `maps.py` / `controls.py`.
 
 `FEATURE_ROOT` is `~/Downloads/ONE/alyx.internationalbrainlab.org/dorsal_maps`.
 Signal and spike files downloaded by the extraction are deleted afterwards
@@ -53,6 +67,9 @@ to save disk space.
   before movement onset, feedback [0, 0.2] s. Meso windows are 0.3 s long
   (frame period about 0.2 s), read from the linearly interpolated
   deconvolved trace with per-ROI time offsets.
+- **Unbiased sessions.** 55 meso sessions have only 0.5 blocks. The BWM test
+  uses the 0.8 / 0.2 blocks only, so these sessions are tested within their
+  0.5 block (earlier versions left them untested and counted them as untuned).
 - **Tuning.** `mpciROIs.taskTunedP` is not on Alyx and Yanliang's BWM
   p-values are not in the aggregates. Both modalities therefore use a GPU
   re-implementation of `brainwidemap` `get_{stim,choice,feedback}_time_shuffle`.
