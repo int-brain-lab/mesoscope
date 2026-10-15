@@ -11,7 +11,8 @@ cross-day tracked-neuron alignment see `meso_chronic.py`.
 
 Default settings (see README for the reasoning):
 - neuron-only ROIs (`filter_neurons=True`)
-- deconvolved spike-rate signal, falling back to raw fluorescence
+- deconvolved spike-rate signal only (mpci.ROIActivityDeconvolved); raw and
+  neuropil fluorescence are never downloaded
 - histology-registered brain regions, falling back to the pipeline estimate
 - on-disk caching under `<ONE.cache_dir>/meso/basic_data/`
 """
@@ -43,7 +44,9 @@ _REQUIRED_DATASETS = (
     "mpciROIs.mpciROITypes.npy",
     "mpciROIs.mlapdv_estimate.npy",
 )
-_SIGNAL_DATASETS = ("mpci.ROIActivityDeconvolved.npy", "mpci.ROIActivityF.npy")
+# Only the deconvolved traces: no analysis uses raw (mpci.ROIActivityF) or
+# neuropil fluorescence, and each is as large as the deconvolved array.
+_SIGNAL_DATASETS = ("mpci.ROIActivityDeconvolved.npy",)
 
 
 @dataclass
@@ -85,7 +88,7 @@ def _load_fov(eid: str, fov: str, one: ONE, atlas: AllenAtlas) -> dict:
 
     signal_type = next((s for s in _SIGNAL_DATASETS if s in available), None)
     if signal_type is None:
-        raise FileNotFoundError(f"{fov} for {eid} has neither of {_SIGNAL_DATASETS}")
+        raise FileNotFoundError(f"{fov} for {eid} has no deconvolved traces ({_SIGNAL_DATASETS})")
     roi_signal = _load(signal_type).T
     signal_type = "deconvolved" if "Deconvolved" in signal_type else "fluorescence"
 
