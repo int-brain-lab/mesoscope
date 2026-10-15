@@ -200,13 +200,8 @@ def _load_roitypes_bool(one: ONE, eid: str, fov_col: str) -> Optional[np.ndarray
                 return np.asarray(arr).astype(bool)
         except Exception:
             pass
-    try:
-        obj = one.load_object(eid, 'mpciROIs', collection=fov_col)
-        for key in ('mpciROITypes', 'ROITypes', 'roi_types', 'roiType'):
-            if key in obj:
-                return np.asarray(obj[key]).astype(bool)
-    except Exception:
-        pass
+    # No one.load_object(eid, 'mpciROIs') fallback: it would download the ROI and
+    # neuropil masks of the FOV just to look for the ROI types.
     return None
 
 # ----------------------------------------------
