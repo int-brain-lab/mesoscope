@@ -72,8 +72,10 @@ def frame_times_for(one, eid, fov, n_timepoints):
     return t.astype(np.float64)
 
 
-def fov_features(one, eid, fov, names, regions, iv, xyz_key):
+def fov_features(one, eid, fov, names, regions, iv, xyz_key, transform=None):
     """Features for the isocortex neurons of one FOV, in ROI chunks.
+    transform: optional function applied to the whole (T, n_rois) signal of the
+    FOV before feature extraction (e.g. a compression round trip).
     Returns (X (n, T, 9) float32, xyz (n, 3) um, region ids (n,), signal name)."""
     load = lambda d: one.load_dataset(eid, d, collection=fov)  # noqa: E731
     region_key = next((f"mpciROIs.{k}.npy" for k in _REGION_KEYS if f"mpciROIs.{k}.npy" in names), None)
@@ -84,6 +86,8 @@ def fov_features(one, eid, fov, names, regions, iv, xyz_key):
         raise SkipFOV("no signal dataset")
     path = one.load_dataset(eid, sig_name, collection=fov, download_only=True)
     sig = np.load(path, mmap_mode="r")  # (T, n_rois)
+    if transform is not None:
+        sig = transform(np.asarray(sig, dtype=np.float32))
 
     region_ids = load(region_key)
     is_neuron = load("mpciROIs.mpciROITypes.npy").astype(bool)

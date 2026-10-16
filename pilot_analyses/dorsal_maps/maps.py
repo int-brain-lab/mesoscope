@@ -100,7 +100,9 @@ def map_grid(per_mod, titles, cbar_labels, norms, out_stem, captions, label, int
                 ax.text(-0.12 if c else -0.3, 1.1, chr(ord("a") + c), transform=ax.transAxes,
                         fontsize=8, fontweight="bold", va="bottom")
             if c == 0:
-                ax.text(-0.42, 0.5, row_names[m], transform=ax.transAxes, rotation=90,
+                # fixed offset in inches (0.9 in left of the axis), whatever the column width
+                axw = fig.get_size_inches()[0] * ax.get_position().width
+                ax.text(-0.9 / axw, 0.5, row_names[m], transform=ax.transAxes, rotation=90,
                         va="center", ha="center", fontsize=7)
         cb = fig.colorbar(pc, ax=axs[:, c], orientation="horizontal", fraction=0.04, pad=0.09,
                           aspect=15)

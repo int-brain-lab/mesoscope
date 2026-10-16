@@ -99,11 +99,25 @@ def task_intervals(trials, mask, modality):
     return np.stack(out, axis=1)
 
 
+MAX_WHEEL_STEP = 100.0  # rad between consecutive wheel samples; larger steps are encoder glitches
+
+
+def remove_wheel_jumps(wheel_pos, max_step=MAX_WHEEL_STEP):
+    """Wheel position with impossible jumps between consecutive samples
+    removed. Some mesoscope sessions have encoder counter overflows: the
+    position jumps by exactly +-6588397.3 rad for one or more samples, which
+    would give bins with ~3e7 rad/s."""
+    d = np.diff(np.asarray(wheel_pos, float))
+    d[np.abs(d) > max_step] = 0
+    return np.r_[wheel_pos[0], wheel_pos[0] + np.cumsum(d)]
+
+
 def wheel_speed(wheel_times, wheel_pos, intervals):
     """Mean absolute wheel velocity (rad/s) in each interval, from the
-    cumulative absolute displacement of the 1 kHz-interpolated position."""
+    cumulative absolute displacement of the 1 kHz-interpolated position
+    (encoder glitches removed first, see remove_wheel_jumps)."""
     from brainbox.behavior.wheel import interpolate_position
-    pos, t = interpolate_position(wheel_times, wheel_pos, freq=1000)
+    pos, t = interpolate_position(wheel_times, remove_wheel_jumps(wheel_pos), freq=1000)
     cum = np.r_[0, np.cumsum(np.abs(np.diff(pos)))]
     a, b = intervals[..., 0], intervals[..., 1]
     return (np.interp(b, t, cum) - np.interp(a, t, cum)) / (b - a)

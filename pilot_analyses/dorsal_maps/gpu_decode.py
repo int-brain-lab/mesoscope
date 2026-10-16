@@ -188,7 +188,7 @@ def _bal_acc(y, pred, mask):
     return acc / 2
 
 
-def decode_binary(F, sets, y, seed=0, n_folds=5, Cs=CS, dtype=torch.float32):
+def decode_binary(F, sets, y, seed=0, n_folds=5, Cs=CS, dtype=torch.float32, dual=True):
     """Cross-validated balanced accuracy for each neuron set.
 
     F: (n_trials, n_neurons) array or tensor; sets: list of index arrays
@@ -207,11 +207,19 @@ def decode_binary(F, sets, y, seed=0, n_folds=5, Cs=CS, dtype=torch.float32):
     yf = yt.to(dtype)
     F = torch.as_tensor(F, dtype=torch.float64, device=DEVICE)
     K = 4 * nC
-    cost = lambda p: n_folds * K * max(N * (p + 1), (p + 1) ** 2)  # noqa: E731
+    cost = lambda p: n_folds * K * max(N * (min(p, N) + 1), (min(p, N) + 1) ** 2)  # noqa: E731
     for chunk in _chunks(sets, cost):
         X, n_var = _gather(F, [sets[g] for g in chunk])
         G, p = X.shape[0], X.shape[-1]
-        Xo = _standardise(X, train).to(dtype)                    # (G, k, N, p)
+        Xo = _standardise(X, train)                              # (G, k, N, p)
+        if p > N and dual:
+            # more neurons than trials: the L2-penalised weights lie in the row space of the
+            # (standardised) trials, so the fit on U S (N columns, X = U S V^T) has the same
+            # penalty and the same predictions as the fit on X
+            U, S, _ = torch.linalg.svd(Xo, full_matrices=False)
+            Xo = U * S[..., None, :]
+            p = Xo.shape[-1]
+        Xo = Xo.to(dtype)
         Xa = torch.cat([Xo, torch.ones(G, n_folds, N, 1, dtype=dtype, device=DEVICE)], 3)
         Xa = Xa.reshape(G * n_folds, N, p + 1)
         pen = torch.ones(p + 1, dtype=dtype, device=DEVICE)

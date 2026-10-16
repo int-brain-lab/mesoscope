@@ -69,6 +69,28 @@ to save disk space.
   On independent smooth random maps over the real bin layout it gives 6%
   false positives at p < 0.05, against 47% for the naive Spearman p.
 
+## Revision v2 (default from 2026-10-15)
+
+`output/v2/` holds the revised maps; they replace the 0.4 mm maps above as the default.
+
+- **1 mm hexagons.** Centre-to-vertex 0.5 mm (`decode_v2.HEX_V2`).
+- **Depth-limited BWM (`bwm_d640`).** Only units within 640 um of the pial surface: twice the depth of the mesoscope fields (174-318 um, 5-95 % of histology-registered sessions), so more ephys units are kept that the mesoscope could still plausibly see. This keeps 2,929 of 13,002 units (204 sessions). BWM at all depths stays as a reference row.
+- **Revised wheel decoding.** See `../wheel_decoding2/README.md`.
+  - The wheel targets had encoder overflow jumps in 16 meso sessions; these are fixed (`fix_wheel_glitches.py`, `common.remove_wheel_jumps`).
+  - The ridge penalty is chosen by exact leave-one-trial-out error.
+  - Features: neural activity of the previous, same and next wheel bin.
+  - New target: trial-specific wheel speed (per-bin mean of the training trials removed).
+- **All-neuron binary decoding.** For sets with more neurons than trials, it fits in the row space of the trials (`gpu_decode.decode_binary(dual=True)`); this is exact and gives identical scores.
+- **Map display.** Opacity encodes the number of animals per bin. The meso vs `bwm_d640` per-bin correlations are tested against a variogram-matched spatial null (`controls2.spatial_test`).
+
+```
+python fix_wheel_glitches.py              # patch wheel_y of affected feature files (backup kept)
+python make_bwm_depth.py                  # FEATURE_ROOT/bwm_d640/<pid>.npz
+python decode_v2.py meso bwm_d640 bwm     # output/v2/decoding_<modality>.pqt (+ --fill-binary-all)
+python maps_v2.py                         # v2_counts, v2_decoding_n10/_all, v2_tuning, v2_summary
+python depth_profile.py                   # si_depth_profile: tuning and wheel correlates vs depth
+```
+
 ## Choices and caveats
 
 - **Data.** Meso uses 153 of the 165 sessions in `canonical_sessions.txt`.
