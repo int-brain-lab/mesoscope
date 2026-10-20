@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from wd_common import excluded_sessions  # noqa: E402
 from wd_common import COL, MODS, NAME, NATURE_DOUBLE_COL_IN, OUT, panel_label, save_with_caption, style_axes
 
 def sci(x):
@@ -28,8 +29,10 @@ def main():
     tgt = pd.read_csv(OUT / "checks_target.csv")
     tim = pd.read_parquet(OUT / "timing.pqt")
     tsum = pd.read_csv(OUT / "timing_summary.csv")
+    ex = excluded_sessions()
     var = pd.read_parquet(OUT / "variants.pqt")
     ses = pd.read_parquet(OUT / "variants_sessions.pqt")
+    var, ses = var[~var.session.isin(ex)], ses[~ses.session.isin(ex)]
 
     fig = plt.figure(figsize=(NATURE_DOUBLE_COL_IN, 4.6))
     gs = fig.add_gridspec(2, 3, hspace=0.6, wspace=0.45)

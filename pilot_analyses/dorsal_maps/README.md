@@ -41,8 +41,14 @@ python selection.py meso --pool 24        # pool-size control
 python tuning.py meso bwm --min-contrast 0.25
 python controls2.py                       # si_strict_*, si_stim_hotspot, si_spatial_null,
                                           # si_selection, si_high_contrast; output/controls2_summary.csv
-python build_report.py                    # report/: LaTeX report, compiled with tectonic
+python build_report.py                    # report/: LaTeX report (v6), compiled with tectonic
+python build_report_v7.py                 # report_v7/: current LaTeX report (v7), compiled with tectonic
 ```
+
+`report_v7/main.tex` is the single source of the current report: figures are
+cited with `\ref`, and `build_report_v7.py` copies the ten figure panels and their
+captions (from `output/`, `output/v2/` and `../wheel_decoding2/output/`) into
+`report_v7/figures/`. The shared web page renders the compiled `main.pdf`.
 
 `report/` holds the LaTeX report: `main.tex` (text), one folder per main
 figure in `report/figures/`, all supplementary figures in `report/si/`.
@@ -81,13 +87,16 @@ to save disk space.
   - Features: neural activity of the previous, same and next wheel bin.
   - New target: trial-specific wheel speed (per-bin mean of the training trials removed).
 - **All-neuron binary decoding.** For sets with more neurons than trials, it fits in the row space of the trials (`gpu_decode.decode_binary(dual=True)`); this is exact and gives identical scores.
+- **20 random neurons per bin, mean over 10 draws** (`decode_v2.N_PICK`, `N_DRAWS`); bins need >= 20 neurons. The first run with 10 neurons x 3 draws is kept in `output/v2/n10_3draws`.
+- **Excluded meso sessions** (`decode_v2.excluded_sessions`). Two sessions whose task and imaging clocks are offset (`CLOCK_OFFSET`: bd92d5ef -146 s, 38438b7d -338 s; population-wheel cross-correlation peaks there and everything decodes at chance). Trials outside the imaging period are dropped and sessions with < 50 % coverage excluded (`imaging_coverage.py` -> `FEATURE_ROOT/meso_trial_coverage`).
 - **Map display.** Opacity encodes the number of animals per bin. The meso vs `bwm_d640` per-bin correlations are tested against a variogram-matched spatial null (`controls2.spatial_test`).
 
 ```
 python fix_wheel_glitches.py              # patch wheel_y of affected feature files (backup kept)
 python make_bwm_depth.py                  # FEATURE_ROOT/bwm_d640/<pid>.npz
+python imaging_coverage.py                # trials covered by imaging, per meso session
 python decode_v2.py meso bwm_d640 bwm     # output/v2/decoding_<modality>.pqt (+ --fill-binary-all)
-python maps_v2.py                         # v2_counts, v2_decoding_n10/_all, v2_tuning, v2_summary
+python maps_v2.py                         # v2_counts, v2_decoding_n20/_all, v2_tuning, v2_summary
 python depth_profile.py                   # si_depth_profile: tuning and wheel correlates vs depth
 ```
 

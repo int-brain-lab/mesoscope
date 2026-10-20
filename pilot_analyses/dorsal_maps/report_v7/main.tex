@@ -1,0 +1,175 @@
+\documentclass[10pt]{article}
+\usepackage[T1]{fontenc}
+\usepackage{helvet}
+\renewcommand{\familydefault}{\sfdefault}
+\usepackage[a4paper,margin=0.65in]{geometry}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{placeins}
+\usepackage[font={sf,footnotesize},labelfont={sf,bf,footnotesize},justification=justified,singlelinecheck=false]{caption}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=blue!50!black,urlcolor=blue!50!black}
+\setlength{\parskip}{0.5em}
+\setlength{\parindent}{0pt}
+\setlist{itemsep=0.2em,topsep=0.2em}
+\newcommand{\um}{\,$\mu$m}
+\newcommand{\figref}[1]{Fig.~\ref{fig:#1}}
+
+\title{Mesoscope vs BWM: supervised decoding of task variables}
+\author{Michael Schartner, Samuel Picard, International Brain Laboratory, Claude Opus 5.5}
+\date{IBL mesoscope pilot analysis, v7, \today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent The clearest result concerns wheel speed. From 20 random neurons per bin, the mesoscope decodes wheel speed far worse than superficial BWM units ($R^2$ 0.05 vs 0.25; \figref{decoding_n20}), yet the signal is not missing. Only about 3.5\% of mesoscope neurons track wheel speed replicably, against 22\% of BWM units at every recording depth (Figs.~\ref{fig:depth}, \ref{fig:population}), and the best 10 neurons of a mesoscope session predict held-out wheel speed as well as the best 10 BWM units ($r$ 0.50 vs 0.47; Figs.~\ref{fig:rasters}, \ref{fig:population}). The gap therefore reflects how sparse wheel neurons are in the imaged population, not imaging depth, calcium lag or the decoder, which passed every check (\figref{checks}); most of any wheel $R^2$ is the stereotyped speed profile after movement onset. Conversely, the mesoscope has about twice the fraction of stimulus-side-tuned neurons of superficial BWM (15\% vs 7.5\%; \figref{tuning}; part of it one mouse's SSp-ul hotspot), and with 20 neurons it decodes stimulus side and feedback as well as superficial BWM, while choice stays weaker. Bin by bin, the maps of the two modalities correlate positively but not significantly once spatial smoothness is accounted for, with only 25 shared bins (\figref{summary}). Quality control along the way found wheel-encoder overflow in 16 mesoscope sessions (fixed) and task--imaging clock offsets in 2 (excluded).
+\end{abstract}
+
+The same task variables are mapped across dorsal cortex for two-photon mesoscope imaging and Neuropixels recordings. Each isocortex neuron is placed in one ML--AP hexagonal bin, 1\,mm across, and both modalities go through identical tests and decoders (the analysis windows differ, see below). BWM is shown twice: units within 640\um{} of the pial surface, the main comparison, and units at all depths.
+
+\section*{What changed in v7 (15 Oct)}
+The wheel-speed decoding was checked from the ground up, and the maps were redone:
+\begin{itemize}
+  \item \textbf{1\,mm hexagons} are the default.
+  \item \textbf{Deeper BWM voxels.} BWM units within 640\um{} of the pial surface are the main comparison: twice the mesoscope imaging depth (174--318\um), so ephys units the mesoscope may still see are included generously. This keeps 2{,}929 of 13{,}002 units.
+  \item \textbf{A revised wheel decoder.}
+  \item \textbf{20 random neurons per bin}, mean over 10 draws.
+\end{itemize}
+Main findings:
+\begin{itemize}
+  \item \textbf{A bug in the mesoscope wheel data.} 16 of 153 sessions had wheel-encoder overflow jumps ($\pm$6.6 million rad), so their earlier wheel $R^2$ was meaningless. They are fixed now; no BWM session was affected.
+  \item \textbf{Two mesoscope sessions excluded.} Their task and imaging clocks are offset by 146 and 338\,s, so every variable decoded at chance; they are left out of all results.
+  \item \textbf{The decoder and target are correct.} The decoder matches scikit-learn; an artificial neuron carrying wheel speed plus noise is recovered at the expected $R^2$; the wheel speed per bin matches brainbox at $r \geq 0.9999$.
+  \item \textbf{What the wheel $R^2$ measures.} Mostly the stereotyped speed profile after movement onset: predicting each bin from its mean over training trials, with no neural data, already gives $R^2 \approx 0.45$. A new target, trial-specific speed (speed minus that mean), measures trial-to-trial differences.
+  \item \textbf{Timing and the revised decoder.} Mesoscope activity follows wheel speed by 0.15--0.25\,s; BWM spikes lead it by 0.1\,s. Using the previous, same and next bin as features raises wheel $R^2$ in both: mesoscope from 0.015 to 0.026 and BWM from 0.144 to 0.218 (10 neurons, 0.4\,mm bins).
+  \item \textbf{Why mesoscope wheel decoding is weak.} Wheel neurons are rare, not absent. 3.5\% of mesoscope neurons correlate replicably with wheel speed, against 22\% of BWM units, and this BWM fraction is about the same at every depth. The best 10 neurons of a whole mesoscope session track wheel speed in held-out trials as well as the best 10 BWM units ($r$ 0.50 vs 0.47). A random set of 10, as in one spatial bin, rarely contains one.
+  \item \textbf{Depth-limited BWM changes little.} Units within 640\um{} decode a bit worse than units at all depths (choice 0.60 vs 0.62, feedback 0.63 vs 0.69, wheel $R^2$ 0.25 vs 0.31; 20 neurons). The mesoscope matches them for stimulus side (0.54) and depth-limited BWM for feedback (0.65 vs 0.63), but stays below for choice (0.53) and wheel speed (0.05). Bin by bin, mesoscope and depth-limited BWM maps correlate positively for all five targets ($r_s$ 0.05--0.32), but none is significant against the spatial null ($p \geq 0.12$).
+\end{itemize}
+
+\section*{Analysis windows}
+The wheel-speed bins are identical for both datasets. The stimulus, choice and feedback windows are not. BWM uses the windows of the Brain Wide Map single-cell analyses (0.1, 0.1 and 0.2\,s). Mesoscope frames are about 0.2\,s apart, so its windows are widened to 0.3\,s to always contain at least one frame (\figref{windows}).
+
+\input{figures/windows}
+
+\section*{Methods}
+\paragraph{Data selection.}
+\begin{itemize}
+  \item \textbf{Mesoscope:} 151 of the 165 canonical sessions (see below). Neurons are ROIs classified as neurons, labelled isocortex (Allen Cosmos level) and with a valid position. Activity is the deconvolved trace.
+  \item \textbf{BWM:} 2023 release, 351 insertions in 288 sessions. Only good units labelled isocortex are used; activity is the firing rate (spike count / window length).
+  \item \textbf{Excluded mesoscope sessions:} two sessions whose task and imaging clocks disagree. In both, the cross-correlation of population activity with wheel speed peaks at $-146$\,s and $-338$\,s instead of near 0, and every variable decodes at chance. Trials outside the imaging period are dropped (19 trials of one further session).
+  \item \textbf{Trials:} BWM criteria for both datasets: all event times present, a choice was made, and reaction time between 0.08 and 2\,s. Sessions need at least 50 such trials (median 347 for the mesoscope and 414 for BWM).
+  \item \textbf{Spatial bins:} each neuron is assigned to one hexagonal bin by its ML--AP Allen CCF position relative to bregma, 1\,mm across. For decoding, both hemispheres are folded onto the right one.
+  \item \textbf{Depth:} depth below the pial surface is the Allen top surface at the unit's ML--AP position minus its DV. Histology-registered mesoscope sessions image 174--318\um{} deep (5--95\%). The depth-limited BWM set keeps units within 640\um.
+\end{itemize}
+
+\paragraph{Features and targets.}
+\begin{itemize}
+  \item One value per neuron and trial: its mean activity in the window. For the mesoscope, each neuron's trace is linearly interpolated at its own sampling times, which include the per-plane time offset, before averaging.
+  \item \textbf{Stimulus side:} left vs right, including 0\% contrast trials. \textbf{Choice:} left vs right wheel turn. \textbf{Feedback:} reward vs error.
+  \item \textbf{Wheel speed:} mean absolute wheel velocity in each of six 0.2\,s bins, paired with the activity in the same bin. All bins of all trials are decoded together.
+\end{itemize}
+
+\paragraph{Decoders and cross-validation.}
+\begin{itemize}
+  \item A separate decoder is fit for every session $\times$ bin, using either all neurons of that session in the bin or a random draw of 20 neurons (bins with at least 20 neurons, mean over 10 draws).
+  \item \textbf{Outer loop:} 5-fold cross-validation over trials, with the same folds for every bin of a session. For binary targets the folds are stratified by class. Features are z-scored using training trials only.
+  \item \textbf{Binary targets:} L2-regularised logistic regression with balanced class weights. The regularisation strength (6 values, $C$ from $10^{-4}$ to 10) is chosen by an inner 3-fold cross-validation on the training trials, maximising balanced accuracy. The score is the balanced accuracy of the pooled held-out predictions (chance 0.5).
+  \item \textbf{Wheel speed:} ridge regression; the penalty (7 values, 0.1 to $10^5$) is chosen by exact leave-one-trial-out error (rows of a trial are correlated), and the activity of the previous, same and next 0.2\,s bin are the features for each wheel bin. Folds keep all bins of a trial together. The score is the $R^2$ of the pooled held-out predictions (chance 0). Trial-specific wheel speed subtracts the per-bin mean speed of the training trials from the target.
+  \item The decoders run on the GPU and reproduce scikit-learn's \texttt{LogisticRegressionCV} and \texttt{RidgeCV} pipelines. For sets with more neurons than trials, the logistic decoders are fit in the row space of the trials, which is exact.
+\end{itemize}
+
+\paragraph{Averaging.}
+\begin{itemize}
+  \item \textbf{Decoding maps:} the value of a bin is the mean score over all sessions that contribute at least 20 neurons to it.
+  \item \textbf{Scatter plots:} the same per-bin means, for the bins covered by both datasets.
+  \item \textbf{Headline numbers:} means over all session $\times$ bin pairs.
+  \item \textbf{Tuning maps:} neurons are pooled across sessions within a bin; the value is the fraction with $p < 0.05$, shown for bins with at least 10 neurons.
+\end{itemize}
+
+\paragraph{Single-neuron tuning test.}
+\begin{itemize}
+  \item The BWM single-cell test, applied to the same windows. Mann--Whitney $U$ statistics compare the two conditions within strata (block $\times$ choice for stimulus side, block $\times$ stimulus side for choice and feedback), summed and normalised.
+  \item The null distribution comes from 3{,}000 permutations of the condition labels within consecutive blocks, and $p$ is the rank of the observed statistic. Zero-contrast trials do not enter this test.
+  \item Sessions without biased blocks (55 mesoscope sessions) are tested within their single 0.5 block. Neurons that cannot be tested are left out of the fractions.
+\end{itemize}
+
+\section*{Headline numbers}
+\begin{table}[!htbp]
+\centering\small
+\begin{tabular}{lrrr}
+\toprule
+ & Mesoscope & BWM $\leq$640\um & BWM all depths \\
+\midrule
+Isocortex neurons (sessions) & 1{,}071{,}534 (151) & 2{,}929 (204) & 13{,}002 (288) \\
+Session $\times$ bin pairs with $\geq$20 neurons & 1{,}763 & 54 & 216 \\
+Median neurons per session $\times$ bin ($\geq$20) & 458 & 27 & 40 \\
+Fraction tuned: stimulus side / choice / feedback & 0.147 / 0.107 / 0.254 & 0.075 / 0.090 / 0.233 & 0.069 / 0.108 / 0.294 \\
+Stimulus side, 20 neurons / all & 0.542 / 0.620 & 0.538 / 0.546 & 0.541 / 0.551 \\
+Choice, 20 neurons / all & 0.527 / 0.585 & 0.599 / 0.615 & 0.621 / 0.655 \\
+Feedback, 20 neurons / all & 0.650 / 0.819 & 0.632 / 0.651 & 0.691 / 0.738 \\
+Wheel speed $R^2$, 20 neurons / all & 0.046 / 0.215 & 0.246 / 0.286 & 0.306 / 0.385 \\
+Trial-specific wheel speed $R^2$, 20 neurons / all & 0.012 / 0.076 & 0.052 / 0.065 & 0.073 / 0.110 \\
+Bin-means-only wheel $R^2$ (no neurons, median session) & 0.47 & 0.44 & 0.44 \\
+\bottomrule
+\end{tabular}
+\caption*{Decoding: balanced accuracy (chance 0.5) or $R^2$ (chance 0), mean over session $\times$ bin pairs. ``All'' uses every neuron of a session in the bin; mesoscope bins hold about 20 times more neurons, so only the 20-neuron columns compare like with like. Only 53 of the 204 sessions with superficial BWM units have a bin with at least 20 of them.}
+\end{table}
+
+\FloatBarrier
+\section*{Maps}
+Coverage at 1\,mm. The depth-limited BWM row is sparse: most bins hold one or two sessions (\figref{counts}).
+
+\input{figures/counts}
+
+Fraction of tuned neurons. The mesoscope still has about twice as many stimulus-side-tuned neurons as BWM, whether or not BWM is restricted to superficial units (\figref{tuning}).
+
+\input{figures/tuning}
+
+Decoding from 20 random neurons per session and bin (mean over 10 draws), so all three rows are compared at the same population size; only sessions with at least 20 neurons in a bin enter it. Stimulus side, choice and feedback are decoded with L2 logistic regression in the windows of \figref{windows} (balanced accuracy, chance 0.5). Wheel speed uses the revised decoder: ridge regression on the activity of the previous, same and next 0.2\,s bin, scored by cross-validated $R^2$. Trial-specific wheel speed subtracts the mean speed profile of the training trials, so only trial-to-trial differences in speed count. Bins fade when fewer than four animals contribute (\figref{decoding_n20}).
+
+\input{figures/decoding_n20}
+
+Decoding from all neurons of a session in a bin, otherwise as in \figref{decoding_n20}. Mesoscope bins hold about 20 times more neurons than BWM bins (median 458 vs 27), so the rows are not comparable in absolute terms. With hundreds of neurons per bin, the mesoscope decodes stimulus side and feedback better than BWM, and its frontal feedback map stands out (\figref{decoding_all}).
+
+\input{figures/decoding_all}
+
+\FloatBarrier
+\section*{Summary and bin-wise agreement}
+Top: mean scores per row. Bottom: per-bin mesoscope against depth-limited BWM, for the 25 bins covered by both (20 neurons), with spatial-null $p$-values. Wheel speed and feedback agree best ($r_s$ 0.32 and 0.30), but nothing survives the spatial null ($p_\text{sp} \geq 0.12$; \figref{summary}).
+
+\input{figures/summary}
+
+\FloatBarrier
+\section*{Does depth explain the differences?}
+BWM tuning and wheel correlation per 160\um{} depth band, with the mesoscope level as a green line. Choice and feedback tuning rise in deep layers, which the 640\um{} cutoff mostly excludes. The fraction of wheel-correlated units is 20--25\% at every depth, against 4\% of mesoscope neurons, so depth does not explain the mesoscope's weak wheel decoding (\figref{depth}).
+
+\input{figures/depth}
+
+\FloatBarrier
+\section*{Wheel-speed decoding revisited}
+Rasters first: wheel speed in the six wheel bins of 30 consecutive trials, above the 60 neurons most correlated with it. Neurons are ranked on the other trials of the session, so the trials shown are held out. The middle and right columns show the same 60 neurons, row for row: their trial-averaged activity per bin and their $r$ with wheel speed. In the two best mesoscope sessions, the mean of these neurons (coloured trace) follows wheel speed at $r = 0.58$ and 0.53, comparable to the best BWM sessions (0.29 and 0.63). But they are a small minority: only 1--18\% of mesoscope neurons reach $r > 0.1$ in these sessions, against 0--42\% in BWM (\figref{rasters}).
+
+\input{figures/rasters}
+
+Checks: the decoder recovers an artificial neuron at the expected $R^2$, mesoscope activity lags the wheel, the $R^2$ is mostly the stereotyped speed profile, and lagged features help both modalities (\figref{checks}).
+
+\input{figures/checks}
+
+Across all sessions: replicable wheel correlates are rare in the mesoscope (median 3.5\% of neurons vs 22\% in BWM). The best 10 neurons of a whole session match BWM, but among 30 random neurons they fall far short of BWM ($r$ 0.15 vs 0.37) (\figref{population}).
+
+\input{figures/population}
+
+\FloatBarrier
+\section*{Notes and open points}
+\begin{itemize}
+  \item \textbf{Tuning $p$-values.} \texttt{mpciROIs.taskTunedP} is not on Alyx and the BWM single-cell $p$-values are not in the public aggregates, so both modalities use a GPU re-implementation of the BWM single-cell test (\texttt{brainwidemap} \texttt{single\_cell\_stats}). On a 60-neuron check it agreed with the original code on $p < 0.05$ for 97--100\% of neurons. The official $p$-values can be swapped in if someone has the files.
+  \item \textbf{Mesoscope region labels.} These are the latest labels on Alyx. Only 25 of 165 sessions have histology-registered labels; the rest use the estimate.
+  \item \textbf{Sessions.} 151 of 165 canonical mesoscope sessions. Nine (SP072, SP075, SP076) have no region or position data on Alyx, three have timestamp mismatches, and two have task--imaging clock offsets. BWM: 2023 release, 351 insertions in 288 sessions, good units only.
+  \item \textbf{Code.} \href{https://github.com/int-brain-lab/mesoscope/tree/dorsal-maps/pilot_analyses/dorsal_maps}{\texttt{int-brain-lab/mesoscope}, \texttt{pilot\_analyses/dorsal\_maps}} (branch \texttt{dorsal-maps}), with a README listing the pipeline and choices; this report is built by \texttt{build\_report\_v7.py}.
+\end{itemize}
+
+\end{document}

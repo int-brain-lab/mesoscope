@@ -16,9 +16,13 @@ Changes from decode.py:
   differences without the stereotyped time course after movement onset,
   which alone gives R^2 ~0.4-0.6 with no neural data).
 Binary targets (stimulus side, choice, feedback) are decoded as before
-(gpu_decode.decode_binary); their decode.py results at the same hexagon size
-are reused when present (identical features, folds and random draws). Per (session, bin): all neurons ("all") and the
-mean over N_DRAWS draws of MIN_NEURONS neurons ("n10").
+(gpu_decode.decode_binary). Per (session, bin): all neurons ("all") and the
+mean over N_DRAWS (10) draws of N_PICK (20) neurons ("n20"); bins need >= N_PICK
+neurons of the session. Mesoscope trials outside the imaging (imaging_coverage.py)
+are dropped, and sessions with fewer than half of their trials covered
+(38438b7d: imaging 840-1840 s with a 333 s gap, task 192-1924 s; its covered
+trials decode at chance) and sessions with task-imaging clock offsets
+(CLOCK_OFFSET) are left out (maps_v2 and wheel_decoding2 filter them).
 
 Usage: python decode_v2.py [meso bwm_d640 bwm] [--hex 0.5] [--fill-binary-all]
 Writes output/v2/decoding_<modality>[_hex<size>].pqt and
@@ -34,7 +38,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-from common import MIN_NEURONS, OUT, bin_neurons
+from common import FEATURE_ROOT, OUT, bin_neurons
 from gpu_decode import DEVICE, decode_binary
 from sessions import load_session, session_files
 
@@ -42,7 +46,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "wheel_decoding2"))
 import ridge  # noqa: E402
 
 HEX_V2 = 0.5
-N_DRAWS = 3
+N_PICK = 20       # neurons per random draw (and minimum neurons per session and bin)
+N_DRAWS = 10
 MIN_TRIALS = 50
 WHEEL = dict(inner="loto", lags=(-1, 0, 1))
 BINARY = ("stim", "choice", "feedback")
@@ -62,6 +67,45 @@ def decode_sets(s, sets, binary=True):
     return out
 
 
+TRIAL_KEYS = ("X_task", "X_wheel")
+MIN_COVERED = 0.5
+
+
+def apply_coverage(sid, s, modality):
+    """Drop mesoscope trials whose windows are not covered by imaging."""
+    f = FEATURE_ROOT / "meso_trial_coverage" / f"{sid}.npy"
+    if modality != "meso" or not f.exists():
+        return s
+    ok = np.load(f)
+    if ok.all() or len(ok) != len(s["choice"]):
+        return s
+    if ok.mean() < MIN_COVERED:      # mostly outside the imaging: clock alignment suspect, drop the session
+        ok[:] = False
+    s = dict(s)
+    for k, v in s.items():
+        if k in TRIAL_KEYS:
+            s[k] = v[:, ok]
+        elif k not in ("xyz", "atlas_id") and np.ndim(v) and len(v) == len(ok):
+            s[k] = v[ok]
+    return s
+
+
+# Mesoscope sessions whose task and imaging clocks disagree: the cross-correlation of
+# population activity (FOV_00) with wheel speed peaks far from lag 0 (good sessions peak
+# within +-0.4 s), and all-neuron decoding of every variable is at chance.
+CLOCK_OFFSET = {"bd92d5ef-0f42-4643-a7d2-110a8843e557": -146.0,   # s, r 0.11 there vs -0.01 at 0
+                "38438b7d-dc9d-4540-9b85-60571629b886": -337.6}   # 333 s gap in mpci.times
+
+
+def excluded_sessions():
+    """Mesoscope sessions left out: clock offsets (CLOCK_OFFSET) and sessions with fewer
+    than MIN_COVERED of their trials inside the imaging."""
+    d = FEATURE_ROOT / "meso_trial_coverage"
+    low = {f.stem for f in d.glob("*.npy") if 0 < np.load(f).size and np.load(f).mean() < MIN_COVERED} \
+        if d.exists() else set()
+    return low | set(CLOCK_OFFSET)
+
+
 def run_session(sid, s, hex_size, binary=True):
     if len(s["choice"]) < MIN_TRIALS:
         return pd.DataFrame()
@@ -70,10 +114,10 @@ def run_session(sid, s, hex_size, binary=True):
     bins, sets = [], []
     for k in np.unique(keys):
         idx = np.flatnonzero(keys == k)
-        if idx.size < MIN_NEURONS:
+        if idx.size < N_PICK:
             continue
         bins.append((int(k), idx.size))
-        sets += [idx] + [rng.choice(idx, MIN_NEURONS, replace=False) for _ in range(N_DRAWS)]
+        sets += [idx] + [rng.choice(idx, N_PICK, replace=False) for _ in range(N_DRAWS)]
     if not bins:
         return pd.DataFrame()
     sc = decode_sets(s, sets, binary)
@@ -83,7 +127,7 @@ def run_session(sid, s, hex_size, binary=True):
         for t in sc:
             v = sc[t][b * per:(b + 1) * per]
             rows.append(dict(session=sid, hex=k, n_neurons=n, n_trials=len(s["choice"]), target=t,
-                             all=v[0], n10=np.nanmean(v[1:])))
+                             all=v[0], n20=np.nanmean(v[1:])))
     return pd.DataFrame(rows)
 
 
@@ -95,15 +139,12 @@ def run(modality, hex_size=HEX_V2):
     warnings.filterwarnings("ignore")
     OUT_V2.mkdir(exist_ok=True)
     groups = list(session_files(modality).items())
-    # stimulus side / choice / feedback are unchanged from decode.py (same features, folds and
-    # random draws): reuse its output at this hexagon size when it exists
-    old = OUT / f"decoding_{modality}_hex{hex_size:g}.pqt"
-    reuse = pd.read_parquet(old) if old.exists() else None
-    res, base = ([] if reuse is None else [reuse[reuse.target.isin(BINARY)]]), []
+    res, base = [], []
     with ThreadPoolExecutor(2) as pool:
         loaded = pool.map(lambda g: load_session(g[1]), groups)
         for i, ((sid, _), s) in enumerate(zip(groups, loaded)):
-            df = run_session(sid, s, hex_size, binary=reuse is None)
+            s = apply_coverage(sid, s, modality)
+            df = run_session(sid, s, hex_size)
             res.append(df)
             if len(s["choice"]) >= MIN_TRIALS:
                 base.append(dict(session=sid, bin_baseline=ridge.bin_baseline(s["wheel_y"])))
