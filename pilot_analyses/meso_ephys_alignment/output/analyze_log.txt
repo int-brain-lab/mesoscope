@@ -1,0 +1,36 @@
+bwm 2bdf206a APN      other   n=   61 | stim: R=1.43*  choice: R=0.87   feedback: R=2.57*  prior: R=0.55 
+bwm 2bdf206a CA1      other   n=   32 | stim: R=0.13   choice: R=2.35   feedback: R=1.94   prior: R=1.60 
+bwm 2bdf206a DG       other   n=   32 | stim: R=1.78   choice: R=0.12   feedback: R=3.04*  prior: R=1.63 
+bwm 2bdf206a Eth      other   n=   54 | stim: R=0.98   choice: R=0.92*  feedback: R=0.59*  prior: R=1.36 
+bwm 2bdf206a LP       sensory n=   52 | stim: R=1.24   choice: R=1.13*  feedback: R=0.65*  prior: R=0.95 
+bwm 2bdf206a MRN      motor   n=   44 | stim: R=0.61   choice: R=0.82   feedback: R=0.84*  prior: R=1.56 
+bwm 2bdf206a VISa     sensory n=   51 | stim: R=1.02   choice: R=1.04   feedback: R=1.17   prior: R=0.91 
+bwm 5c0c560e MRN      motor   n=   63 | stim: R=0.68   choice: R=0.70*  feedback: R=1.22*  prior: R=0.96 
+bwm 5c0c560e SCm      motor   n=   57 | stim: R=1.03   choice: R=0.90*  feedback: R=1.35*  prior: R=1.66 
+bwm 5c0c560e SUB      other   n=   40 | stim: R=1.07   choice: R=3.07   feedback: R=0.52   prior: R=0.42 
+bwm 5c0c560e VISp     sensory n=   35 | stim: R=1.77*  choice: R=1.47*  feedback: R=1.77*  prior: R=0.72*
+bwm 5c0c560e VISpm    sensory n=   33 | stim: R=1.54   choice: R=1.35   feedback: R=1.04   prior: R=1.66 
+bwm 6274dda8 PAG      motor   n=   75 | stim: R=0.84   choice: R=0.89   feedback: R=1.26*  prior: R=0.70 
+bwm 6274dda8 PAR      other   n=   35 | stim: R=1.90   choice: R=3.61   feedback: R=1.19*  prior: R=0.95 
+bwm 6274dda8 PRE      other   n=   47 | stim: R=0.69   choice: R=1.40*  feedback: R=1.31   prior: R=1.26 
+bwm 6274dda8 SCm      motor   n=   37 | stim: R=0.83*  choice: R=0.86   feedback: R=0.61*  prior: R=1.21 
+bwm 6274dda8 VISp     sensory n=   50 | stim: R=1.22*  choice: R=0.77*  feedback: R=0.99   prior: R=0.75 
+meso 90029e53 RSPagl   other   n=  611 | stim: R=0.99   choice: R=1.10   feedback: R=1.42*
+meso 90029e53 RSPd     other   n=  291 | stim: R=1.21   choice: R=1.08   feedback: R=0.72*
+meso 90029e53 SSp-bfd  sensory n=  177 | stim: R=0.87   choice: R=1.20   feedback: R=1.13*
+meso 90029e53 SSp-ll   sensory n=   42 | stim: R=0.67*  choice: R=0.55   feedback: R=0.68*
+meso 90029e53 VISa     sensory n=  994 | stim: R=1.05   choice: R=1.58   feedback: R=0.98*
+meso 90029e53 VISal    sensory n=  671 | stim: R=0.88   choice: R=0.90   feedback: R=0.96*
+meso 90029e53 VISam    sensory n=  293 | stim: R=0.91   choice: R=0.73   feedback: R=1.27*
+meso 90029e53 VISp     sensory n= 1128 | stim: R=1.70*  choice: R=1.35*  feedback: R=1.41*
+meso 90029e53 VISrl    sensory n=  897 | stim: R=0.86   choice: R=0.92   feedback: R=0.97*
+meso a4afea1e MOp      motor   n=  797 | stim: R=1.22*  choice: R=0.85*  feedback: R=0.86*
+meso a4afea1e MOs      motor   n= 4645 | stim: R=1.10*  choice: R=0.92   feedback: R=1.10*
+meso fa10ff03 MOp      motor   n= 3017 | stim: R=1.17*  choice: R=1.41*  feedback: R=1.09*
+meso fa10ff03 MOs      motor   n=  637 | stim: R=1.34*  choice: R=1.23*  feedback: R=1.23*
+meso fa10ff03 SSp-bfd  sensory n=  612 | stim: R=1.13*  choice: R=0.96*  feedback: R=2.02*
+meso fa10ff03 SSp-ll   sensory n=  241 | stim: R=1.29*  choice: R=1.47*  feedback: R=1.40*
+meso fa10ff03 SSp-m    sensory n=   72 | stim: R=2.48*  choice: R=1.64   feedback: R=1.49*
+meso fa10ff03 SSp-n    sensory n=  279 | stim: R=1.76*  choice: R=1.29   feedback: R=2.16*
+meso fa10ff03 SSp-ul   sensory n= 1750 | stim: R=1.58*  choice: R=1.21*  feedback: R=1.70*
+meso fa10ff03 SSp-un   sensory n=  856 | stim: R=2.11*  choice: R=1.15*  feedback: R=2.48*
