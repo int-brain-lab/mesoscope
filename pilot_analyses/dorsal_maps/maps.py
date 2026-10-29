@@ -81,7 +81,8 @@ def style_map(ax, row, col, nrows, xlim=XLIM):
 def map_grid(per_mod, titles, cbar_labels, norms, out_stem, captions, label, intro, xlim=XLIM,
              rows=MODS, row_names=ROW_NAME, size=HEX_SIZE, out_dir=None, cmap=CMAP):
     """per_mod[row][c] = (keys, values) or (keys, values, alpha) for row
-    (modality or session) and column c."""
+    (modality or session) and column c, or a dict(x=, y=, v=) of points (mm)
+    drawn as small circles instead of hexagons."""
     from matplotlib.cm import ScalarMappable
     ncol, nrow = len(titles), len(rows)
     w = NATURE_DOUBLE_COL_IN if ncol > 2 else NATURE_DOUBLE_COL_IN * 0.6
@@ -91,8 +92,13 @@ def map_grid(per_mod, titles, cbar_labels, norms, out_stem, captions, label, int
         for r, m in enumerate(rows):
             ax = axs[r, c]
             outline(ax)
-            keys, vals, *alpha = per_mod[m][c]
-            hexmap(ax, keys, vals, norms[c], cmap=cmap, size=size, alpha=alpha[0] if alpha else None)
+            if isinstance(per_mod[m][c], dict):
+                p = per_mod[m][c]
+                ax.scatter(p["x"], p["y"], c=p["v"], cmap=cmap, norm=norms[c], s=5, lw=0.2,
+                           edgecolors="0.5", zorder=4)
+            else:
+                keys, vals, *alpha = per_mod[m][c]
+                hexmap(ax, keys, vals, norms[c], cmap=cmap, size=size, alpha=alpha[0] if alpha else None)
             pc = ScalarMappable(norm=norms[c], cmap=cmap)
             style_map(ax, r, c, nrow, xlim)
             if r == 0:

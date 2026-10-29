@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """Example rasters of the wheel-decoding features.
 
-For three sessions per modality (10th, 50th and 90th percentile of the
+For three sessions per modality (the best two and the worst by the
 session's median wheel-speed R^2 over bins, all neurons per bin, revised
 decoder, from output/variants.pqt): wheel speed in the 6 wheel bins
 (0.2 s, -0.2 to 1.0 s around first movement) of consecutive trials,
 concatenated, above the z-scored activity of the neurons most positively
-correlated with wheel speed (sorted by r); next to it the trial-averaged
-activity of all neurons in the 6 bins (sorted the same way) and r against
-neuron rank.
+correlated with wheel speed (sorted by r); next to it, for the same neurons,
+the trial-averaged activity in the 6 bins and r against neuron rank.
 
 Usage: python rasters.py   -> output/fig1_rasters.pdf
 """
@@ -21,19 +20,20 @@ from wd_common import (BIN_CENTRES, COL, DM, MODS, NAME, NATURE_DOUBLE_COL_IN, O
 
 N_TRIALS = 30
 N_SHOWN = 60
-QUANTILES = (0.9, 0.5, 0.1)
+RANKS = (0, 1, -1)                     # best, second best, worst
+RANK_NAME = {0: "best", 1: "2nd best", -1: "worst"}
 
 
 def pick_sessions(m, min_neurons=30):
-    """Sessions at the QUANTILES of the session median wheel R^2 over 0.4 mm
+    """Best two and worst sessions (RANKS) by the session median wheel R^2 over 0.4 mm
     bins (all neurons; revised decoder with lags and leave-one-trial-out
     penalty, corrected wheel targets; variants.py)."""
     d = pd.read_parquet(OUT / "variants.pqt")
-    w = d[(d.modality == m) & (d.variant == "lag")]
+    w = d[(d.modality == m) & (d.variant == "lag") & d.session.isin(session_files(m))]
     g = w.groupby("session").agg(r2=("all", "median"), n=("n_neurons", "sum"))
     g = g[g.n >= min_neurons].sort_values("r2")
-    return [(g.index[int(round(q * (len(g) - 1)))], g.r2.iloc[int(round(q * (len(g) - 1)))])
-            for q in QUANTILES]
+    g = g.sort_values("r2", ascending=False)
+    return [(g.index[k], g.r2.iloc[k], len(g)) for k in RANKS]
 
 
 def zscore_rows(A):
@@ -41,7 +41,7 @@ def zscore_rows(A):
     return (A - A.mean(1, keepdims=True)) / np.where(sd > 0, sd, 1)
 
 
-def session_row(fig, gs, m, sid, r2, q, letter):
+def session_row(fig, gs, m, sid, r2, q, letter, rx=None):
     s = load_session(session_files(m)[sid])
     X, y = s["X_wheel"].astype(np.float64), s["wheel_y"]
     keep = X.reshape(len(X), -1).std(1) > 0
@@ -66,7 +66,7 @@ def session_row(fig, gs, m, sid, r2, q, letter):
     style_axes(aw, max_yticks=2)
     aw.set_yticks([np.ceil(yw.max())])
     aw.spines["bottom"].set_visible(False)
-    aw.set_title(f"{NAME[m]}, {int(q * 100)}th pct. session {sid[:8]}: median $R^2$ {r2:.2f}, {n} neurons, "
+    aw.set_title(f"{NAME[m]}, {RANK_NAME[q]} session {sid[:8]}: median $R^2$ {r2:.2f}, {n} neurons, "
                  f"{T} trials; top-{ns} mean vs wheel $r$ = {r_pop:.2f}", loc="left", fontsize=5.5)
     panel_label(aw, letter, x=-0.06, y=1.1)
     ar = fig.add_subplot(sub[1, 0], sharex=aw)
@@ -79,37 +79,39 @@ def session_row(fig, gs, m, sid, r2, q, letter):
     ar.set_yticks([ns])
     ar.set_xlabel(f"wheel bin (trials 1-{N_TRIALS}, 6 bins each)" if letter in "cf" else "", fontsize=5)
     style_axes(ar, max_yticks=2)
-    # trial-averaged activity of all neurons, sorted by r
-    at = fig.add_subplot(sub[1, 1])
-    P = zscore_rows(X.mean(1))[order]
+    # trial-averaged activity of the same top neurons, sorted by r
+    at = fig.add_subplot(sub[1, 1], sharey=ar)
+    P = zscore_rows(X.mean(1))[order[:ns]]
     at.imshow(P, aspect="auto", cmap="RdBu_r", vmin=-2, vmax=2, interpolation="nearest",
-              extent=(-0.5, nb - 0.5, n, 0))
+              extent=(-0.5, nb - 0.5, ns, 0))
     at.set_xticks([0, nb - 1], [f"{BIN_CENTRES[0]:.1f}", f"{BIN_CENTRES[-1]:.1f}"], fontsize=5)
-    at.set_yticks([])
+    at.tick_params(labelleft=False, left=False)
     at.set_xlabel("s from move" if letter in "cf" else "", fontsize=5)
     atw = fig.add_subplot(sub[0, 1], sharex=at)
     atw.plot(np.arange(nb), y.mean(0), color="k", lw=0.8)
     atw.axis("off")
-    rr = fig.add_subplot(sub[1, 2])
-    rr.plot(r[order], 100 * (np.arange(n) + 0.5) / n, color=COL[m], lw=0.8)
+    rr = fig.add_subplot(sub[1, 2], sharey=ar, sharex=rx)  # r axis shared across rows
+    rr.plot(r[order[:ns]], np.arange(ns) + 0.5, color=COL[m], lw=0.8)
     rr.axvline(0, color="0.6", lw=0.4)
-    rr.set_ylim(100, 0)
-    rr.set_yticks([0, 100])
-    rr.tick_params(labelsize=5)
+    rr.tick_params(labelsize=5, labelleft=False)
     rr.set_xlabel("$r$ with wheel" if letter in "cf" else "", fontsize=5)
     style_axes(rr, max_xticks=2, max_yticks=2)
     return dict(m=m, sid=sid, r2=r2, n=n, r95=np.nanquantile(r, 0.95), rmax=np.nanmax(r),
-                frac_pos=np.nanmean(r > 0.1), r_pop=r_pop)
+                frac_pos=np.nanmean(r > 0.1), r_pop=r_pop), rr
 
 
 def main():
     fig = plt.figure(figsize=(NATURE_DOUBLE_COL_IN, 9.0))
     gs = fig.add_gridspec(6, 1, hspace=0.75)
     info = []
+    n_ses_of = {}
     k = 0
+    rx = None
     for m in MODS:
-        for (sid, r2), q in zip(pick_sessions(m), QUANTILES):
-            info.append(session_row(fig, gs[k], m, sid, r2, q, "abcdef"[k]))
+        for (sid, r2, n_ses), q in zip(pick_sessions(m), RANKS):
+            row, rx = session_row(fig, gs[k], m, sid, r2, q, "abcdef"[k], rx)
+            info.append(row)
+            n_ses_of[m] = n_ses
             k += 1
     I = pd.DataFrame(info)
     I.to_csv(OUT / "fig1_sessions.csv", index=False)
@@ -117,10 +119,10 @@ def main():
     caps = []
     for i in range(6):
         x = d(i)
-        caps.append(f"{NAME[x.m]} session {x.sid[:8]} ({int(QUANTILES[i % 3] * 100)}th percentile of the "
+        caps.append(f"{NAME[x.m]} session {x.sid[:8]} ({RANK_NAME[RANKS[i % 3]]} of {n_ses_of[x.m]} sessions by the "
                     f"session median wheel-speed $R^2$): 95th percentile of $r$ over neurons "
                     f"{x.r95:.2f}, maximum {x.rmax:.2f}, {x.frac_pos:.0%} of neurons with $r>0.1$; mean of the "
-                    f"top {N_SHOWN} neurons vs wheel speed in the shown trials $r$ = {x.r_pop:.2f}."
+                    f"top {min(x.n, N_SHOWN)} neurons vs wheel speed in the shown trials $r$ = {x.r_pop:.2f}."
                     .replace("%", "\\%"))
     intro = (f"Neural correlates of wheel speed. Each row: wheel speed (top; rad/s) in the 6 wheel bins "
              f"(0.2\\,s, $-0.2$ to 1\\,s around first movement) of the first {N_TRIALS} trials, "
@@ -129,9 +131,9 @@ def main():
              f"{N_SHOWN} neurons most positively correlated with wheel speed (sorted by $r$, highest on top). "
              f"Neurons are ranked by $r$ over all bins of the remaining trials, so the shown trials are "
              f"held out from the selection. Middle: trial-averaged "
-             f"activity of all neurons of the session per bin (z-scored per neuron, same order), with the "
-             f"mean wheel speed above. Right: held-out-trial $r$ of all neurons against their rank (\\%). Sessions at the "
-             f"90th, 50th and 10th percentile of the median $R^2$ over bins (all neurons per 0.4\\,mm bin, revised "
+             f"activity of the same {N_SHOWN} neurons per bin (z-scored per neuron, same order), with the "
+             f"mean wheel speed above. Right: their $r$ with wheel speed over the remaining trials, same rows. Sessions at the "
+             f"best two and the worst of each modality by the session median $R^2$ over bins (all neurons per 0.4\\,mm bin, revised "
              f"decoder with lagged features; sessions with $\\geq$30 neurons).")
     save_with_caption(fig, OUT / "fig1_rasters", caps, "wd2_rasters", intro=intro)
 

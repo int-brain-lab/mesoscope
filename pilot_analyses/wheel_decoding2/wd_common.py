@@ -15,7 +15,15 @@ for p in (str(REPO), str(DM)):
 from common import FEATURE_ROOT, WHEEL_EDGES  # noqa: E402,F401
 from plotstyle import (NATURE_DOUBLE_COL_IN, NATURE_SINGLE_COL_IN, panel_label,  # noqa: E402,F401
                        save_with_caption, style_axes)
-from sessions import load_session, session_files  # noqa: E402,F401
+from sessions import load_session, session_files as _session_files  # noqa: E402
+from decode_v2 import excluded_sessions  # noqa: E402
+
+
+def session_files(modality):
+    """dorsal_maps session files without the mesoscope sessions whose trials lie
+    mostly outside the imaging (dorsal_maps/imaging_coverage.py)."""
+    ex = excluded_sessions()
+    return {k: v for k, v in _session_files(modality).items() if k not in ex}
 
 OUT = HERE / "output"
 OUT.mkdir(exist_ok=True)
