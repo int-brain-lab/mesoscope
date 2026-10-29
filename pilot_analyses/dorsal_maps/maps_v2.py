@@ -30,8 +30,9 @@ from plotstyle import NATURE_DOUBLE_COL_IN, save_with_caption, style_axes
 
 ROWS = ("meso", "bwm_d640", "bwm")
 ROW_NAME = {"meso": "Mesoscope", "bwm_d640": f"BWM $\\leq${MAX_DEPTH_UM} µm",
-            "bwm": "BWM all depths"}
-ROW_TEXT = {"meso": "mesoscope", "bwm_d640": f"BWM $\\leq${MAX_DEPTH_UM}\\,$\\mu$m", "bwm": "BWM all depths"}
+            "bwm": "BWM all depths", "bwm_probe": "BWM per probe"}
+ROW_TEXT = {"meso": "mesoscope", "bwm_d640": f"BWM $\\leq${MAX_DEPTH_UM}\\,$\\mu$m", "bwm": "BWM all depths",
+            "bwm_probe": "BWM per probe"}
 COL = {"meso": "tab:green", "bwm_d640": "tab:purple", "bwm": "0.6"}
 TARGETS = ("stim", "choice", "feedback", "wheel", "wheel_trial")
 TITLE = {"stim": "Stimulus side", "choice": "Choice", "feedback": "Feedback", "wheel": "Wheel speed",
@@ -52,6 +53,7 @@ def load():
         tun[m]["hex"] = bin_neurons(tun[m][["x", "y", "z"]].values, size=HEX_V2)
     dec = {m: pd.read_parquet(OUT_V2 / f"decoding_{m}.pqt") for m in ROWS}
     dec["meso"] = dec["meso"][~dec["meso"].session.isin(excluded_sessions())]
+    dec["bwm_probe"] = pd.read_parquet(OUT_V2 / "decoding_bwm_probe.pqt")   # decode_probe.py
     return tun, dec
 
 
@@ -108,6 +110,13 @@ def decoding(dec, ver, summary):
         g = d.groupby(["target", "hex"]).agg(v=(ver, "mean"), na=("subject", "nunique"))
         per[m] = [(g.loc[t].index, g.loc[t].v.values, opacity(g.loc[t].na.values)) if t in g.index.levels[0]
                   else ([], [], []) for t in TARGETS]
+    rows = ROWS
+    if ver == "all":     # extra row: BWM decoded per probe, a circle at the probe's entry point
+        rows = ROWS + ("bwm_probe",)
+        p = dec["bwm_probe"].sort_values("all")          # strongest drawn on top where probes overlap
+        per["bwm_probe"] = [dict(x=np.abs(p.entry_x[p.target == t].values), y=p.entry_y[p.target == t].values,
+                                 v=p["all"][p.target == t].values) for t in TARGETS]
+    # colour scales from the hexagon rows only (probe circles above the top saturate)
     binary = joint_norm([per[m][i][1] for m in ROWS for i, t in enumerate(TARGETS[:3]) if len(per[m][i][1])], lo=0.5)
     norms = [binary] * 3 + [joint_norm([per[m][3][1] for m in ROWS], lo=0),
                             joint_norm([per[m][4][1] for m in ROWS], lo=0)]
@@ -123,14 +132,21 @@ def decoding(dec, ver, summary):
         title = "Decoding from all neurons"
         who = (f"all neurons of one session in that bin (sessions with $\\geq${N_PICK} neurons there); "
                "mesoscope bins hold far more neurons than BWM bins")
+        p = dec["bwm_probe"].drop_duplicates("pid")
+        probe = (f" Bottom row: BWM decoded per probe from all its isocortex units at all depths, whichever bins "
+                 f"they fall in ({len(p)} probes with $\\geq${N_PICK} units, median {p.n_neurons.median():.0f}); "
+                 "each circle sits at the probe's brain entry point (histology-aligned Alyx trajectory, "
+                 "hemispheres folded), higher scores drawn on top where circles overlap; colour scales as in the rows "
+                 "above, so circles beyond the top of a scale saturate.")
     head = (f"\\textbf{{{title}}}. Rows: mesoscope; BWM units within {MAX_DEPTH_UM}\\,$\\mu$m of the pial "
             "surface; BWM at all depths. Each bin (1\\,mm hexagon, hemispheres folded) shows the mean over "
-            f"sessions of decoders trained on {who}. Opacity: number of animals (full at $\\geq$4).")
+            f"sessions of decoders trained on {who}. Opacity: number of animals (full at $\\geq$4)."
+            + (probe if ver == "all" else ""))
     map_grid(per, [TITLE[t] for t in TARGETS], ["balanced accuracy"] * 3 + ["$R^2$"] * 2, norms,
              f"v2_decoding_{ver}",
              ["Stimulus side, balanced accuracy (chance 0.5; colour scale shared by \\textbf{a}--\\textbf{c}).",
               "Choice.", "Feedback.", "Wheel speed, cross-validated $R^2$.", "Trial-specific wheel speed, $R^2$."],
-             f"v2_decoding_{ver}", intro=head, rows=ROWS, row_names=ROW_NAME, size=HEX_V2, out_dir=OUT_V2)
+             f"v2_decoding_{ver}", intro=head, rows=rows, row_names=ROW_NAME, size=HEX_V2, out_dir=OUT_V2)
 
 
 def tuning(tun, summary):
