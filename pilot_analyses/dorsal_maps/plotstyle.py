@@ -34,6 +34,20 @@ NATURE_ONEHALF_COL_IN = 136 / 25.4  # ~5.35 in
 NATURE_DOUBLE_COL_IN = 183 / 25.4   # ~7.20 in
 NATURE_MAX_HEIGHT_IN = 247 / 25.4   # ~9.72 in
 
+_ALLEN = None
+
+
+def allen_color(acronym, default="#8a8880"):
+    """Allen atlas colour of a region acronym (hex string)."""
+    global _ALLEN
+    if _ALLEN is None:
+        import iblatlas
+        import pandas as pd
+        d = pd.read_csv(Path(iblatlas.__file__).parent / "allen_structure_tree.csv")
+        _ALLEN = {a: "#" + str(h).upper() for a, h in zip(d.acronym, d.color_hex_triplet)
+                  if isinstance(h, str) and len(h) == 6}
+    return _ALLEN.get(acronym, default)
+
 
 def apply_nature_style():
     """Sans-serif font, small point sizes, thin lines -- Nature house
