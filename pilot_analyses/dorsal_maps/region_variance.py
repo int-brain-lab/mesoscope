@@ -276,7 +276,8 @@ def caption(d, shared, st):
              "Methods: \\emph{Region and session variance}.")
     caps = [
         "Scores per region (columns ordered as in the Allen structure tree; Allen colours; bar: median; dashed: "
-        "chance; grey band and line: 5--95th percentile and median of the baseline). Top: mesoscope, one dot per "
+        "chance; grey band and line: 5--95th percentile and median of the baseline; for trial-specific wheel speed "
+        "the shuffle baseline lies at $R^2 \\approx 0$ and is hidden by the dashed line). Top: mesoscope, one dot per "
         f"session and region from all its neurons there ({n['meso'][0]} sessions, {n['meso'][2]} animals); baseline: "
         "shuffle control. Middle: BWM, one dot per probe from all its isocortex units, placed in the region where it "
         f"enters the brain ({n['bwm'][0]} probes, {n['bwm'][2]} animals; the majority region of its superficial units "
