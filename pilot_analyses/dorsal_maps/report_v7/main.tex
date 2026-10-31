@@ -97,6 +97,23 @@ The wheel-speed bins are identical for both datasets. The stimulus, choice and f
   \item Sessions without biased blocks (55 mesoscope sessions) are tested within their single 0.5 block. Neurons that cannot be tested are left out of the fractions.
 \end{itemize}
 
+\paragraph{Region and session variance (\figref{region_variance}).}
+\begin{itemize}
+  \item \textbf{Mesoscope scores:} one all-neuron score per session and Beryl region (all neurons of the session in the region, at least 20), with the decoders of \figref{decoding_all}.
+  \item \textbf{BWM per probe:} one score per probe from all its isocortex units (at least 20), assigned to the Beryl region 300\um{} below its brain entry point (histology-aligned trajectory). Angled probes drift, so this is the majority region of the probe's superficial units for only about two thirds of probes.
+  \item \textbf{BWM decoding paper:} the published Brain Wide Map decoding results (stage-2 tables), one score per session and region from all units of the region, with no minimum unit count (median 16). Each score comes with a $p$-value against 100--200 pseudo-sessions and the median of that null, which is the baseline in \figref{region_variance}. These tables have wheel velocity instead of trial-specific wheel speed.
+  \item \textbf{Regions:} the 15 with at least 3 mesoscope sessions and 3 BWM probes.
+  \item \textbf{Shuffle control (mesoscope, BWM per probe):} the same decoders with the trials of all labels and of wheel speed permuted jointly, neural data untouched; 1 permutation per mesoscope score and 3 per probe, pooled per region. This plain trial permutation is less strict than the pseudo-session null of the decoding paper, which keeps the block structure, so the band can sit slightly lower, mainly for stimulus side and choice. For wheel speed the shuffled $R^2$ is not zero: the stereotyped speed profile after movement onset is still predicted from the stereotyped neural time course.
+  \item \textbf{Statistics, mesoscope only.} In BWM nearly every session has one probe, so session variance cannot be separated from probe-to-probe variance. The decoding-paper tables do not help either: few sessions have scores in two or more of these regions, and those regions are usually adjacent along one probe. All-neuron scores grow with the number of neurons, so log neuron count is a covariate in the mixed model and is regressed out before the permutation tests.
+  \item \textbf{Mixed model:} score $\sim$ log $N$ + (1$|$region) + (1$|$animal) + (1$|$session), crossed random effects, REML (statsmodels). Each component's share is its variance over the total, and each is tested by a likelihood-ratio test against the model without it ($\chi^2_{0/1}$ mixture). Uncertainty in (session + animal share) $-$ region share comes from an animal-level bootstrap: 200 resamples of animals with replacement (a repeated animal and its sessions count as new ones), each refitted with a GPU implementation of the same REML model (\texttt{reml.py}, matches statsmodels to 4 decimals).
+  \item \textbf{Permutation tests:} the same question without a statistical model, using only reshuffling, on the scores with log $N$ regressed out.
+  \begin{itemize}
+    \item \emph{Region:} each session's mean is subtracted from its region scores, so a good session or animal cannot make its regions look good. The statistic is $\eta^2$, the share of the remaining variance that lies between regions. The null comes from 5{,}000 shuffles of the region labels within each session (sessions with at least 2 regions).
+    \item \emph{Session:} the mirror image. Each region's mean is subtracted, $\eta^2$ is the share between sessions, and session labels are shuffled within each region.
+    \item $\eta^2$ is above 0 even for random labels, and more so with many groups (about 150 sessions vs 15 regions). The figure therefore shows adjusted $\eta^2$ = ($\eta^2 -$ null mean) / (1 $-$ null mean): 0 is chance level and positive values are the share beyond chance. $p$ is the fraction of shuffles with $\eta^2$ at least as large as observed.
+  \end{itemize}
+\end{itemize}
+
 \section*{Headline numbers}
 \begin{table}[!htbp]
 \centering\small
@@ -133,9 +150,15 @@ Decoding from 20 random neurons per session and bin (mean over 10 draws), so all
 
 \input{figures/decoding_n20}
 
-Decoding from all neurons of a session in a bin, otherwise as in \figref{decoding_n20}. Mesoscope bins hold about 20 times more neurons than BWM bins (median 458 vs 27), so the rows are not comparable in absolute terms. With hundreds of neurons per bin, the mesoscope decodes stimulus side and feedback better than BWM, and its frontal feedback map stands out (\figref{decoding_all}).
+Decoding from all neurons of a session in a bin, otherwise as in \figref{decoding_n20}. Mesoscope bins hold about 20 times more neurons than BWM bins (median 458 vs 27), so the rows are not comparable in absolute terms. With hundreds of neurons per bin, the mesoscope decodes stimulus side and feedback better than BWM, and its frontal feedback map stands out. The bottom row decodes each BWM probe from all its isocortex units and places it at its brain entry point; per-probe medians match the per-bin ones (\figref{decoding_all}).
 
 \input{figures/decoding_all}
+
+\FloatBarrier
+\section*{Variance across regions and sessions}
+Do all-neuron scores differ more between regions or between sessions? Scores are shown per Beryl region for the mesoscope (per session), BWM per probe (at its entry region) and the BWM decoding paper (per session and region), for the 15 regions sampled by both datasets. In both BWM versions frontal motor cortex stands out: MOp and MOs have the highest median scores for choice, feedback and wheel speed in the decoding paper. In the mesoscope, where every session samples several regions, region matters (mixed model, region share 10--30\%, all $p<0.001$, most for wheel speed), but sessions and animals together account for more (41--59\%). With only 12 animals, resampling whole animals (200 bootstrap fits) confirms this for stimulus side, choice and feedback (95\% CI of session + animal minus region share above 0); for wheel speed and trial-specific wheel speed it holds in 78\% and 96\% of resamples, so it is likely but not certain. The model-free test agrees: within a region, scores vary more across sessions than across regions within a session, for every variable. For ephys we do not have enough data to test how much region and session contribute to the variance: few BWM sessions record two or more of these regions, and those are usually adjacent along one probe. The two BWM rows of \figref{region_variance}a therefore only show the scores, and panels b and c are mesoscope only.
+
+\input{figures/region_variance}
 
 \FloatBarrier
 \section*{Summary and bin-wise agreement}
