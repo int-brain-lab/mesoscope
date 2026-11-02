@@ -404,53 +404,25 @@ def example_mice(d, pm):
 
 
 def caption(d, shared, st, pm):
-    p = d["bwm"].drop_duplicates("pid")
-    agree = (p.region == p.region_units).mean()
     n = {k: (d[k].unit.nunique(), d[k].session.nunique(), d[k].animal.nunique()) for k in ROWS}
-    bp = d["bwm_paper"]
-    sig = {t: (bp[bp.target == t].p < 0.05).mean() for t in TARGETS}
-    pct = lambda col: ", ".join(f"{short(t).lower()} {100 * st.set_index('target').loc[t, col]:.0f}\\%"  # noqa: E731
-                                for t in TARGETS)
-    ses = ", ".join(f"{short(t).lower()} {100 * (st.set_index('target').loc[t, 'frac_session'] + st.set_index('target').loc[t, 'frac_animal']):.0f}\\%"
-                    for t in TARGETS)
     intro = ("\\textbf{Variance of decoding across regions and sessions (all neurons).} "
-             f"The {len(shared)} regions with $\\geq${MIN_PER_REGION} mesoscope sessions and BWM probes. "
-             "Methods: \\emph{Region and session variance}.")
+             f"The {len(shared)} regions with $\\geq${MIN_PER_REGION} mesoscope sessions and BWM probes; models, "
+             "tests and baselines in Methods, \\emph{Region and session variance}.")
     caps = [
-        "Scores per region (columns ordered as in the Allen structure tree; Allen colours; bar: median; dashed: "
-        "chance; grey band and line: 5--95th percentile and median of the baseline; for trial-specific wheel speed "
-        "the shuffle baseline lies at $R^2 \\approx 0$ and is hidden by the dashed line). Top: mesoscope, one dot per "
-        f"session and region from all its neurons there ({n['meso'][0]} sessions, {n['meso'][2]} animals); baseline: "
-        "shuffle control. Middle: BWM, one dot per probe from all its isocortex units, placed in the region where it "
-        f"enters the brain ({n['bwm'][0]} probes, {n['bwm'][2]} animals; the majority region of its superficial units "
-        f"for {100 * agree:.0f}\\% of probes); baseline: shuffle control. Bottom: BWM decoding paper, one dot per "
-        f"session and region from the region's units ({len(bp.drop_duplicates(['session', 'region']))} pairs, "
-        f"{n['bwm_paper'][1]} sessions, {n['bwm_paper'][2]} animals); filled: $p<0.05$ against pseudo-sessions "
-        f"({100 * min(sig.values()):.0f}--{100 * max(sig.values()):.0f}\\% of dots); baseline: median of the "
-        "pseudo-session null; wheel velocity in place of trial-specific wheel speed. Y axes shared within balanced "
-        "accuracy and within $R^2$. Inset, top row: region share of variance from \\textbf{c}.",
-        "Example mice (with $\\geq$10 sessions and $\\geq$7 regions): the most region-dominated, the most balanced "
-        "and the most session-dominated by \\textbf{e}, averaged over stimulus side and feedback. Each matrix: one "
-        "row per session (sorted by its mean), one column per region (Allen order), colour: score with log $N$ "
-        "regressed out (shared scale per variable), grey: region not imaged in that session. Horizontal stripes are "
-        "session effects, vertical stripes region effects; columns that rank differently between mice are the "
-        "region $\\times$ mouse effect.",
-        "Mesoscope variance fractions from a mixed model, score $\\sim$ log $N$ + (1$|$region) + (1$|$animal) + "
-        "(1$|$session). Error bars: 95\\% intervals from resampling whole animals (" + str(N_BOOT) + " refits), "
-        "for the region share (left bar, at the top of the region block) and the session plus animal share (right "
-        "bar, at the top of the session block); numbers above: fraction of resamples in which session plus animal "
-        "exceeds region. Region: " + pct("frac_region") + "; session plus animal: " + ses + ". The region "
-        "component is significant for every variable (likelihood-ratio test, $p<0.001$).",
-        "The same question as \\textbf{c}, do scores differ more between regions or between sessions, but without a "
-        "statistical model, using only reshuffling: adjusted $\\eta^2$ of region (circles; region labels shuffled within "
-        "sessions), of session (squares; session labels shuffled within regions, across mice, so this includes "
-        "differences between mice) and of session within mouse (triangles; shuffled within region and mouse, so "
-        "differences between mice are removed, the model-free counterpart of \\textbf{e}), 0 = chance. "
-        "Filled: $p<0.05$.",
-        "The same comparison within each mouse: mixed model score $\\sim$ log $N$ + (1$|$region) + (1$|$session) "
-        f"fitted separately per mouse with $\\geq${MIN_MOUSE_SESSIONS} sessions ({pm.animal.nunique()} mice); "
-        "dots: session share minus region share per mouse; bar: median; numbers above: mice with a larger session "
-        "share.",
+        "Scores per region (Allen order and colours; bar: median; dashed: chance; grey band and line: 5--95th "
+        f"percentile and median of the baseline). Rows: mesoscope, one dot per session and region ({n['meso'][0]} "
+        f"sessions, {n['meso'][2]} mice); BWM, one dot per probe at its entry region ({n['bwm'][0]} probes); BWM "
+        "decoding paper, one dot per session and region, filled if $p<0.05$ (wheel velocity in the last column). "
+        "Inset: region share from \\textbf{c}.",
+        "Session $\\times$ region scores (log $N$ removed) of a region-dominated, a balanced and a "
+        "session-dominated mouse; grey: region not imaged. Horizontal stripes are session effects, vertical "
+        "stripes region effects.",
+        "Mesoscope variance shares from the mixed model; error bars: 95\\% intervals over resampled mice; numbers: "
+        "fraction of resamples with session plus animal above region.",
+        "Permutation tests, adjusted $\\eta^2$ (0 = chance): region (circles), session including (squares) and "
+        "excluding (triangles) differences between mice. Filled: $p<0.05$.",
+        f"Session minus region share, fitted per mouse ({pm.animal.nunique()} mice with $\\geq${MIN_MOUSE_SESSIONS} "
+        "sessions); bar: median; numbers: mice with a larger session share.",
     ]
     return intro, caps
 
