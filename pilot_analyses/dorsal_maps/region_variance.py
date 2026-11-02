@@ -254,8 +254,8 @@ def short(t):
 
 def figure(d, shared, st, pm):
     nr = len(ROWS)
-    fig = plt.figure(figsize=(NATURE_DOUBLE_COL_IN, 10.6))
-    gs = fig.add_gridspec(nr + 6, 5, height_ratios=[1] * nr + [0.42, 0.95, 0.32, 0.95, 0.42, 1.25], hspace=0.28,
+    fig = plt.figure(figsize=(NATURE_DOUBLE_COL_IN, 9.4))
+    gs = fig.add_gridspec(nr + 4, 5, height_ratios=[1] * nr + [0.42, 1.25, 0.45, 0.95], hspace=0.28,
                           wspace=0.35)
     xs = np.arange(len(shared))
     share = {}                                           # one y axis for balanced accuracy, one for R^2
@@ -302,8 +302,9 @@ def figure(d, shared, st, pm):
             if r == 0 and c == 0:
                 ax.text(-0.45, 1.12, "a", transform=ax.transAxes, fontsize=8, fontweight="bold")
 
-    # b: mixed-model variance fractions (mesoscope)
-    ax = fig.add_subplot(gs[nr + 1, 0:2])
+    stats_row = gs[nr + 3, :].subgridspec(1, 5, width_ratios=[1, 0.45, 1, 0.7, 1], wspace=0.35)
+    # c: mixed-model variance fractions (mesoscope)
+    ax = fig.add_subplot(stats_row[0, 0])
     x0 = np.arange(len(TARGETS))
     s = st.set_index("target").loc[list(TARGETS)]
     bottom = np.zeros(len(TARGETS))
@@ -323,10 +324,10 @@ def figure(d, shared, st, pm):
     ax.set_ylabel("variance fraction")
     style_axes(ax, categorical_x=True)
     ax.legend(frameon=False, fontsize=5, loc="upper left", bbox_to_anchor=(1.0, 1.0))
-    ax.text(-0.18, 1.18, "b", transform=ax.transAxes, fontsize=8, fontweight="bold")
+    ax.text(-0.3, 1.12, "c", transform=ax.transAxes, fontsize=8, fontweight="bold")
 
-    # c: permutation, region vs session, adjusted eta^2 (mesoscope)
-    ax = fig.add_subplot(gs[nr + 1, 3:5])
+    # d: permutation, region vs session, adjusted eta^2 (mesoscope)
+    ax = fig.add_subplot(stats_row[0, 2])
     for eff, mk, dx in (("region", "o", -0.15), ("session", "s", 0), ("session_mouse", "^", 0.15)):
         v, p = s[f"eta_{eff}"].values, s[f"p_{eff}"].values
         ax.scatter(x0 + dx, v, marker=mk, s=14, facecolors=np.where(p < 0.05, COL["meso"], "white"),
@@ -338,10 +339,10 @@ def figure(d, shared, st, pm):
     ax.set_ylabel("adjusted $\\eta^2$")
     style_axes(ax, categorical_x=True)
     ax.legend(frameon=False, fontsize=5, loc="upper left", bbox_to_anchor=(1.0, 1.0))
-    ax.text(-0.18, 1.18, "c", transform=ax.transAxes, fontsize=8, fontweight="bold")
+    ax.text(-0.3, 1.12, "d", transform=ax.transAxes, fontsize=8, fontweight="bold")
 
-    # d: session minus region share within each mouse (mesoscope)
-    ax = fig.add_subplot(gs[nr + 3, 0:2])
+    # e: session minus region share within each mouse (mesoscope)
+    ax = fig.add_subplot(stats_row[0, 4])
     jit = np.random.default_rng(2)
     for i, t in enumerate(TARGETS):
         v = (pm[pm.target == t].frac_session - pm[pm.target == t].frac_region).values
@@ -353,11 +354,11 @@ def figure(d, shared, st, pm):
     ax.set_xticks(x0, [short(t) for t in TARGETS], rotation=30, ha="right", fontsize=5)
     ax.set_ylabel("session $-$ region share")
     style_axes(ax, categorical_x=True)
-    ax.text(-0.18, 1.18, "d", transform=ax.transAxes, fontsize=8, fontweight="bold")
+    ax.text(-0.3, 1.12, "e", transform=ax.transAxes, fontsize=8, fontweight="bold")
 
-    # e: session x region matrices of three example mice
+    # b: session x region matrices of three example mice
     mice, kinds = example_mice(d, pm)
-    sub = gs[nr + 5, :].subgridspec(1, 9, width_ratios=[1, 1, 1, 0.07, 0.45, 1, 1, 1, 0.07], wspace=0.25)
+    sub = gs[nr + 1, :].subgridspec(1, 9, width_ratios=[1, 1, 1, 0.07, 0.45, 1, 1, 1, 0.07], wspace=0.25)
     df_all = d["meso"].assign(y=np.nan)
     for t in HEAT_TARGETS:
         idx = df_all.target == t
@@ -382,7 +383,7 @@ def figure(d, shared, st, pm):
             if g == 0 and j == 0:
                 ax.set_ylabel("sessions,\nsorted by mean", fontsize=4.5)
             if g == 0 and j == 0:
-                ax.text(-0.45, 1.25, "e", transform=ax.transAxes, fontsize=8, fontweight="bold")
+                ax.text(-0.45, 1.25, "b", transform=ax.transAxes, fontsize=8, fontweight="bold")
         cax = fig.add_subplot(sub[0, 5 * g + 3])
         cb = fig.colorbar(im, cax=cax)
         cb.ax.tick_params(labelsize=4, length=1.5)
@@ -427,29 +428,29 @@ def caption(d, shared, st, pm):
         f"{n['bwm_paper'][1]} sessions, {n['bwm_paper'][2]} animals); filled: $p<0.05$ against pseudo-sessions "
         f"({100 * min(sig.values()):.0f}--{100 * max(sig.values()):.0f}\\% of dots); baseline: median of the "
         "pseudo-session null; wheel velocity in place of trial-specific wheel speed. Y axes shared within balanced "
-        "accuracy and within $R^2$. Inset, top row: region share of variance from \\textbf{b}.",
+        "accuracy and within $R^2$. Inset, top row: region share of variance from \\textbf{c}.",
+        "Example mice (with $\\geq$10 sessions and $\\geq$7 regions): the most region-dominated, the most balanced "
+        "and the most session-dominated by \\textbf{e}, averaged over stimulus side and feedback. Each matrix: one "
+        "row per session (sorted by its mean), one column per region (Allen order), colour: score with log $N$ "
+        "regressed out (shared scale per variable), grey: region not imaged in that session. Horizontal stripes are "
+        "session effects, vertical stripes region effects; columns that rank differently between mice are the "
+        "region $\\times$ mouse effect.",
         "Mesoscope variance fractions from a mixed model, score $\\sim$ log $N$ + (1$|$region) + (1$|$animal) + "
         "(1$|$session). Error bars: 95\\% intervals from resampling whole animals (" + str(N_BOOT) + " refits), "
         "for the region share (left bar, at the top of the region block) and the session plus animal share (right "
         "bar, at the top of the session block); numbers above: fraction of resamples in which session plus animal "
         "exceeds region. Region: " + pct("frac_region") + "; session plus animal: " + ses + ". The region "
         "component is significant for every variable (likelihood-ratio test, $p<0.001$).",
-        "The same question as \\textbf{b}, do scores differ more between regions or between sessions, but without a "
+        "The same question as \\textbf{c}, do scores differ more between regions or between sessions, but without a "
         "statistical model, using only reshuffling: adjusted $\\eta^2$ of region (circles; region labels shuffled within "
         "sessions), of session (squares; session labels shuffled within regions, across mice, so this includes "
         "differences between mice) and of session within mouse (triangles; shuffled within region and mouse, so "
-        "differences between mice are removed, the model-free counterpart of \\textbf{d}), 0 = chance. "
+        "differences between mice are removed, the model-free counterpart of \\textbf{e}), 0 = chance. "
         "Filled: $p<0.05$.",
         "The same comparison within each mouse: mixed model score $\\sim$ log $N$ + (1$|$region) + (1$|$session) "
         f"fitted separately per mouse with $\\geq${MIN_MOUSE_SESSIONS} sessions ({pm.animal.nunique()} mice); "
         "dots: session share minus region share per mouse; bar: median; numbers above: mice with a larger session "
         "share.",
-        "Example mice (with $\\geq$10 sessions and $\\geq$7 regions): the most region-dominated, the most balanced "
-        "and the most session-dominated by \\textbf{d}, averaged over stimulus side and feedback. Each matrix: one "
-        "row per session (sorted by its mean), one column per region (Allen order), colour: score with log $N$ "
-        "regressed out (shared scale per variable), grey: region not imaged in that session. Horizontal stripes are "
-        "session effects, vertical stripes region effects; columns that rank differently between mice are the "
-        "region $\\times$ mouse effect.",
     ]
     return intro, caps
 
