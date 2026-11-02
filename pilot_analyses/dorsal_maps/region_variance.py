@@ -30,7 +30,10 @@ regressed out (all-neuron scores grow with the number of neurons):
 - per mouse (panel d): score ~ log N + (1|region) + (1|session) within each mouse with
   >= MIN_MOUSE_SESSIONS sessions (reml.py); session share minus region share;
 - region x mouse: the pooled model with an extra (1|region:animal) term (reml.py), columns
-  ra_* in the stats csv (reported in the text, not plotted).
+  ra_* in the stats csv (reported in the text, not plotted);
+- panel e: session x region score matrices (log N regressed out) of three example mice with
+  >= 10 sessions and >= 7 regions: the most region-dominated, the most session-dominated and
+  the most balanced by panel d, averaged over HEAT_TARGETS.
 
 Usage: python region_variance.py
 Writes output/v2/region_variance{_panels.pdf,.tex,.pdf} and output/v2/region_variance_stats.csv.
@@ -52,6 +55,7 @@ MIN_PER_REGION = 3
 N_PERM = 5000
 N_BOOT = 200
 MIN_MOUSE_SESSIONS = 4
+HEAT_TARGETS = ("stim", "feedback")                      # panel e
 MODS = ("meso", "bwm")
 ROWS = ("meso", "bwm", "bwm_paper")
 ROW_NAME = {"meso": "Mesoscope", "bwm": "BWM per probe", "bwm_paper": "BWM per region\n(decoding paper)"}
@@ -250,8 +254,9 @@ def short(t):
 
 def figure(d, shared, st, pm):
     nr = len(ROWS)
-    fig = plt.figure(figsize=(NATURE_DOUBLE_COL_IN, 9.0))
-    gs = fig.add_gridspec(nr + 4, 5, height_ratios=[1] * nr + [0.42, 0.95, 0.32, 0.95], hspace=0.28, wspace=0.35)
+    fig = plt.figure(figsize=(NATURE_DOUBLE_COL_IN, 10.6))
+    gs = fig.add_gridspec(nr + 6, 5, height_ratios=[1] * nr + [0.42, 0.95, 0.32, 0.95, 0.42, 1.25], hspace=0.28,
+                          wspace=0.35)
     xs = np.arange(len(shared))
     share = {}                                           # one y axis for balanced accuracy, one for R^2
     for r, k in enumerate(ROWS):
@@ -349,7 +354,52 @@ def figure(d, shared, st, pm):
     ax.set_ylabel("session $-$ region share")
     style_axes(ax, categorical_x=True)
     ax.text(-0.18, 1.18, "d", transform=ax.transAxes, fontsize=8, fontweight="bold")
+
+    # e: session x region matrices of three example mice
+    mice, kinds = example_mice(d, pm)
+    sub = gs[nr + 5, :].subgridspec(1, 9, width_ratios=[1, 1, 1, 0.07, 0.45, 1, 1, 1, 0.07], wspace=0.25)
+    df_all = d["meso"].assign(y=np.nan)
+    for t in HEAT_TARGETS:
+        idx = df_all.target == t
+        df_all.loc[idx, "y"] = residualise(df_all[idx].reset_index(drop=True))
+    for g, t in enumerate(HEAT_TARGETS):
+        dt = df_all[df_all.target == t]
+        lo, hi = np.nanpercentile(dt[dt.animal.isin(mice)].y, [5, 95])
+        for j, (a, kind) in enumerate(zip(mice, kinds)):
+            ax = fig.add_subplot(sub[0, 5 * g + j])
+            m = dt[dt.animal == a].pivot_table(index="session", columns="region", values="y")
+            m = m[sorted(m.columns, key=allen_order)]
+            m = m.loc[m.mean(axis=1).sort_values(ascending=False).index]
+            ax.set_facecolor("0.9")
+            im = ax.imshow(m.values, aspect="auto", cmap="viridis", vmin=lo, vmax=hi, interpolation="nearest")
+            ax.set_xticks(range(m.shape[1]), m.columns, rotation=90, fontsize=3.5)
+            ax.set_yticks([])
+            for sp in ax.spines.values():
+                sp.set_visible(False)
+            dv = pm[(pm.animal == a) & (pm.target == t)]
+            dv = (dv.frac_session - dv.frac_region).iloc[0]
+            ax.set_title(f"{short(t)}\n{a} ({kind})\nsession $-$ region {dv:+.2f}", fontsize=4.5, pad=2)
+            if g == 0 and j == 0:
+                ax.set_ylabel("sessions,\nsorted by mean", fontsize=4.5)
+            if g == 0 and j == 0:
+                ax.text(-0.45, 1.25, "e", transform=ax.transAxes, fontsize=8, fontweight="bold")
+        cax = fig.add_subplot(sub[0, 5 * g + 3])
+        cb = fig.colorbar(im, cax=cax)
+        cb.ax.tick_params(labelsize=4, length=1.5)
+        cb.outline.set_visible(False)
+        cb.set_label("score, log $N$ removed", fontsize=4.5)
     return fig
+
+
+def example_mice(d, pm):
+    """Region-dominated, balanced and session-dominated mouse (panel d, mean over HEAT_TARGETS)."""
+    m = d["meso"][d["meso"].target == HEAT_TARGETS[0]]
+    big = m.groupby("animal").agg(ses=("session", "nunique"), reg=("region", "nunique"))
+    big = big[(big.ses >= 10) & (big.reg >= 7)].index
+    q = pm[pm.target.isin(HEAT_TARGETS) & pm.animal.isin(big)]
+    q = (q.frac_session - q.frac_region).groupby(q.animal).mean()
+    return [q.idxmin(), (q - q.median()).abs().idxmin(), q.idxmax()], ["region-dominated", "balanced",
+                                                                       "session-dominated"]
 
 
 def caption(d, shared, st, pm):
@@ -394,6 +444,12 @@ def caption(d, shared, st, pm):
         f"fitted separately per mouse with $\\geq${MIN_MOUSE_SESSIONS} sessions ({pm.animal.nunique()} mice); "
         "dots: session share minus region share per mouse; bar: median; numbers above: mice with a larger session "
         "share.",
+        "Example mice (with $\\geq$10 sessions and $\\geq$7 regions): the most region-dominated, the most balanced "
+        "and the most session-dominated by \\textbf{d}, averaged over stimulus side and feedback. Each matrix: one "
+        "row per session (sorted by its mean), one column per region (Allen order), colour: score with log $N$ "
+        "regressed out (shared scale per variable), grey: region not imaged in that session. Horizontal stripes are "
+        "session effects, vertical stripes region effects; columns that rank differently between mice are the "
+        "region $\\times$ mouse effect.",
     ]
     return intro, caps
 
