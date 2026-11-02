@@ -34,76 +34,6 @@ The International Brain Laboratory (IBL) mapped neural correlates of its standar
 
 Here we decode stimulus side, choice, feedback and wheel speed from IBL mesoscope sessions and from the BWM data, with identical trial criteria, decoders and single-neuron tests, and map the results across dorsal cortex. Because each mesoscope session covers several regions, it also lets us ask a question single-probe recordings cannot answer: do decoding scores differ more between regions or between sessions and animals?
 
-\section*{Methods}
-\paragraph{Data.}
-\begin{itemize}
-  \item \textbf{Task.} The IBL biased visual decision-making task~[1]: mice turn a wheel to move a grating of varying contrast to the centre of a screen, and the prior probability of left vs right stimuli switches in blocks.
-  \item \textbf{Mesoscope:} IBL two-photon mesoscope sessions of dorsal cortex, accessed from Alyx with ONE~[3]: ROI positions (\texttt{mpciROIs.mlapdv}), ROI types and activity (\texttt{mpci.ROIActivity}) with frame and per-plane times. 151 of the 165 canonical sessions, from 12 mice (Supplementary notes).
-  \item \textbf{BWM:} the 2023 data release~[2], loaded with the \texttt{brainwidemap} package~[4] (\texttt{load\_good\_units}, \texttt{load\_trials\_and\_mask}): 351 insertions in 288 sessions, good units only. Brain regions are Allen CCF labels mapped with \texttt{iblatlas}~[5].
-  \item \textbf{Quality control.} 16 of 153 mesoscope sessions had wheel-encoder overflow jumps ($\pm$6.6 million rad), which were corrected; no BWM session was affected.
-\end{itemize}
-
-\paragraph{Analysis windows.}
-The wheel-speed bins are identical for both datasets. BWM stimulus, choice and feedback windows follow the BWM single-cell analyses (0.1, 0.1 and 0.2\,s). Mesoscope frames are about 0.2\,s apart, so its windows are widened to 0.3\,s to always contain at least one frame (\figref{windows}).
-
-\paragraph{Neurons, trials and spatial bins.}
-\begin{itemize}
-  \item \textbf{Mesoscope neurons:} are ROIs classified as neurons, labelled isocortex (Allen Cosmos level) and with a valid position. Activity is the deconvolved trace.
-  \item \textbf{BWM units:} good units labelled isocortex; activity is the firing rate (spike count / window length).
-  \item \textbf{Excluded mesoscope sessions:} two sessions whose task and imaging clocks disagree. In both, the cross-correlation of population activity with wheel speed peaks at $-146$\,s and $-338$\,s instead of near 0, and every variable decodes at chance. Trials outside the imaging period are dropped (19 trials of one further session).
-  \item \textbf{Trials:} BWM criteria for both datasets: all event times present, a choice was made, and reaction time between 0.08 and 2\,s. Sessions need at least 50 such trials (median 347 for the mesoscope and 414 for BWM).
-  \item \textbf{Spatial bins:} each neuron is assigned to one hexagonal bin by its ML--AP Allen CCF position relative to bregma, 1\,mm across. For decoding, both hemispheres are folded onto the right one.
-  \item \textbf{Depth:} depth below the pial surface is the Allen top surface at the unit's ML--AP position minus its DV. Histology-registered mesoscope sessions image 174--318\um{} deep (5--95\%). The depth-limited BWM set keeps units within 640\um.
-\end{itemize}
-
-\paragraph{Features and targets.}
-\begin{itemize}
-  \item One value per neuron and trial: its mean activity in the window. For the mesoscope, each neuron's trace is linearly interpolated at its own sampling times, which include the per-plane time offset, before averaging.
-  \item \textbf{Stimulus side:} left vs right, including 0\% contrast trials. \textbf{Choice:} left vs right wheel turn. \textbf{Feedback:} reward vs error.
-  \item \textbf{Wheel speed:} mean absolute wheel velocity in each of six 0.2\,s bins, paired with the activity in the same bin. All bins of all trials are decoded together.
-\end{itemize}
-
-\paragraph{Decoders and cross-validation.}
-\begin{itemize}
-  \item A separate decoder is fit for every session $\times$ bin, using either all neurons of that session in the bin or a random draw of 20 neurons (bins with at least 20 neurons, mean over 10 draws).
-  \item \textbf{Outer loop:} 5-fold cross-validation over trials, with the same folds for every bin of a session. For binary targets the folds are stratified by class. Features are z-scored using training trials only.
-  \item \textbf{Binary targets:} L2-regularised logistic regression with balanced class weights. The regularisation strength (6 values, $C$ from $10^{-4}$ to 10) is chosen by an inner 3-fold cross-validation on the training trials, maximising balanced accuracy. The score is the balanced accuracy of the pooled held-out predictions (chance 0.5).
-  \item \textbf{Wheel speed:} ridge regression; the penalty (7 values, 0.1 to $10^5$) is chosen by exact leave-one-trial-out error (rows of a trial are correlated), and the activity of the previous, same and next 0.2\,s bin are the features for each wheel bin. Folds keep all bins of a trial together. The score is the $R^2$ of the pooled held-out predictions (chance 0). Trial-specific wheel speed subtracts the per-bin mean speed of the training trials from the target.
-  \item The decoders run on the GPU and reproduce scikit-learn's \texttt{LogisticRegressionCV} and \texttt{RidgeCV} pipelines. For sets with more neurons than trials, the logistic decoders are fit in the row space of the trials, which is exact.
-\end{itemize}
-
-\paragraph{Averaging.}
-\begin{itemize}
-  \item \textbf{Decoding maps:} the value of a bin is the mean score over all sessions that contribute at least 20 neurons to it.
-  \item \textbf{Scatter plots:} the same per-bin means, for the bins covered by both datasets.
-  \item \textbf{Headline numbers:} means over all session $\times$ bin pairs.
-  \item \textbf{Tuning maps:} neurons are pooled across sessions within a bin; the value is the fraction with $p < 0.05$, shown for bins with at least 10 neurons.
-\end{itemize}
-
-\paragraph{Single-neuron tuning test.}
-\begin{itemize}
-  \item The BWM single-cell test~[4] (\texttt{single\_cell\_stats}, re-implemented on the GPU; Supplementary notes), applied to the same windows. Mann--Whitney $U$ statistics compare the two conditions within strata (block $\times$ choice for stimulus side, block $\times$ stimulus side for choice and feedback), summed and normalised.
-  \item The null distribution comes from 3{,}000 permutations of the condition labels within consecutive blocks, and $p$ is the rank of the observed statistic. Zero-contrast trials do not enter this test.
-  \item Sessions without biased blocks (55 mesoscope sessions) are tested within their single 0.5 block. Neurons that cannot be tested are left out of the fractions.
-\end{itemize}
-
-\paragraph{Region and session variance (\figref{region_variance}).}
-\begin{itemize}
-  \item \textbf{Mesoscope scores:} one all-neuron score per session and Beryl region (all neurons of the session in the region, at least 20), with the decoders of \figref{decoding_all}.
-  \item \textbf{BWM per probe:} one score per probe from all its isocortex units (at least 20), assigned to the Beryl region 300\um{} below its brain entry point (histology-aligned trajectory). Angled probes drift, so this is the majority region of the probe's superficial units for only about two thirds of probes.
-  \item \textbf{BWM decoding paper:} the published Brain Wide Map decoding results~[2,6] (stage-2 tables), one score per session and region from all units of the region, with no minimum unit count (median 16). Each score comes with a $p$-value against 100--200 pseudo-sessions and the median of that null, which is the baseline in \figref{region_variance}. These tables have wheel velocity instead of trial-specific wheel speed.
-  \item \textbf{Regions:} the 15 with at least 3 mesoscope sessions and 3 BWM probes.
-  \item \textbf{Shuffle control (mesoscope, BWM per probe):} the same decoders with the trials of all labels and of wheel speed permuted jointly, neural data untouched; 1 permutation per mesoscope score and 3 per probe, pooled per region. This plain trial permutation is less strict than the pseudo-session null of the decoding paper, which keeps the block structure, so the band can sit slightly lower, mainly for stimulus side and choice. For wheel speed the shuffled $R^2$ is not zero: the stereotyped speed profile after movement onset is still predicted from the stereotyped neural time course.
-  \item \textbf{Statistics, mesoscope only.} In BWM nearly every session has one probe, so session variance cannot be separated from probe-to-probe variance. The decoding-paper tables do not help either: few sessions have scores in two or more of these regions, and those regions are usually adjacent along one probe. All-neuron scores grow with the number of neurons, so log neuron count is a covariate in the mixed model and is regressed out before the permutation tests.
-  \item \textbf{Mixed model:} score $\sim$ log $N$ + (1$|$region) + (1$|$animal) + (1$|$session), crossed random effects, REML (statsmodels~[7]). Each component's share is its variance over the total, and each is tested by a likelihood-ratio test against the model without it ($\chi^2_{0/1}$ mixture). Uncertainty in (session + animal share) $-$ region share comes from an animal-level bootstrap: 200 resamples of animals with replacement (a repeated animal and its sessions count as new ones), each refitted with a GPU implementation of the same REML model (\texttt{reml.py}, matches statsmodels to 4 decimals).
-  \item \textbf{Permutation tests:} the same question without a statistical model, using only reshuffling, on the scores with log $N$ regressed out.
-  \begin{itemize}
-    \item \emph{Region:} each session's mean is subtracted from its region scores, so a good session or animal cannot make its regions look good. The statistic is $\eta^2$, the share of the remaining variance that lies between regions. The null comes from 5{,}000 shuffles of the region labels within each session (sessions with at least 2 regions).
-    \item \emph{Session:} the mirror image. Each region's mean is subtracted, $\eta^2$ is the share between sessions, and session labels are shuffled within each region.
-    \item $\eta^2$ is above 0 even for random labels, and more so with many groups (about 150 sessions vs 15 regions). The figure therefore shows adjusted $\eta^2$ = ($\eta^2 -$ null mean) / (1 $-$ null mean): 0 is chance level and positive values are the share beyond chance. $p$ is the fraction of shuffles with $\eta^2$ at least as large as observed.
-  \end{itemize}
-\end{itemize}
-
 \FloatBarrier
 \section*{Results}
 \paragraph{Overview.} Both datasets are mapped in 1\,mm hexagonal bins of dorsal cortex (coverage in \figref{counts}). BWM is shown twice: units within 640\um{} of the pial surface, the main comparison, and units at all depths. Table~\ref{tab:headline} gives the headline numbers. With 20 random neurons per bin, the mesoscope decodes stimulus side (0.54) and feedback (0.65 vs 0.63) as well as depth-limited BWM, but stays below it for choice (0.53 vs 0.60) and wheel speed ($R^2$ 0.05 vs 0.25; \figref{decoding_n20}). Restricting BWM to superficial units costs little (choice 0.60 vs 0.62, feedback 0.63 vs 0.69, wheel $R^2$ 0.25 vs 0.31). With all neurons of a bin, about 20 times more in the mesoscope (median 458 vs 27), the mesoscope decodes stimulus side and feedback better than BWM, and its frontal feedback map stands out (\figref{decoding_all}).
@@ -189,6 +119,78 @@ Where the two datasets can be compared they agree, and where they differ the dif
   \item BWM decoding results (stage-2 tables) underlying the decoding analyses of [2].
   \item Seabold \& Perktold. statsmodels: econometric and statistical modeling with Python. \emph{Proc. 9th Python in Science Conf.} (2010).
 \end{enumerate}
+
+\FloatBarrier
+\section*{Methods}
+\paragraph{Data.}
+\begin{itemize}
+  \item \textbf{Task.} The IBL biased visual decision-making task~[1]: mice turn a wheel to move a grating of varying contrast to the centre of a screen, and the prior probability of left vs right stimuli switches in blocks.
+  \item \textbf{Mesoscope:} IBL two-photon mesoscope sessions of dorsal cortex, accessed from Alyx with ONE~[3]: ROI positions (\texttt{mpciROIs.mlapdv}), ROI types and activity (\texttt{mpci.ROIActivity}) with frame and per-plane times. 151 of the 165 canonical sessions, from 12 mice (Supplementary notes).
+  \item \textbf{BWM:} the 2023 data release~[2], loaded with the \texttt{brainwidemap} package~[4] (\texttt{load\_good\_units}, \texttt{load\_trials\_and\_mask}): 351 insertions in 288 sessions, good units only. Brain regions are Allen CCF labels mapped with \texttt{iblatlas}~[5].
+  \item \textbf{Quality control.} 16 of 153 mesoscope sessions had wheel-encoder overflow jumps ($\pm$6.6 million rad), which were corrected; no BWM session was affected.
+\end{itemize}
+
+\paragraph{Analysis windows.}
+The wheel-speed bins are identical for both datasets. BWM stimulus, choice and feedback windows follow the BWM single-cell analyses (0.1, 0.1 and 0.2\,s). Mesoscope frames are about 0.2\,s apart, so its windows are widened to 0.3\,s to always contain at least one frame (\figref{windows}).
+
+\paragraph{Neurons, trials and spatial bins.}
+\begin{itemize}
+  \item \textbf{Mesoscope neurons:} are ROIs classified as neurons, labelled isocortex (Allen Cosmos level) and with a valid position. Activity is the deconvolved trace.
+  \item \textbf{BWM units:} good units labelled isocortex; activity is the firing rate (spike count / window length).
+  \item \textbf{Excluded mesoscope sessions:} two sessions whose task and imaging clocks disagree. In both, the cross-correlation of population activity with wheel speed peaks at $-146$\,s and $-338$\,s instead of near 0, and every variable decodes at chance. Trials outside the imaging period are dropped (19 trials of one further session).
+  \item \textbf{Trials:} BWM criteria for both datasets: all event times present, a choice was made, and reaction time between 0.08 and 2\,s. Sessions need at least 50 such trials (median 347 for the mesoscope and 414 for BWM).
+  \item \textbf{Spatial bins:} each neuron is assigned to one hexagonal bin by its ML--AP Allen CCF position relative to bregma, 1\,mm across. For decoding, both hemispheres are folded onto the right one.
+  \item \textbf{Depth:} depth below the pial surface is the Allen top surface at the unit's ML--AP position minus its DV. Histology-registered mesoscope sessions image 174--318\um{} deep (5--95\%). The depth-limited BWM set keeps units within 640\um.
+\end{itemize}
+
+\paragraph{Features and targets.}
+\begin{itemize}
+  \item One value per neuron and trial: its mean activity in the window. For the mesoscope, each neuron's trace is linearly interpolated at its own sampling times, which include the per-plane time offset, before averaging.
+  \item \textbf{Stimulus side:} left vs right, including 0\% contrast trials. \textbf{Choice:} left vs right wheel turn. \textbf{Feedback:} reward vs error.
+  \item \textbf{Wheel speed:} mean absolute wheel velocity in each of six 0.2\,s bins, paired with the activity in the same bin. All bins of all trials are decoded together.
+\end{itemize}
+
+\paragraph{Decoders and cross-validation.}
+\begin{itemize}
+  \item A separate decoder is fit for every session $\times$ bin, using either all neurons of that session in the bin or a random draw of 20 neurons (bins with at least 20 neurons, mean over 10 draws).
+  \item \textbf{Outer loop:} 5-fold cross-validation over trials, with the same folds for every bin of a session. For binary targets the folds are stratified by class. Features are z-scored using training trials only.
+  \item \textbf{Binary targets:} L2-regularised logistic regression with balanced class weights. The regularisation strength (6 values, $C$ from $10^{-4}$ to 10) is chosen by an inner 3-fold cross-validation on the training trials, maximising balanced accuracy. The score is the balanced accuracy of the pooled held-out predictions (chance 0.5).
+  \item \textbf{Wheel speed:} ridge regression; the penalty (7 values, 0.1 to $10^5$) is chosen by exact leave-one-trial-out error (rows of a trial are correlated), and the activity of the previous, same and next 0.2\,s bin are the features for each wheel bin. Folds keep all bins of a trial together. The score is the $R^2$ of the pooled held-out predictions (chance 0). Trial-specific wheel speed subtracts the per-bin mean speed of the training trials from the target.
+  \item The decoders run on the GPU and reproduce scikit-learn's \texttt{LogisticRegressionCV} and \texttt{RidgeCV} pipelines. For sets with more neurons than trials, the logistic decoders are fit in the row space of the trials, which is exact.
+\end{itemize}
+
+\paragraph{Averaging.}
+\begin{itemize}
+  \item \textbf{Decoding maps:} the value of a bin is the mean score over all sessions that contribute at least 20 neurons to it.
+  \item \textbf{Scatter plots:} the same per-bin means, for the bins covered by both datasets.
+  \item \textbf{Headline numbers:} means over all session $\times$ bin pairs.
+  \item \textbf{Tuning maps:} neurons are pooled across sessions within a bin; the value is the fraction with $p < 0.05$, shown for bins with at least 10 neurons.
+\end{itemize}
+
+\paragraph{Single-neuron tuning test.}
+\begin{itemize}
+  \item The BWM single-cell test~[4] (\texttt{single\_cell\_stats}, re-implemented on the GPU; Supplementary notes), applied to the same windows. Mann--Whitney $U$ statistics compare the two conditions within strata (block $\times$ choice for stimulus side, block $\times$ stimulus side for choice and feedback), summed and normalised.
+  \item The null distribution comes from 3{,}000 permutations of the condition labels within consecutive blocks, and $p$ is the rank of the observed statistic. Zero-contrast trials do not enter this test.
+  \item Sessions without biased blocks (55 mesoscope sessions) are tested within their single 0.5 block. Neurons that cannot be tested are left out of the fractions.
+\end{itemize}
+
+\paragraph{Region and session variance (\figref{region_variance}).}
+\begin{itemize}
+  \item \textbf{Mesoscope scores:} one all-neuron score per session and Beryl region (all neurons of the session in the region, at least 20), with the decoders of \figref{decoding_all}.
+  \item \textbf{BWM per probe:} one score per probe from all its isocortex units (at least 20), assigned to the Beryl region 300\um{} below its brain entry point (histology-aligned trajectory). Angled probes drift, so this is the majority region of the probe's superficial units for only about two thirds of probes.
+  \item \textbf{BWM decoding paper:} the published Brain Wide Map decoding results~[2,6] (stage-2 tables), one score per session and region from all units of the region, with no minimum unit count (median 16). Each score comes with a $p$-value against 100--200 pseudo-sessions and the median of that null, which is the baseline in \figref{region_variance}. These tables have wheel velocity instead of trial-specific wheel speed.
+  \item \textbf{Regions:} the 15 with at least 3 mesoscope sessions and 3 BWM probes.
+  \item \textbf{Shuffle control (mesoscope, BWM per probe):} the same decoders with the trials of all labels and of wheel speed permuted jointly, neural data untouched; 1 permutation per mesoscope score and 3 per probe, pooled per region. This plain trial permutation is less strict than the pseudo-session null of the decoding paper, which keeps the block structure, so the band can sit slightly lower, mainly for stimulus side and choice. For wheel speed the shuffled $R^2$ is not zero: the stereotyped speed profile after movement onset is still predicted from the stereotyped neural time course.
+  \item \textbf{Statistics, mesoscope only.} In BWM nearly every session has one probe, so session variance cannot be separated from probe-to-probe variance. The decoding-paper tables do not help either: few sessions have scores in two or more of these regions, and those regions are usually adjacent along one probe. All-neuron scores grow with the number of neurons, so log neuron count is a covariate in the mixed model and is regressed out before the permutation tests.
+  \item \textbf{Mixed model:} score $\sim$ log $N$ + (1$|$region) + (1$|$animal) + (1$|$session), crossed random effects, REML (statsmodels~[7]). Each component's share is its variance over the total, and each is tested by a likelihood-ratio test against the model without it ($\chi^2_{0/1}$ mixture). Uncertainty in (session + animal share) $-$ region share comes from an animal-level bootstrap: 200 resamples of animals with replacement (a repeated animal and its sessions count as new ones), each refitted with a GPU implementation of the same REML model (\texttt{reml.py}, matches statsmodels to 4 decimals).
+  \item \textbf{Permutation tests:} the same question without a statistical model, using only reshuffling, on the scores with log $N$ regressed out.
+  \begin{itemize}
+    \item \emph{Region:} each session's mean is subtracted from its region scores, so a good session or animal cannot make its regions look good. The statistic is $\eta^2$, the share of the remaining variance that lies between regions. The null comes from 5{,}000 shuffles of the region labels within each session (sessions with at least 2 regions).
+    \item \emph{Session:} the mirror image. Each region's mean is subtracted, $\eta^2$ is the share between sessions, and session labels are shuffled within each region.
+    \item $\eta^2$ is above 0 even for random labels, and more so with many groups (about 150 sessions vs 15 regions). The figure therefore shows adjusted $\eta^2$ = ($\eta^2 -$ null mean) / (1 $-$ null mean): 0 is chance level and positive values are the share beyond chance. $p$ is the fraction of shuffles with $\eta^2$ at least as large as observed.
+  \end{itemize}
+\end{itemize}
+
 
 \clearpage
 \section*{Supplementary material}
