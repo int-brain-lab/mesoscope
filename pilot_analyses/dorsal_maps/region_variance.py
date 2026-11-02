@@ -20,7 +20,13 @@ regressed out (all-neuron scores grow with the number of neurons):
 - permutation (model-free): adjusted eta^2 of region within sessions (scores centred per
   session, region labels permuted within session) and of session within regions (scores
   centred per region, session labels permuted within region);
-  adjusted eta^2 = (eta^2 - null mean) / (1 - null mean).
+  adjusted eta^2 = (eta^2 - null mean) / (1 - null mean);
+- animal bootstrap: N_BOOT resamples of animals with replacement (a repeated animal and its
+  sessions count as new ones), each refitted with reml.py; 95% intervals of the region and
+  session + animal shares, and the fraction of resamples with session + animal > region.
+  Cached in output/v2/region_variance_boot.csv (delete it to recompute);
+- per mouse (panel d): score ~ log N + (1|region) + (1|session) within each mouse with
+  >= MIN_MOUSE_SESSIONS sessions (reml.py); session share minus region share.
 
 Usage: python region_variance.py
 Writes output/v2/region_variance{_panels.pdf,.tex,.pdf} and output/v2/region_variance_stats.csv.
@@ -40,6 +46,8 @@ from plotstyle import NATURE_DOUBLE_COL_IN, allen_color, save_with_caption, styl
 
 MIN_PER_REGION = 3
 N_PERM = 5000
+N_BOOT = 200
+MIN_MOUSE_SESSIONS = 4
 MODS = ("meso", "bwm")
 ROWS = ("meso", "bwm", "bwm_paper")
 ROW_NAME = {"meso": "Mesoscope", "bwm": "BWM per probe", "bwm_paper": "BWM per region\n(decoding paper)"}
@@ -153,6 +161,57 @@ def perm_effect(y, labels, block):
     return (obs - null.mean()) / (1 - null.mean()), (1 + (null >= obs).sum()) / (1 + N_PERM), len(y)
 
 
+def boot_shares(df):
+    """Animal-level bootstrap of the region and session + animal shares (reml.py)."""
+    import reml
+    boot_rng = np.random.default_rng(1)
+    animals = df.animal.unique()
+    reg, sa = [], []
+    for _ in range(N_BOOT):
+        pick = boot_rng.choice(animals, len(animals))
+        parts = [df[df.animal == a].assign(animal=f"{a}_{i}", session=lambda x, i=i: x.session + f"_{i}")
+                 for i, a in enumerate(pick)]
+        try:
+            m = reml.components(pd.concat(parts, ignore_index=True), COMP)
+        except RuntimeError:  # non positive-definite V when a variance collapses; skip this resample
+            continue
+        reg.append(m["frac_region"])
+        sa.append(m.get("frac_session", 0) + m.get("frac_animal", 0))
+    reg, sa = np.array(reg), np.array(sa)
+    return dict(region_lo=np.percentile(reg, 2.5), region_hi=np.percentile(reg, 97.5),
+                ses_anim_lo=np.percentile(sa, 2.5), ses_anim_hi=np.percentile(sa, 97.5),
+                boot_frac_pos=np.mean(sa > reg), n_boot=len(reg))
+
+
+def bootstrap(d):
+    f = OUT_V2 / "region_variance_boot.csv"
+    if f.exists():
+        return pd.read_csv(f)
+    rows = []
+    for t in TARGETS:
+        df = d["meso"][d["meso"].target == t].reset_index(drop=True)
+        rows.append(dict(target=t, **boot_shares(df)))
+        print("bootstrap", t, rows[-1], flush=True)
+    b = pd.DataFrame(rows)
+    b.to_csv(f, index=False)
+    return b
+
+
+def per_mouse(d):
+    """Session and region shares within each mouse (no animal component)."""
+    import reml
+    rows = []
+    for t in TARGETS:
+        df = d["meso"][d["meso"].target == t]
+        for a, g in df.groupby("animal"):
+            if g.session.nunique() < MIN_MOUSE_SESSIONS or g.region.nunique() < 2:
+                continue
+            m = reml.components(g.reset_index(drop=True), ("region", "session"))
+            rows.append(dict(target=t, animal=a, n=len(g), sessions=g.session.nunique(),
+                             frac_region=m.get("frac_region", 0), frac_session=m.get("frac_session", 0)))
+    return pd.DataFrame(rows)
+
+
 def analyse(d):
     rows = []
     for k in ("meso",):
@@ -179,10 +238,10 @@ def short(t):
     return TITLE[t].replace("\n", " ").replace("Wheel speed, trial-specific", "Wheel, trial")
 
 
-def figure(d, shared, st):
+def figure(d, shared, st, pm):
     nr = len(ROWS)
-    fig = plt.figure(figsize=(NATURE_DOUBLE_COL_IN, 7.6))
-    gs = fig.add_gridspec(nr + 2, 5, height_ratios=[1] * nr + [0.42, 0.95], hspace=0.28, wspace=0.35)
+    fig = plt.figure(figsize=(NATURE_DOUBLE_COL_IN, 9.0))
+    gs = fig.add_gridspec(nr + 4, 5, height_ratios=[1] * nr + [0.42, 0.95, 0.32, 0.95], hspace=0.28, wspace=0.35)
     xs = np.arange(len(shared))
     share = {}                                           # one y axis for balanced accuracy, one for R^2
     for r, k in enumerate(ROWS):
@@ -237,8 +296,13 @@ def figure(d, shared, st):
         v = s[f"frac_{comp}"].fillna(0).values
         ax.bar(x0, v, 0.7, bottom=bottom, color=COMP_COL[comp], label=comp, edgecolor="none")
         bottom += v
+    reg, sa = s.frac_region.values, s.frac_session.fillna(0).values + s.frac_animal.fillna(0).values
+    ax.errorbar(x0 - 0.12, reg, yerr=[reg - s.region_lo, s.region_hi - reg], fmt="none", ecolor="k", elinewidth=0.6,
+                capsize=1.5, capthick=0.6, zorder=3)
+    ax.errorbar(x0 + 0.12, reg + sa, yerr=[sa - s.ses_anim_lo, s.ses_anim_hi - sa], fmt="none", ecolor="k",
+                elinewidth=0.6, capsize=1.5, capthick=0.6, zorder=3)
     for i, t in enumerate(TARGETS):
-        ax.text(x0[i], 1.02, stars(s.loc[t, "p_lrt_region"]), ha="center", va="bottom", fontsize=4.5)
+        ax.text(x0[i], 1.02, f"{100 * s.loc[t, 'boot_frac_pos']:.0f}%", ha="center", va="bottom", fontsize=4.5)
     ax.set_xticks(x0, [short(t) for t in TARGETS], rotation=30, ha="right", fontsize=5)
     ax.set_ylim(0, 1)
     ax.set_ylabel("variance fraction")
@@ -258,10 +322,25 @@ def figure(d, shared, st):
     style_axes(ax, categorical_x=True)
     ax.legend(frameon=False, fontsize=5, loc="upper left", bbox_to_anchor=(1.0, 1.0))
     ax.text(-0.18, 1.18, "c", transform=ax.transAxes, fontsize=8, fontweight="bold")
+
+    # d: session minus region share within each mouse (mesoscope)
+    ax = fig.add_subplot(gs[nr + 3, 0:2])
+    jit = np.random.default_rng(2)
+    for i, t in enumerate(TARGETS):
+        v = (pm[pm.target == t].frac_session - pm[pm.target == t].frac_region).values
+        ax.scatter(i + jit.uniform(-0.15, 0.15, len(v)), v, s=6, color=COL["meso"], alpha=0.7, lw=0, zorder=3)
+        ax.plot([i - 0.25, i + 0.25], [np.median(v)] * 2, color="k", lw=1, zorder=4)
+        ax.text(i, 1.02, f"{(v > 0).sum()}/{len(v)}", transform=ax.get_xaxis_transform(), ha="center",
+                va="bottom", fontsize=4.5)
+    ax.axhline(0, color="0.5", lw=0.5)
+    ax.set_xticks(x0, [short(t) for t in TARGETS], rotation=30, ha="right", fontsize=5)
+    ax.set_ylabel("session $-$ region share")
+    style_axes(ax, categorical_x=True)
+    ax.text(-0.18, 1.18, "d", transform=ax.transAxes, fontsize=8, fontweight="bold")
     return fig
 
 
-def caption(d, shared, st):
+def caption(d, shared, st, pm):
     p = d["bwm"].drop_duplicates("pid")
     agree = (p.region == p.region_units).mean()
     n = {k: (d[k].unit.nunique(), d[k].session.nunique(), d[k].animal.nunique()) for k in ROWS}
@@ -288,11 +367,18 @@ def caption(d, shared, st):
         "pseudo-session null; wheel velocity in place of trial-specific wheel speed. Y axes shared within balanced "
         "accuracy and within $R^2$. Inset, top row: region share of variance from \\textbf{b}.",
         "Mesoscope variance fractions from a mixed model, score $\\sim$ log $N$ + (1$|$region) + (1$|$animal) + "
-        "(1$|$session); stars: likelihood-ratio test of the region component. Region: " + pct("frac_region")
-        + "; session plus animal: " + ses + ".",
+        "(1$|$session). Error bars: 95\\% intervals from resampling whole animals (" + str(N_BOOT) + " refits), "
+        "for the region share (left bar, at the top of the region block) and the session plus animal share (right "
+        "bar, at the top of the session block); numbers above: fraction of resamples in which session plus animal "
+        "exceeds region. Region: " + pct("frac_region") + "; session plus animal: " + ses + ". The region "
+        "component is significant for every variable (likelihood-ratio test, $p<0.001$).",
         "The same question as \\textbf{b}, do scores differ more between regions or between sessions, but without a "
         "statistical model, using only reshuffling: adjusted $\\eta^2$ of region (circles, within sessions) and of "
         "session (squares, within regions), 0 = chance. Filled: $p<0.05$.",
+        "The same comparison within each mouse: mixed model score $\\sim$ log $N$ + (1$|$region) + (1$|$session) "
+        f"fitted separately per mouse with $\\geq${MIN_MOUSE_SESSIONS} sessions ({pm.animal.nunique()} mice); "
+        "dots: session share minus region share per mouse; bar: median; numbers above: mice with a larger session "
+        "share.",
     ]
     return intro, caps
 
@@ -300,10 +386,12 @@ def caption(d, shared, st):
 def main():
     d, shared = load()
     print("shared regions:", shared)
-    st = analyse(d)
+    st = analyse(d).merge(bootstrap(d), on="target")
     st.to_csv(OUT_V2 / "region_variance_stats.csv", index=False)
-    fig = figure(d, shared, st)
-    intro, caps = caption(d, shared, st)
+    pm = per_mouse(d)
+    pm.to_csv(OUT_V2 / "region_variance_per_mouse.csv", index=False)
+    fig = figure(d, shared, st, pm)
+    intro, caps = caption(d, shared, st, pm)
     save_with_caption(fig, OUT_V2 / "region_variance", caps, "region_variance", intro=intro)
     plt.close(fig)
     print(st.round(3).to_string())
