@@ -19,14 +19,18 @@ regressed out (all-neuron scores grow with the number of neurons):
   (chi-square 0/1 mixture) per component;
 - permutation (model-free): adjusted eta^2 of region within sessions (scores centred per
   session, region labels permuted within session) and of session within regions (scores
-  centred per region, session labels permuted within region);
+  centred per region, session labels permuted within region; includes animal differences), and
+  of session within mouse (scores centred per region x mouse, session labels permuted within
+  region x mouse; no animal differences);
   adjusted eta^2 = (eta^2 - null mean) / (1 - null mean);
 - animal bootstrap: N_BOOT resamples of animals with replacement (a repeated animal and its
   sessions count as new ones), each refitted with reml.py; 95% intervals of the region and
   session + animal shares, and the fraction of resamples with session + animal > region.
   Cached in output/v2/region_variance_boot.csv (delete it to recompute);
 - per mouse (panel d): score ~ log N + (1|region) + (1|session) within each mouse with
-  >= MIN_MOUSE_SESSIONS sessions (reml.py); session share minus region share.
+  >= MIN_MOUSE_SESSIONS sessions (reml.py); session share minus region share;
+- region x mouse: the pooled model with an extra (1|region:animal) term (reml.py), columns
+  ra_* in the stats csv (reported in the text, not plotted).
 
 Usage: python region_variance.py
 Writes output/v2/region_variance{_panels.pdf,.tex,.pdf} and output/v2/region_variance_stats.csv.
@@ -220,11 +224,17 @@ def analyse(d):
             r = dict(modality=k, target=t, n=len(df), n_units=df.unit.nunique(), n_sessions=df.session.nunique(),
                      n_animals=df.animal.nunique(), rho_N=stats.spearmanr(df["all"], df.n_neurons)[0])
             r.update(mixed(df))
+            import reml                                                      # + region x mouse term (text only)
+            ra = reml.components(df.assign(region_animal=df.region + "|" + df.animal),
+                                 COMP + ("region_animal",), lrt=("region_animal",))
+            r.update({f"ra_{a}": b for a, b in ra.items() if a.startswith(("frac", "p_lrt"))})
             y = residualise(df)
             reg, ses = df.region.values, df.session.values
             r["eta_region"], r["p_region"], r["n_region"] = perm_effect(y, reg, ses)
             multi = pd.Series(ses).map(pd.Series(ses).value_counts()).values > 1   # sessions with >= 2 regions
             r["eta_session"], r["p_session"], r["n_session"] = perm_effect(y[multi], ses[multi], reg[multi])
+            reg_mouse = reg + "|" + df.animal.values                     # session within mouse: no animal term
+            r["eta_session_mouse"], r["p_session_mouse"], r["n_session_mouse"] = perm_effect(y, ses, reg_mouse)
             rows.append(r)
             print(k, t, {a: round(b, 3) if isinstance(b, float) else b for a, b in r.items()}, flush=True)
     return pd.DataFrame(rows)
@@ -312,12 +322,14 @@ def figure(d, shared, st, pm):
 
     # c: permutation, region vs session, adjusted eta^2 (mesoscope)
     ax = fig.add_subplot(gs[nr + 1, 3:5])
-    for eff, mk, dx in (("region", "o", -0.1), ("session", "s", 0.1)):
+    for eff, mk, dx in (("region", "o", -0.15), ("session", "s", 0), ("session_mouse", "^", 0.15)):
         v, p = s[f"eta_{eff}"].values, s[f"p_{eff}"].values
         ax.scatter(x0 + dx, v, marker=mk, s=14, facecolors=np.where(p < 0.05, COL["meso"], "white"),
-                   edgecolors=COL["meso"], lw=0.7, zorder=3, label=eff)
+                   edgecolors=COL["meso"], lw=0.7, zorder=3,
+                   label={"session": "session\n(incl. animal)", "session_mouse": "session\nwithin mouse"}.get(eff, eff))
     ax.axhline(0, color="0.5", lw=0.5)
     ax.set_xticks(x0, [short(t) for t in TARGETS], rotation=30, ha="right", fontsize=5)
+    ax.set_ylim(top=1.1 * np.nanmax(s[["eta_region", "eta_session", "eta_session_mouse"]].values))
     ax.set_ylabel("adjusted $\\eta^2$")
     style_axes(ax, categorical_x=True)
     ax.legend(frameon=False, fontsize=5, loc="upper left", bbox_to_anchor=(1.0, 1.0))
@@ -373,8 +385,11 @@ def caption(d, shared, st, pm):
         "exceeds region. Region: " + pct("frac_region") + "; session plus animal: " + ses + ". The region "
         "component is significant for every variable (likelihood-ratio test, $p<0.001$).",
         "The same question as \\textbf{b}, do scores differ more between regions or between sessions, but without a "
-        "statistical model, using only reshuffling: adjusted $\\eta^2$ of region (circles, within sessions) and of "
-        "session (squares, within regions), 0 = chance. Filled: $p<0.05$.",
+        "statistical model, using only reshuffling: adjusted $\\eta^2$ of region (circles; region labels shuffled within "
+        "sessions), of session (squares; session labels shuffled within regions, across mice, so this includes "
+        "differences between mice) and of session within mouse (triangles; shuffled within region and mouse, so "
+        "differences between mice are removed, the model-free counterpart of \\textbf{d}), 0 = chance. "
+        "Filled: $p<0.05$.",
         "The same comparison within each mouse: mixed model score $\\sim$ log $N$ + (1$|$region) + (1$|$session) "
         f"fitted separately per mouse with $\\geq${MIN_MOUSE_SESSIONS} sessions ({pm.animal.nunique()} mice); "
         "dots: session share minus region share per mouse; bar: median; numbers above: mice with a larger session "
