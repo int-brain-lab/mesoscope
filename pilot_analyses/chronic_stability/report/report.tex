@@ -1,0 +1,194 @@
+\documentclass[10pt,a4paper]{article}
+\usepackage[margin=1.35cm]{geometry}
+\usepackage{graphicx,amsmath,booktabs,siunitx}
+\usepackage[font=small,labelfont=bf]{caption}
+\usepackage[hidelinks]{hyperref}
+\graphicspath{{../output/}}
+\setlength{\parskip}{0.4em}\setlength{\parindent}{0pt}
+
+\title{Do mesoscope neurons keep their task responses across days?}
+\author{Chronic-stability pilot (\texttt{pilot\_analyses/chronic\_stability})}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Methods}
+
+\paragraph{Data.}
+We used the six mice whose mesoscope sessions have ROICaT cross-session neuron identities on the FlatIron mirror
+(SP054, SP058, SP061, SP066, SP067, SP072): 83 sessions in total (3--23 per mouse, each mouse spanning 6--52 days;
+82--742 trials per session, median 5\,100--8\,500 neurons per session; Table~\ref{tab:data}).
+Mice performed the IBL visual decision task. For every session we took the per-trial deconvolved activity
+already extracted for the dorsal-maps analysis, averaged in 9 windows: stimulus onset 0--0.3\,s, pre-movement
+$-0.3$--0\,s, feedback 0--0.3\,s, and six 0.2\,s bins from $-0.2$ to 1.0\,s around first movement.
+We kept ROIs classified as neurons, located in isocortex, and with valid atlas coordinates.
+
+\begin{table}[h]
+\centering\small
+\begin{tabular}{lrrrrrrr}
+\toprule
+mouse & sessions & days & neurons/session & tracked in $\geq$half & $\geq$80\% & all sessions & session pairs\\
+\midrule
+SP054 & 10 & 18 & 5\,117 & 1\,517 & 312 & 28 & 36\\
+SP058 & 23 & 44 & 8\,441 & 4\,905 & 468 & 67 & 253\\
+SP061 & 10 & 52 & 8\,502 & 6\,147 & 1\,998 & 329 & 45\\
+SP066 & 3 & 6 & 7\,129 & 5\,585 & 2\,256 & 2\,256 & 3\\
+SP067 & 20 & 29 & 8\,168 & 4\,239 & 254 & 0 & 154\\
+SP072 & 18 & 36 & 8\,365 & 5\,224 & 895 & 211 & 153\\
+\bottomrule
+\end{tabular}
+\caption{Dataset. Tracked counts include only QC-passing matches. \emph{Session pairs}: the number of pairs of sessions of the same mouse that met all criteria for the across-day comparison. Of $n$ usable sessions at most $n(n-1)/2$ pairs are possible. Criteria: (i) each session has $\geq$5 trials of each trial type (rewarded left, rewarded right, unrewarded) in both the even and the odd half; (ii) the two sessions share $\geq$50 tracked neurons that pass the tracking QC in both. All possible pairs met the criteria except in SP054, where one of the 10 sessions (2024-02-07, a single trial) failed (i) (9 sessions, 36 pairs), and SP067, where 154 of 190 pairs met (ii); its last two sessions come from a separate ROICaT run and share no IDs with the rest. Pairs share sessions and are therefore not independent; statistics are computed per mouse.}
+\label{tab:data}
+\end{table}
+
+\paragraph{Tracking.}
+Neuron identities across sessions come from an existing ROICaT run; we did not run the tracking ourselves.
+For each session and FOV we downloaded \texttt{alf/FOV\_XX/mpciROIs.clusterUIDs.csv} from the FlatIron mirror
+(\url{https://ibl.flatironinstitute.org/resources/mesoscope/ROICaT/<subject>/<date>/<number>/}).
+Each file has one line per ROI, in ROI order; the same ID string in two sessions marks the same cell, and an empty line means the ROI is untracked.
+FOV numbers can change between sessions (e.g.\ SP058 FOV\_04 becomes FOV\_05 from 2024-07-29), and ROICaT follows neurons across such renumbering.
+IDs were assigned to the feature rows by rebuilding the row selection from the ROI files, checking that the row count and the atlas IDs agree.
+This check failed for SP058 after a histology update had changed the selection, so its 23 sessions were re-extracted.
+The mirror gives only the IDs, not ROICaT's match-quality scores, so we checked each match from ROI positions (\texttt{mpciROIs.stackPos}).
+Every pair of (session, FOV) sharing $\geq$20 IDs was registered with a robust affine transform fitted on the shared neurons' pixel positions, refitting after removing outliers more than 3 MAD away.
+A neuron's deviation in a session is the median of its registration residuals over all pairs that include it.
+A match passes when this deviation is smaller than half the distance to the nearest other neuron ROI in that FOV, so it cannot be a swap with that neighbour.
+95.3\% of (neuron, session) entries pass: median deviation 1.5\,px (about 3\,\textmu m) against a median nearest-neighbour distance of 8.3\,px.
+Only passing entries are used below.
+
+\paragraph{Baseline: even vs.\ odd trials.}
+Every metric is computed on half the trials.
+Within a session, the metric compares even with odd trials, which gives the noise ceiling.
+Across days $a$ and $b$, it compares even trials of $a$ with odd trials of $b$ (and odd $a$ with even $b$, averaged), so both comparisons use the same amount of data.
+Each across-day value is expressed as the fraction of its within-session baseline kept: 1 means as reproducible as within a session, 0 means chance.
+
+\paragraph{Metrics} (computed per session pair, on neurons tracked in both sessions):
+\begin{itemize}\itemsep0pt
+\item \emph{Response profile}: trial-mean activity in the 9 windows for rewarded-left, rewarded-right and unrewarded trials (27 values; errors pooled over sides).
+Per neuron we computed the profile correlation within a day ($r_w$), across days ($r_x$), with a random neuron of the same FOV across days ($r_0$), and with the spatially nearest tracked neuron across days ($r_{nn}$).
+Stability index $=(\tilde r_x-\tilde r_0)/(\tilde r_w-\tilde r_0)$ on medians.
+\item \emph{Activity level}: correlation across neurons of log mean activity.
+\item \emph{Selectivity maps}: correlation across neurons of $d'$ for stimulus side (contra vs.\ ipsi to the recorded hemisphere, stimulus window), choice (pre-movement window) and reward (feedback window).
+\item \emph{Sensitivity persistence}: among neurons significantly stimulus- or choice-selective on one half (Mann--Whitney $p<0.01$), the fraction also significant with the same sign on the other half. Chance is half the fraction of significant neurons.
+\item \emph{Population decoder}: ridge classifier (dual form, GPU; validated against \texttt{sklearn}) for stimulus side and choice from all tracked neurons. Trained on even trials of day $a$, tested on odd trials of day $a$ or day $b$; balanced accuracy. Chance was estimated by retraining the across-day decoders on 50 random permutations of the training labels (mean 0.500 for both variables; 95th percentile of a single pair $\approx$0.56--0.57).
+\end{itemize}
+Session pairs were grouped by days apart (1--2, 3--7, 8--14, 15--30, $>$30), averaged per mouse, then across mice.
+For the decline with time, we fitted a slope of each normalised metric against $\log_{10}$(days apart) per mouse and tested it with a $t$-test across mice.
+SP066 has only 6 days and was excluded from this test.
+\emph{Single-neuron trends}: for neurons tracked in $\geq$6 sessions and stimulus-selective overall (mean sign-aligned $d'>0.2$), we computed the slope of $d'$ against recording day.
+This slope was compared with 2\,000 shuffles of the session order; a neuron counts as losing or gaining selectivity at $p<0.025$ per tail.
+
+\paragraph{Decoder transfer across days.}
+To ask how the stimulus code changes, the stimulus decoders of each session pair were analysed in three further ways (\texttt{decoder\_drift.py}), each with a same-day baseline from the same neurons and the same amount of data.
+(1)~\emph{Transfer matrix}: the decoder trained on one half of day $i$ was tested on the other half of day $j$, keeping the two directions ($i\to j$, $j\to i$) separate, and expressed as the fraction of the within-day accuracy kept, $(\mathrm{acc}_{i\to j}-0.5)/(\overline{\mathrm{acc}}_w-0.5)$.
+(2)~\emph{Recalibrated vs.\ fixed}: the test data were z-scored either with their own mean and s.d.\ (recalibrated, as in Fig.~\ref{fig:main}f; this undoes a session-wide change in gain or offset of each neuron) or with those of the training half (fixed: the decoder is applied exactly as trained).
+(3)~\emph{Weight similarity}: the cosine between the decoder weight vectors (on z-scored activity) of day $a$ and day $b$, against the cosine between the weights fitted on the even and odd halves of the same day.
+
+\section{Results}
+
+\begin{figure}[!t]
+\centering
+\includegraphics{chronic_stability.pdf}
+\caption{\textbf{Cross-day reliability of tracked neurons, each metric against its even/odd within-session baseline.}
+6 mice, 83 sessions, 644 session pairs, QC-passing matches only. Line styles throughout: dotted, same-day baseline (even vs.\ odd trials of the same session); solid with markers, across days (even trials of day $a$ vs.\ odd trials of day $b$); thin grey, chance. Colours throughout: black, response profile; brown, activity level; green, stimulus; orange, choice; purple, reward; blue and red, 1--2 and $>$14 days apart (c, h). Thin coloured lines (a) and coloured markers (b): individual mice; thick black lines: mean over mice.
+\textbf{a}~Median correlation of the 27-value response profile on the same day, with the same neuron on another day, with the spatially nearest tracked neuron (dashed) and with a random neuron of the same FOV (grey, chance).
+\textbf{b}~Profile stability index $(r_x-r_0)/(r_w-r_0)$ per mouse, with medians over neurons of $r_w$ (within day, w: even vs.\ odd trials of the same session), $r_x$ (across days, x: even trials of day $a$ vs.\ odd trials of day $b$) and $r_0$ (chance, 0: as $r_x$ but with a random other neuron of the same FOV).
+\textbf{c}~Per neuron: median across-day correlation $r_x$ against even/odd reliability $\sqrt{r_{w,a}\,r_{w,b}}$, the geometric mean of the neuron's within-day correlations on day $a$ and day $b$; dotted: identity, the across-day value expected from the same-day noise ceiling if the profile did not change.
+\textbf{d}~Population maps: for each session half, one value per tracked neuron; the map is compared by Pearson correlation across the neurons shared by the two sessions. Activity level: $\log$ of the neuron's mean deconvolved activity over all trials and windows. $d'=(\mu_1-\mu_2)/\sqrt{(\sigma_1^2+\sigma_2^2)/2}$ of single-trial activity between two trial groups: stimulus, contra- vs.\ ipsilateral stimulus in the stimulus window (0--0.3\,s); choice, the two choices in the pre-movement window ($-0.3$--0\,s); reward, rewarded vs.\ unrewarded trials in the feedback window (0--0.3\,s).
+\textbf{e}~Of the neurons significantly stimulus- or choice-selective on one half ($p<0.01$), the fraction significant with the same sign on the other half; grey: chance (half the fraction of significant neurons).
+\textbf{f}~Ridge decoders of stimulus side and choice; grey: chance, from decoders trained on shuffled labels.
+\textbf{g}~All metrics of a, b and d--f as the fraction of their baseline kept; colour, variable; marker, metric type (circles, maps; squares, sensitivity persistence; triangles, decoders). Dotted grey at 1: as reproducible as the same-day baseline; solid grey at 0: chance. The choice map and the choice decoder are not normalised: their within-session values are close to chance, so the per-pair ratio is ill-defined.
+\textbf{h}~Fraction of baseline kept at 1--2 vs.\ $>$14 days apart, per metric (label colour as in g); bars: mean over mice; dots: mice (6 at 1--2 days, 5 at $>$14 days: SP066 spans 6 days); dotted: baseline. Choice sensitivity (faded) has a baseline close to chance and is unreliable.}
+\label{fig:main}
+\end{figure}
+
+\paragraph{a: Response profiles are partly preserved.}
+The even/odd profile correlation within a session is modest ($\tilde r_w\approx0.36$), which sets the ceiling.
+Across days the same neuron reaches $\tilde r_x=0.21$ at 1--2 days and 0.16--0.17 beyond two weeks.
+This is far above the nearest tracked neuron (0.04--0.05) and a random neuron of the same FOV (0.02--0.03).
+Two conclusions follow: the tracked identity carries cell-specific information that a neighbour does not share, and much of the within-day signal is not reproduced on another day.
+
+\paragraph{b: About half of the reproducible profile survives a day, and the decline afterwards is slow.}
+The stability index is 0.53\,$\pm$\,0.05 (mean\,$\pm$\,s.e.m.\ over mice) at 1--2 days and 0.42\,$\pm$\,0.02 at $>$14 days.
+The trend with time is not significant across mice (slope $-0.08$ per decade of days, $p=0.09$).
+Mice range from 0.38 to 0.72 at short intervals and converge to about 0.4 beyond two weeks.
+Most of the loss is therefore a step between consecutive days rather than a gradual drift.
+
+\paragraph{c: Reliable neurons keep their profile.}
+Per neuron, the across-day correlation rises steeply with within-day reliability.
+Neurons with even/odd reliability $>$0.9 keep $r_x\approx0.9$ at 1--2 days and $\approx$0.85 at $>$14 days, close to identity.
+Unreliable neurons fall below identity.
+The low population average in (a, b) therefore reflects the many weakly responsive neurons; well-driven neurons are close to fully stable.
+
+\paragraph{d: Activity level and selectivity maps.}
+These metrics ask whether the \emph{ranking} of neurons is kept, independent of each neuron's full response profile.
+For each half of a session we computed one number per neuron and correlated these numbers across all neurons tracked in both sessions.
+The \emph{activity level} is the log mean activity over all trials and windows: it captures which neurons are strongly or weakly active.
+The \emph{selectivity maps} use $d'$, the difference of the mean single-trial responses of two trial groups divided by their pooled s.d.: contra- vs.\ ipsilateral stimulus in the stimulus window, the two choices in the pre-movement window, and rewarded vs.\ unrewarded trials in the feedback window.
+Because correlation is scale-free, these maps are insensitive to session-wide changes in signal amplitude.
+The activity-level map is almost perfectly reproducible within a day ($r=0.97$) and stays high across days (0.76 to 0.71): which neurons are active is largely kept.
+The stimulus $d'$ map is weak even within a day ($r\approx0.25$), because few neurons are stimulus-selective, and keeps 0.16 to 0.12 across days.
+The reward map is stronger within a day (0.55) but falls to 0.30 to 0.24 across days, i.e.\ reward tuning changes more than stimulus tuning relative to its baseline.
+The choice map is hardly reproducible even within a session ($r\approx0.14$), so it was not normalised in g, h.
+
+\paragraph{e: Significant selectivity persists, at reduced rate.}
+Only 3.4\% (stimulus) and 2.6\% (choice) of neurons are significantly selective on half the trials.
+Of the stimulus-selective neurons, 23\% are significant again with the same sign on the other half of the same session, against chance 1.7\%.
+Across days this falls to 17\% at 1--2 days and 14--15\% beyond two weeks.
+For choice the corresponding values are 15\% within a session and 10\% to 7.5\% across days.
+The low within-session persistence shows that, at this effect size and trial count, significance on one half is a noisy label.
+Relative to this ceiling, about 60--70\% of the persistence survives across days.
+
+\paragraph{f: Population decoders transfer across days.}
+A stimulus-side decoder reaches 0.67 balanced accuracy within a session.
+Trained on one day, it still gives 0.63 on the next and 0.59 beyond a month.
+The choice decoder drops from 0.62 to 0.58 and then 0.54. Chance, from decoders trained on shuffled labels, is 0.50 for both.
+The population code for the stimulus therefore remains largely readable with a fixed decoder across weeks.
+
+\paragraph{g, h: All metrics show the same pattern.}
+Normalised by their baselines, the metrics of a, b and d--f decline in parallel (g). At 1--2 vs.\ $>$14 days (h), the fraction of baseline kept is:
+activity level 0.79 vs.\ 0.73 (the only decline significant across mice, $p=0.018$);
+stimulus map 0.66 vs.\ 0.56;
+reward map 0.52 vs.\ 0.43;
+stimulus sensitivity 0.71 vs.\ 0.59;
+stimulus decoder 0.72 vs.\ 0.61.
+Choice sensitivity (0.60 vs.\ 0.59) varies widely between mice because its baseline is close to chance (h). The choice decoder could not be normalised for the same reason: its within-day accuracy is often near chance, so the ratio diverges for single pairs.
+The ordering is consistent: \emph{which} neurons are active is the most stable, while detailed response shapes and reward tuning are the least stable.
+
+
+\begin{figure}[!t]
+\centering
+\includegraphics{decoder_drift.pdf}
+\caption{\textbf{How the stimulus decoder changes across days.} Stimulus-side ridge decoders on the neurons tracked in both sessions of a pair. Line styles and colours as in Fig.~\ref{fig:main}: dotted, same-day baseline; grey, chance; error bars, s.e.m.\ over mice.
+\textbf{a}~Transfer matrices: decoder trained on day $i$ (rows) and tested on day $j$ (columns), as the fraction of the within-day accuracy kept (recalibrated). Axes: days since the first session (ticks at first, middle and last session). Grey: diagonal (baseline by definition) and pairs that did not meet the pair criteria (e.g.\ SP067's last two sessions, from a separate ROICaT run).
+\textbf{b}~Fraction of baseline kept when the test data are z-scored with their own statistics (recalibrated, filled) or with those of the training half (fixed, open).
+\textbf{c}~Cosine between decoder weight vectors fitted on the same day (even vs.\ odd half, dotted) and on two days (solid), and their ratio (black, right axis).
+\textbf{d}~Transfer forward in time (trained on the earlier session, filled) and backward (trained on the later session, open). The difference is largely explained by later sessions having more trials (see text).}
+\label{fig:drift}
+\end{figure}
+
+\paragraph{Decoder transfer across days (Fig.~\ref{fig:drift}).}
+\emph{Transfer matrices (a).} Transfer is noisy from pair to pair but falls off gradually away from the diagonal. There are no sharp blocks that would mark a sudden reorganisation of the code. Single sessions transfer poorly in both directions (dark rows and columns, e.g.\ in SP054 and SP061), which points to session-specific recording quality rather than a change in the code.
+\emph{Recalibrated vs.\ fixed (b).} Applying the decoder exactly as trained keeps less of the baseline than recalibrating the test day (0.64 vs.\ 0.72 at 1--2 days, 0.53 vs.\ 0.63 beyond 30 days; lower in 5 of 6 mice, paired $t$-test across mice $p=0.016$). Part of the across-day loss, about a tenth of the baseline, is therefore a change in each neuron's gain or offset that a simple re-standardisation undoes. The rest is a change in which neurons carry the stimulus.
+\emph{Decoder weights (c).} With thousands of neurons, decoder weights are noisy, and even two halves of the same session give a cosine of only $\approx$0.11 (constant over the recording period). Across days the cosine falls from 0.074 to 0.052, i.e.\ from 0.69 to 0.54 of the same-day value. The coding direction therefore changes gradually over weeks, more clearly than the accuracy, which is less sensitive to small rotations of the weights (slope against $\log$ days negative in 4 of 5 mice, $p=0.15$).
+\emph{Direction in time (d).} Decoders trained on the later session transfer better than the reverse (mean difference 0.07, 5 of 6 mice, $p=0.09$), most clearly beyond 30 days (0.78 vs.\ 0.48). This asymmetry, however, is largely a training-set effect. The later session has more trials in 65\% of pairs, the asymmetry tracks the difference in trial counts (Spearman $\rho=-0.14$, $p=3\times10^{-4}$; $-0.47$ in SP072), and at equal trial counts it is close to zero ($-0.05$ to $+0.06$ across mice). A test with matched training-set sizes would be needed before interpreting it.
+
+\paragraph{Single neurons that gain or lose selectivity.}
+Of 31\,577 neurons tracked in $\geq$6 QC sessions, 531 are clearly stimulus-selective.
+Among these, 9.8\% lose and 7.0\% gain selectivity over days, against 2.5\% each expected by chance.
+Non-selective neurons give 4.0\% and 2.7\%, close to chance.
+The direction depends on the mouse: SP058 and SP072 mostly lose (13--15\%), SP067 mostly gains (16\%), and SP054 and SP061 are near chance.
+This points to mouse-wide changes (training stage, imaging conditions) on top of cell-specific drift.
+Example rasters are in \texttt{output/examples\_*.pdf}. They include a stable cell (SP058 9a5f5dbf, $d'\approx0.65$ over 44 days), a losing cell (b81244f9, $d'$ 0.95 $\to$ 0.2 over 35 days with an unchanged footprint), and a cell whose day-to-day swings are confirmed by agreeing even and odd trials.
+
+\paragraph{Conclusion and caveats.}
+Tracked neurons keep a clearly cell-specific response. Across days they retain about 50--80\% of what is reproducible within a session, depending on the metric.
+Most of the loss occurs between consecutive days, with only a slow further decline over weeks, and well-driven neurons are close to fully stable. For the stimulus decoder, about a tenth of the baseline lost across days is a change in neurons' gain or offset that re-standardisation recovers; the rest is a gradual rotation of the coding direction (weight similarity falls from 0.69 to 0.54 of the same-day value over a month).
+Caveats:
+(i) The overall amplitude of the deconvolved signal varies up to $\sim$10$\times$ between sessions, so all metrics here are scale-free and absolute activity is not compared.
+(ii) Only five mice contribute to the decline test.
+(iii) Coverage is uneven: SP058, SP067 and SP072 end with blocks of sessions that share few neurons with earlier ones, and SP067's last two sessions share no IDs with the rest.
+(iv) Part of the day-1 step may come from day-specific factors (behavioural state, imaging quality) rather than changes in the neurons' tuning.
+
+\end{document}
