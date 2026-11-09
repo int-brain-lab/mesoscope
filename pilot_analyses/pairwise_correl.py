@@ -103,8 +103,9 @@ elif session_type == "training":
     event_definitions = event_definitions_trainingCW
 
 sessions_df = data_loader.parse_canonicals_sessions_file(Path(__file__).parent / "canonical_sessions_mod.txt")
-sessions_df_ = sessions_df.loc[sessions_df["task_protocol"].str.contains(session_type)]
-eids = sessions_df_.query("subject == @subject")["id"].values
+# sessions_df_ = sessions_df.loc[sessions_df["task_protocol"].str.contains(session_type)]
+sessions_df_ = sessions_df.query("subject == @subject")
+eids = sessions_df_["id"].values
 
 # center_eid = "20ebc2b9-5b4c-42cd-8e4b-65ddb427b7ff"  # cosyne distance
 # add odd even trials as internal control
@@ -113,7 +114,20 @@ eids = sessions_df_.query("subject == @subject")["id"].values
 session_FOVs = [data_loader.get_session_FOVs(eid) for eid in eids]
 common_session_FOVs = sorted(list(set.intersection(*[set(s) for s in session_FOVs])))
 imaging_data = data_loader.load_chronic_imaging(eids, FOVs=common_session_FOVs, processing_fn=process_imaging_data)
+trials_dfs = [load_behavior_data(eid) for eid in eids]
 
+
+# %% dump all
+import pickle
+
+out_folder = Path("/mnt/s0/Data/tmp_export") / "data"
+out_folder.mkdir(exist_ok=True)
+with open(out_folder / "imaging_data.pkl", "wb") as fH:
+    pickle.dump(imaging_data, fH)
+with open(out_folder / "session_FOVs.pkl", "wb") as fH:
+    pickle.dump(session_FOVs, fH)
+with open(out_folder / "trials_dfs.pkl", "wb") as fH:
+    pickle.dump(trials_dfs, fH)
 
 # %% extract all responses
 responses = {}
