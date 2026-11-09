@@ -55,12 +55,14 @@ def fetch_file(url: str, auth: tuple[str,str]) -> tuple[bytes|None,int]:
 
 def mirror_subject(subject: str,
                    out_root: str = "~/chronic_csv/ROICaT",
-                   username: str = "iblmember",
-                   password: str = "GrayMatter19",
+                   username: str | None = None,
+                   password: str | None = None,
                    overwrite: bool = False,
                    fov_regex: str = r"^FOV_\d{2}/$",
                    debug_show_misses: int = 20) -> None:
-    auth = (username, password)
+    # FlatIron HTTP credentials from the ONE parameters unless given explicitly
+    par = one.alyx._par
+    auth = (username or par.HTTP_DATA_SERVER_LOGIN, password or par.HTTP_DATA_SERVER_PWD)
     out_base = Path(os.path.expanduser(out_root)) / subject
     subject_url = urljoin(BASE_ROOT, f"{subject}/")
 
@@ -255,13 +257,11 @@ def get_cluster_uids_neuronal(
         if uid_vec is None and mask_neuron is not None:
             uid_vec = np.full(mask_neuron.shape[0], '', dtype=object)
 
-        # align lengths
-        if mask_neuron is not None:
-            n = int(mask_neuron.shape[0])
-            if uid_vec.shape[0] < n:
-                uid_vec = np.concatenate([uid_vec, np.full(n - uid_vec.shape[0], '', dtype=object)])
-            elif uid_vec.shape[0] > n:
-                uid_vec = uid_vec[:n]
+        # one UID line per ROI; a length mismatch means the UID file belongs to a
+        # different ROI set (FOV mix-up or re-extraction) and must not be papered over
+        if mask_neuron is not None and uid_vec.shape[0] != mask_neuron.shape[0]:
+            raise ValueError(f"{eid} {fov_name}: {uid_vec.shape[0]} UIDs for "
+                             f"{mask_neuron.shape[0]} ROIs")
 
         uid_vec = np.array(['' if (x is None) else str(x).strip() for x in uid_vec], dtype=object)
         if filter_neurons and (mask_neuron is not None):

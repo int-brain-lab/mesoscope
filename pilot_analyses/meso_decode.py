@@ -501,7 +501,7 @@ def compute_and_cache_ndcs(
     n_label_shuffles: int = 100,
     shuffle_seed: Optional[int] = None,
     idx_map_override: Optional[Dict[str, np.ndarray]] = None,
-    filer_neurons: bool = False,
+    filter_neurons: bool = False,
 ) -> Dict[str, dict]:
 
     eids = sorted(list(eids), key=_eid_date)
