@@ -1,0 +1,445 @@
+#!/usr/bin/env python3
+"""Variance of all-neuron decoding across regions vs across sessions.
+
+Panel a, one row per data set, scores per region:
+- mesoscope (decode_region.py): one score per session and Beryl region, all neurons of the
+  session in the region; shuffle control from decode_region.py --shuffle;
+- BWM per probe (decode_region.py): one score per probe from all its isocortex units,
+  region = Beryl region at the brain entry point; shuffle control as above;
+- BWM decoding paper (BWM_PAPER, stage-2 tables): one score per session and region, with
+  its pseudo-session p-value and median null; wheel velocity in place of trial-specific
+  wheel speed.
+Regions: >= MIN_PER_REGION mesoscope sessions and BWM probes.
+
+Panels b, c (mesoscope only; BWM has about one probe per session, so session variance
+cannot be separated there). Statistics per target, on the score with log(neuron count)
+regressed out (all-neuron scores grow with the number of neurons):
+- mixed model: score ~ log N + (1|region) + (1|animal) + (1|session), crossed random
+  effects, REML (statsmodels); variance fractions and likelihood-ratio p-values
+  (chi-square 0/1 mixture) per component;
+- permutation (model-free): adjusted eta^2 of region within sessions (scores centred per
+  session, region labels permuted within session) and of session within regions (scores
+  centred per region, session labels permuted within region; includes animal differences), and
+  of session within mouse (scores centred per region x mouse, session labels permuted within
+  region x mouse; no animal differences);
+  adjusted eta^2 = (eta^2 - null mean) / (1 - null mean);
+- animal bootstrap: N_BOOT resamples of animals with replacement (a repeated animal and its
+  sessions count as new ones), each refitted with reml.py; 95% intervals of the region and
+  session + animal shares, and the fraction of resamples with session + animal > region.
+  Cached in output/v2/region_variance_boot.csv (delete it to recompute);
+- per mouse (panel d): score ~ log N + (1|region) + (1|session) within each mouse with
+  >= MIN_MOUSE_SESSIONS sessions (reml.py); session share minus region share;
+- region x mouse: the pooled model with an extra (1|region:animal) term (reml.py), columns
+  ra_* in the stats csv (reported in the text, not plotted);
+- panel e: session x region score matrices (log N regressed out) of three example mice with
+  >= 10 sessions and >= 7 regions: the most region-dominated, the most session-dominated and
+  the most balanced by panel d, averaged over HEAT_TARGETS.
+
+Usage: python region_variance.py
+Writes output/v2/region_variance{_panels.pdf,.tex,.pdf} and output/v2/region_variance_stats.csv.
+"""
+import warnings
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from scipy import stats
+
+from controls2 import SUBJ
+from decode_v2 import OUT_V2
+from maps_v2 import CHANCE, COL, TARGETS, TITLE
+from plotstyle import NATURE_DOUBLE_COL_IN, allen_color, save_with_caption, style_axes
+
+MIN_PER_REGION = 3
+N_PERM = 5000
+N_BOOT = 200
+MIN_MOUSE_SESSIONS = 4
+HEAT_TARGETS = ("stim", "feedback")                      # panel e
+MODS = ("meso", "bwm")
+ROWS = ("meso", "bwm", "bwm_paper")
+ROW_NAME = {"meso": "Mesoscope", "bwm": "BWM per probe", "bwm_paper": "BWM per region\n(decoding paper)"}
+BWM_PAPER = Path.home() / "dmn" / "bwm_decoding"      # <variable>_stage2.pqt
+PAPER_VAR = {"stim": "stimside", "choice": "choice", "feedback": "feedback", "wheel": "wheel-speed",
+             "wheel_trial": "wheel-velocity"}
+COMP = ("region", "animal", "session")
+COMP_COL = {"region": "#8c2981", "animal": "#de4968", "session": "#fe9f6d", "residual": "0.85"}
+rng = np.random.default_rng(0)
+
+
+def load():
+    m = pd.read_parquet(OUT_V2 / "decoding_meso_region.pqt")
+    b = pd.read_parquet(OUT_V2 / "decoding_bwm_probe_region.pqt")
+    f = OUT_V2 / "decoding_meso_region_shuf.pqt"      # decode_region.py --shuffle
+    if f.exists():
+        m = m.merge(pd.read_parquet(f), on=["session", "region", "target"], how="left")
+    f = OUT_V2 / "decoding_bwm_probe_shuf.pqt"
+    if f.exists():
+        b = b.merge(pd.read_parquet(f), on=["pid", "target"], how="left")
+    d = {"meso": m.assign(unit=m.session), "bwm": b.assign(unit=b.pid)}
+    for k in MODS:
+        d[k] = d[k].dropna(subset=["all", "region"]).assign(animal=lambda x: x.session.map(SUBJ),
+                                                           logN=lambda x: np.log(x.n_neurons))
+    count = {k: d[k].drop_duplicates(["unit", "region"]).groupby("region").size() for k in MODS}
+    shared = sorted(set(count["meso"][count["meso"] >= MIN_PER_REGION].index)
+                    & set(count["bwm"][count["bwm"] >= MIN_PER_REGION].index), key=allen_order)
+    d["bwm_paper"] = pd.concat(
+        [pd.read_parquet(BWM_PAPER / f"{v}_stage2.pqt").assign(target=t) for t, v in PAPER_VAR.items()]).rename(
+        columns={"eid": "session", "subject": "animal", "score": "all", "n_units": "n_neurons",
+                 "median-null": "null", "p-value": "p"}).dropna(subset=["all", "region"])
+    d["bwm_paper"]["unit"] = d["bwm_paper"].session
+    return {k: d[k][d[k].region.isin(shared)] for k in ROWS}, shared
+
+
+_ORDER = None
+
+
+def allen_order(acr):
+    global _ORDER
+    if _ORDER is None:
+        import iblatlas
+        t = pd.read_csv(Path(iblatlas.__file__).parent / "allen_structure_tree.csv")
+        _ORDER = {a: i for i, a in enumerate(t.acronym)}
+    return _ORDER.get(acr, 1e9)
+
+
+def residualise(df):
+    X = np.c_[np.ones(len(df)), df.logN.values]
+    beta = np.linalg.lstsq(X, df["all"].values, rcond=None)[0]
+    return df["all"].values - X @ beta
+
+
+def mixed(df, comps=COMP):
+    import statsmodels.formula.api as smf
+    warnings.filterwarnings("ignore")
+    df = df.assign(g=1)
+    comps = [c for c in comps if df[c].nunique() > 1]
+
+    def fit(cs):
+        vc = {c: f"0 + C({c})" for c in cs}
+        return smf.mixedlm("all ~ logN", df, groups="g", re_formula="0", vc_formula=vc).fit(reml=True, method="lbfgs")
+
+    full = fit(comps)
+    var = dict(zip(full.model.exog_vc.names, full.vcomp))
+    var["residual"] = full.scale
+    tot = sum(var.values())
+    out = {f"frac_{c}": var.get(c, np.nan) / tot for c in COMP + ("residual",)}
+    for c in comps:
+        lr = max(2 * (full.llf - fit([x for x in comps if x != c]).llf), 0)
+        out[f"p_lrt_{c}"] = 0.5 * stats.chi2.sf(lr, 1)
+    out["slope_logN"] = full.fe_params["logN"]
+    return out
+
+
+def eta2(y, labels):
+    """Between-group sum of squares / total, for each row of labels (n_perm, n)."""
+    labels = np.atleast_2d(labels)
+    out = np.empty(len(labels))
+    tot = ((y - y.mean()) ** 2).sum()
+    for i, lab in enumerate(labels):
+        _, inv = np.unique(lab, return_inverse=True)
+        s, n = np.bincount(inv, y), np.bincount(inv)
+        out[i] = (s ** 2 / n).sum() - y.sum() ** 2 / len(y)
+    return out / tot
+
+
+def centred(y, by):
+    return y - pd.Series(y).groupby(by).transform("mean").values
+
+
+def perm_within(labels, block):
+    """N_PERM permutations of labels within each block."""
+    out = np.tile(labels, (N_PERM, 1))
+    for b in np.unique(block):
+        idx = np.flatnonzero(block == b)
+        if idx.size > 1:
+            out[:, idx] = np.array([labels[rng.permutation(idx)] for _ in range(N_PERM)])
+    return out
+
+
+def perm_effect(y, labels, block):
+    """Adjusted eta^2 of labels on y centred per block, and its permutation p."""
+    keep = pd.Series(block).map(pd.Series(block).value_counts()).values > 1
+    y, labels, block = y[keep], labels[keep], block[keep]
+    if len(np.unique(labels)) < 2 or len(y) < 6:
+        return np.nan, np.nan, 0
+    yc = centred(y, block)
+    obs = eta2(yc, labels)[0]
+    null = eta2(yc, perm_within(labels, block))
+    return (obs - null.mean()) / (1 - null.mean()), (1 + (null >= obs).sum()) / (1 + N_PERM), len(y)
+
+
+def boot_shares(df):
+    """Animal-level bootstrap of the region and session + animal shares (reml.py)."""
+    import reml
+    boot_rng = np.random.default_rng(1)
+    animals = df.animal.unique()
+    reg, sa = [], []
+    for _ in range(N_BOOT):
+        pick = boot_rng.choice(animals, len(animals))
+        parts = [df[df.animal == a].assign(animal=f"{a}_{i}", session=lambda x, i=i: x.session + f"_{i}")
+                 for i, a in enumerate(pick)]
+        try:
+            m = reml.components(pd.concat(parts, ignore_index=True), COMP)
+        except RuntimeError:  # non positive-definite V when a variance collapses; skip this resample
+            continue
+        reg.append(m["frac_region"])
+        sa.append(m.get("frac_session", 0) + m.get("frac_animal", 0))
+    reg, sa = np.array(reg), np.array(sa)
+    return dict(region_lo=np.percentile(reg, 2.5), region_hi=np.percentile(reg, 97.5),
+                ses_anim_lo=np.percentile(sa, 2.5), ses_anim_hi=np.percentile(sa, 97.5),
+                boot_frac_pos=np.mean(sa > reg), n_boot=len(reg))
+
+
+def bootstrap(d):
+    f = OUT_V2 / "region_variance_boot.csv"
+    if f.exists():
+        return pd.read_csv(f)
+    rows = []
+    for t in TARGETS:
+        df = d["meso"][d["meso"].target == t].reset_index(drop=True)
+        rows.append(dict(target=t, **boot_shares(df)))
+        print("bootstrap", t, rows[-1], flush=True)
+    b = pd.DataFrame(rows)
+    b.to_csv(f, index=False)
+    return b
+
+
+def per_mouse(d):
+    """Session and region shares within each mouse (no animal component)."""
+    import reml
+    rows = []
+    for t in TARGETS:
+        df = d["meso"][d["meso"].target == t]
+        for a, g in df.groupby("animal"):
+            if g.session.nunique() < MIN_MOUSE_SESSIONS or g.region.nunique() < 2:
+                continue
+            m = reml.components(g.reset_index(drop=True), ("region", "session"))
+            rows.append(dict(target=t, animal=a, n=len(g), sessions=g.session.nunique(),
+                             frac_region=m.get("frac_region", 0), frac_session=m.get("frac_session", 0)))
+    return pd.DataFrame(rows)
+
+
+def analyse(d):
+    rows = []
+    for k in ("meso",):
+        for t in TARGETS:
+            df = d[k][d[k].target == t].reset_index(drop=True)
+            r = dict(modality=k, target=t, n=len(df), n_units=df.unit.nunique(), n_sessions=df.session.nunique(),
+                     n_animals=df.animal.nunique(), rho_N=stats.spearmanr(df["all"], df.n_neurons)[0])
+            r.update(mixed(df))
+            import reml                                                      # + region x mouse term (text only)
+            ra = reml.components(df.assign(region_animal=df.region + "|" + df.animal),
+                                 COMP + ("region_animal",), lrt=("region_animal",))
+            r.update({f"ra_{a}": b for a, b in ra.items() if a.startswith(("frac", "p_lrt"))})
+            y = residualise(df)
+            reg, ses = df.region.values, df.session.values
+            r["eta_region"], r["p_region"], r["n_region"] = perm_effect(y, reg, ses)
+            multi = pd.Series(ses).map(pd.Series(ses).value_counts()).values > 1   # sessions with >= 2 regions
+            r["eta_session"], r["p_session"], r["n_session"] = perm_effect(y[multi], ses[multi], reg[multi])
+            reg_mouse = reg + "|" + df.animal.values                     # session within mouse: no animal term
+            r["eta_session_mouse"], r["p_session_mouse"], r["n_session_mouse"] = perm_effect(y, ses, reg_mouse)
+            rows.append(r)
+            print(k, t, {a: round(b, 3) if isinstance(b, float) else b for a, b in r.items()}, flush=True)
+    return pd.DataFrame(rows)
+
+
+def stars(p):
+    return "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05 else "n.s."
+
+
+def short(t):
+    return TITLE[t].replace("\n", " ").replace("Wheel speed, trial-specific", "Wheel, trial")
+
+
+def figure(d, shared, st, pm):
+    nr = len(ROWS)
+    fig = plt.figure(figsize=(NATURE_DOUBLE_COL_IN, 9.4))
+    gs = fig.add_gridspec(nr + 4, 5, height_ratios=[1] * nr + [0.42, 1.25, 0.45, 0.95], hspace=0.28,
+                          wspace=0.35)
+    xs = np.arange(len(shared))
+    share = {}                                           # one y axis for balanced accuracy, one for R^2
+    for r, k in enumerate(ROWS):
+        for c, t in enumerate(TARGETS):
+            grp = c > 2
+            ax = fig.add_subplot(gs[r, c], sharey=share.get(grp))
+            share.setdefault(grp, ax)
+            df = d[k][d[k].target == t]
+            base = [col for col in df.columns if col.startswith("shuf_")] or (["null"] if "null" in df else [])
+            for i, reg in enumerate(shared):
+                dr = df[df.region == reg]
+                bv = dr[base].values.ravel() if base else np.array([])
+                bv = bv[np.isfinite(bv)]
+                if bv.size:                              # baseline: 5-95th percentile and median
+                    lo, med, hi = np.percentile(bv, [5, 50, 95])
+                    ax.fill_between([i - 0.38, i + 0.38], lo, hi, color="0.85", lw=0, zorder=0)
+                    ax.plot([i - 0.38, i + 0.38], [med] * 2, color="0.55", lw=0.6, zorder=1)
+                v = dr["all"].values
+                jit = rng.uniform(-0.22, 0.22, len(v))
+                col = allen_color(reg)
+                face = np.where(dr.p.values < 0.05, col, "white") if "p" in dr else col
+                ax.scatter(i + jit, v, s=4, facecolors=face, edgecolors=col if "p" in dr else "0.3",
+                           lw=0.4 if "p" in dr else 0.2, zorder=2)
+                if len(v):
+                    ax.plot([i - 0.3, i + 0.3], [np.median(v)] * 2, color="k", lw=0.9, zorder=3)
+            ax.axhline(CHANCE[t], color="0.5", lw=0.5, ls="--", zorder=1)
+            ax.set_xticks(xs, shared if r == nr - 1 else [], rotation=90, fontsize=4.5)
+            ax.set_xlim(-0.6, len(shared) - 0.4)
+            style_axes(ax, categorical_x=True)
+            if k == "meso":
+                s = st[st.target == t].iloc[0]
+                ax.text(1.0, 1.01, f"region {s.frac_region:.0%} {stars(s.p_lrt_region)}", transform=ax.transAxes,
+                        fontsize=4.5, va="bottom", ha="right")
+            if k == "bwm_paper" and t == "wheel_trial":
+                ax.text(1.0, 1.01, "wheel velocity", transform=ax.transAxes, fontsize=4.5, va="bottom", ha="right")
+            if r == 0:
+                ax.set_title(short(t).replace("Wheel, trial", "Wheel speed, trial") + (" ($R^2$)" if c > 2 else ""),
+                             fontsize=6, pad=9)
+            if c == 0:
+                ax.set_ylabel(f"{ROW_NAME[k]}\nbalanced accuracy", fontsize=6)
+            elif c != 3:
+                ax.tick_params(labelleft=False)
+            if r == 0 and c == 0:
+                ax.text(-0.45, 1.12, "a", transform=ax.transAxes, fontsize=8, fontweight="bold")
+
+    stats_row = gs[nr + 3, :].subgridspec(1, 5, width_ratios=[1, 0.45, 1, 0.7, 1], wspace=0.35)
+    # c: mixed-model variance fractions (mesoscope)
+    ax = fig.add_subplot(stats_row[0, 0])
+    x0 = np.arange(len(TARGETS))
+    s = st.set_index("target").loc[list(TARGETS)]
+    bottom = np.zeros(len(TARGETS))
+    for comp in COMP + ("residual",):
+        v = s[f"frac_{comp}"].fillna(0).values
+        ax.bar(x0, v, 0.7, bottom=bottom, color=COMP_COL[comp], label=comp, edgecolor="none")
+        bottom += v
+    reg, sa = s.frac_region.values, s.frac_session.fillna(0).values + s.frac_animal.fillna(0).values
+    ax.errorbar(x0 - 0.12, reg, yerr=[reg - s.region_lo, s.region_hi - reg], fmt="none", ecolor="k", elinewidth=0.6,
+                capsize=1.5, capthick=0.6, zorder=3)
+    ax.errorbar(x0 + 0.12, reg + sa, yerr=[sa - s.ses_anim_lo, s.ses_anim_hi - sa], fmt="none", ecolor="k",
+                elinewidth=0.6, capsize=1.5, capthick=0.6, zorder=3)
+    for i, t in enumerate(TARGETS):
+        ax.text(x0[i], 1.02, f"{100 * s.loc[t, 'boot_frac_pos']:.0f}%", ha="center", va="bottom", fontsize=4.5)
+    ax.set_xticks(x0, [short(t) for t in TARGETS], rotation=30, ha="right", fontsize=5)
+    ax.set_ylim(0, 1)
+    ax.set_ylabel("variance fraction")
+    style_axes(ax, categorical_x=True)
+    ax.legend(frameon=False, fontsize=5, loc="upper left", bbox_to_anchor=(1.0, 1.0))
+    ax.text(-0.3, 1.12, "c", transform=ax.transAxes, fontsize=8, fontweight="bold")
+
+    # d: permutation, region vs session, adjusted eta^2 (mesoscope)
+    ax = fig.add_subplot(stats_row[0, 2])
+    for eff, mk, dx in (("region", "o", -0.15), ("session", "s", 0), ("session_mouse", "^", 0.15)):
+        v, p = s[f"eta_{eff}"].values, s[f"p_{eff}"].values
+        ax.scatter(x0 + dx, v, marker=mk, s=14, facecolors=np.where(p < 0.05, COL["meso"], "white"),
+                   edgecolors=COL["meso"], lw=0.7, zorder=3,
+                   label={"session": "session\n(incl. animal)", "session_mouse": "session\nwithin mouse"}.get(eff, eff))
+    ax.axhline(0, color="0.5", lw=0.5)
+    ax.set_xticks(x0, [short(t) for t in TARGETS], rotation=30, ha="right", fontsize=5)
+    ax.set_ylim(top=1.1 * np.nanmax(s[["eta_region", "eta_session", "eta_session_mouse"]].values))
+    ax.set_ylabel("adjusted $\\eta^2$")
+    style_axes(ax, categorical_x=True)
+    ax.legend(frameon=False, fontsize=5, loc="upper left", bbox_to_anchor=(1.0, 1.0))
+    ax.text(-0.3, 1.12, "d", transform=ax.transAxes, fontsize=8, fontweight="bold")
+
+    # e: session minus region share within each mouse (mesoscope)
+    ax = fig.add_subplot(stats_row[0, 4])
+    jit = np.random.default_rng(2)
+    for i, t in enumerate(TARGETS):
+        v = (pm[pm.target == t].frac_session - pm[pm.target == t].frac_region).values
+        ax.scatter(i + jit.uniform(-0.15, 0.15, len(v)), v, s=6, color=COL["meso"], alpha=0.7, lw=0, zorder=3)
+        ax.plot([i - 0.25, i + 0.25], [np.median(v)] * 2, color="k", lw=1, zorder=4)
+        ax.text(i, 1.02, f"{(v > 0).sum()}/{len(v)}", transform=ax.get_xaxis_transform(), ha="center",
+                va="bottom", fontsize=4.5)
+    ax.axhline(0, color="0.5", lw=0.5)
+    ax.set_xticks(x0, [short(t) for t in TARGETS], rotation=30, ha="right", fontsize=5)
+    ax.set_ylabel("session $-$ region share")
+    style_axes(ax, categorical_x=True)
+    ax.text(-0.3, 1.12, "e", transform=ax.transAxes, fontsize=8, fontweight="bold")
+
+    # b: session x region matrices of three example mice
+    mice, kinds = example_mice(d, pm)
+    sub = gs[nr + 1, :].subgridspec(1, 9, width_ratios=[1, 1, 1, 0.07, 0.45, 1, 1, 1, 0.07], wspace=0.25)
+    df_all = d["meso"].assign(y=np.nan)
+    for t in HEAT_TARGETS:
+        idx = df_all.target == t
+        df_all.loc[idx, "y"] = residualise(df_all[idx].reset_index(drop=True))
+    for g, t in enumerate(HEAT_TARGETS):
+        dt = df_all[df_all.target == t]
+        lo, hi = np.nanpercentile(dt[dt.animal.isin(mice)].y, [5, 95])
+        for j, (a, kind) in enumerate(zip(mice, kinds)):
+            ax = fig.add_subplot(sub[0, 5 * g + j])
+            m = dt[dt.animal == a].pivot_table(index="session", columns="region", values="y")
+            m = m[sorted(m.columns, key=allen_order)]
+            m = m.loc[m.mean(axis=1).sort_values(ascending=False).index]
+            ax.set_facecolor("0.9")
+            im = ax.imshow(m.values, aspect="auto", cmap="viridis", vmin=lo, vmax=hi, interpolation="nearest")
+            ax.set_xticks(range(m.shape[1]), m.columns, rotation=90, fontsize=3.5)
+            ax.set_yticks([])
+            for sp in ax.spines.values():
+                sp.set_visible(False)
+            dv = pm[(pm.animal == a) & (pm.target == t)]
+            dv = (dv.frac_session - dv.frac_region).iloc[0]
+            ax.set_title(f"{short(t)}\n{a} ({kind})\nsession $-$ region {dv:+.2f}", fontsize=4.5, pad=2)
+            if g == 0 and j == 0:
+                ax.set_ylabel("sessions,\nsorted by mean", fontsize=4.5)
+            if g == 0 and j == 0:
+                ax.text(-0.45, 1.25, "b", transform=ax.transAxes, fontsize=8, fontweight="bold")
+        cax = fig.add_subplot(sub[0, 5 * g + 3])
+        cb = fig.colorbar(im, cax=cax)
+        cb.ax.tick_params(labelsize=4, length=1.5)
+        cb.outline.set_visible(False)
+        cb.set_label("score, log $N$ removed", fontsize=4.5)
+    return fig
+
+
+def example_mice(d, pm):
+    """Region-dominated, balanced and session-dominated mouse (panel d, mean over HEAT_TARGETS)."""
+    m = d["meso"][d["meso"].target == HEAT_TARGETS[0]]
+    big = m.groupby("animal").agg(ses=("session", "nunique"), reg=("region", "nunique"))
+    big = big[(big.ses >= 10) & (big.reg >= 7)].index
+    q = pm[pm.target.isin(HEAT_TARGETS) & pm.animal.isin(big)]
+    q = (q.frac_session - q.frac_region).groupby(q.animal).mean()
+    return [q.idxmin(), (q - q.median()).abs().idxmin(), q.idxmax()], ["region-dominated", "balanced",
+                                                                       "session-dominated"]
+
+
+def caption(d, shared, st, pm):
+    n = {k: (d[k].unit.nunique(), d[k].session.nunique(), d[k].animal.nunique()) for k in ROWS}
+    intro = ("\\textbf{Variance of decoding across regions and sessions (all neurons).} "
+             f"The {len(shared)} regions with $\\geq${MIN_PER_REGION} mesoscope sessions and BWM probes; models, "
+             "tests and baselines in Methods, \\emph{Region and session variance}.")
+    caps = [
+        "Scores per region (Allen order and colours; bar: median; dashed: chance; grey band and line: 5--95th "
+        f"percentile and median of the baseline). Rows: mesoscope, one dot per session and region ({n['meso'][0]} "
+        f"sessions, {n['meso'][2]} mice); BWM, one dot per probe at its entry region ({n['bwm'][0]} probes); BWM "
+        "decoding paper, one dot per session and region, filled if $p<0.05$ (wheel velocity in the last column). "
+        "Inset: region share from \\textbf{c}.",
+        "Session $\\times$ region scores (log $N$ removed) of a region-dominated, a balanced and a "
+        "session-dominated mouse; grey: region not imaged. Horizontal stripes are session effects, vertical "
+        "stripes region effects.",
+        "Mesoscope variance shares from the mixed model; error bars: 95\\% intervals over resampled mice; numbers: "
+        "fraction of resamples with session plus animal above region.",
+        "Permutation tests, adjusted $\\eta^2$ (0 = chance): region (circles), session including (squares) and "
+        "excluding (triangles) differences between mice. Filled: $p<0.05$.",
+        f"Session minus region share, fitted per mouse ({pm.animal.nunique()} mice with $\\geq${MIN_MOUSE_SESSIONS} "
+        "sessions); bar: median; numbers: mice with a larger session share.",
+    ]
+    return intro, caps
+
+
+def main():
+    d, shared = load()
+    print("shared regions:", shared)
+    st = analyse(d).merge(bootstrap(d), on="target")
+    st.to_csv(OUT_V2 / "region_variance_stats.csv", index=False)
+    pm = per_mouse(d)
+    pm.to_csv(OUT_V2 / "region_variance_per_mouse.csv", index=False)
+    fig = figure(d, shared, st, pm)
+    intro, caps = caption(d, shared, st, pm)
+    save_with_caption(fig, OUT_V2 / "region_variance", caps, "region_variance", intro=intro)
+    plt.close(fig)
+    print(st.round(3).to_string())
+
+
+if __name__ == "__main__":
+    main()

@@ -462,7 +462,14 @@ def save_trial_cuts_meso(
     saved_meta_paths: list[Path] = []
 
     # ----------------- per-FOV loop -----------------
-    objects = ["mpci", "mpciROIs", "mpciROITypes", "mpciStack"]
+    # Datasets read per FOV, one file at a time: one.load_object would also download
+    # raw and neuropil fluorescence (mpci.ROIActivityF, mpci.ROINeuropilActivityF)
+    # and the ROI / neuropil masks, none of which are used.
+    fov_datasets = {
+        "mpci": ("times", "ROIActivityDeconvolved"),
+        "mpciROIs": ("brainLocationIds_ccf_2017_estimate", "stackPos", "mpciROITypes", "mlapdv_estimate"),
+        "mpciStack": ("timeshift",),
+    }
     fov_folders = one.list_collections(eid, collection="alf/FOV_*")
     fov_folders = sorted(fov_folders, key=lambda s: int(s[-2:]))
 
@@ -471,9 +478,10 @@ def save_trial_cuts_meso(
         print("\n=== FOV:", fov, "===")
 
         ROI = {}
-        for obj in objects:
+        for obj, attrs in fov_datasets.items():
             try:
-                ROI[obj] = one.load_object(eid, obj, collection=fov_collection)
+                ROI[obj] = {a: one.load_dataset(eid, f"{obj}.{a}.npy", collection=fov_collection)
+                            for a in attrs}
             except Exception:
                 ROI[obj] = {}
 
@@ -497,11 +505,7 @@ def save_trial_cuts_meso(
         timeshift = np.asarray(ROI["mpciStack"]["timeshift"], dtype=float)
         roi_offsets = timeshift[roi_xyz[:, len(timeshift.shape)]].astype(float)  # (N,)
 
-        if "ROIActivityDeconvolved" in ROI["mpci"]:
-            roi_signal_all = ROI["mpci"]["ROIActivityDeconvolved"].T
-        else:
-            roi_signal_all = ROI["mpci"]["ROIActivityF"].T
-        roi_signal_all = roi_signal_all.astype(np.float32, copy=False)  # (N, T)
+        roi_signal_all = ROI["mpci"]["ROIActivityDeconvolved"].T.astype(np.float32, copy=False)  # (N, T)
 
         neuron_mask = ROI["mpciROIs"]["mpciROITypes"].astype(bool)
         print(f"  neuron ROIs: {int(neuron_mask.sum())}/{len(neuron_mask)}")

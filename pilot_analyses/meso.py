@@ -43,6 +43,24 @@ def load_distinct_bright_colors(n=20, saturation=0.9, brightness=0.95):
     return hex_colors
 
 
+# Datasets read per FOV, as {ALF object: attributes}. Loaded one file at a time
+# rather than with one.load_object, which would also download every other file
+# of the object: raw and neuropil fluorescence (mpci.ROIActivityF,
+# mpci.ROINeuropilActivityF, each as large as the deconvolved traces) and the
+# ROI and neuropil masks, none of which are used.
+_FOV_DATASETS = {
+    'mpci': ('times', 'ROIActivityDeconvolved'),
+    'mpciROIs': ('brainLocationIds_ccf_2017_estimate', 'stackPos', 'mpciROITypes', 'mlapdv_estimate'),
+    'mpciStack': ('timeshift',),
+}
+
+
+def _load_fov_object(eid, obj, collection):
+    """{attribute: array} of the datasets of `obj` listed in _FOV_DATASETS."""
+    return {a: one.load_dataset(eid, f'{obj}.{a}.npy', collection=collection)
+            for a in _FOV_DATASETS[obj]}
+
+
 def embed_meso(eid, filter_neurons=False, run_rastermap=False):
     """
     Load and embed mesoscope data via rastermap for a given experiment ID (eid).
@@ -59,7 +77,6 @@ def embed_meso(eid, filter_neurons=False, run_rastermap=False):
     print('Filter neurons:', filter_neurons)
 
     # -------- Legacy path (your current logic; functionally unchanged) --------
-    objects = ['mpci', 'mpciROIs', 'mpciROITypes', 'mpciStack']
 
     fov_folders = one.list_collections(eid, collection='alf/FOV_*')
     fov_folders = sorted(fov_folders, key=lambda s: int(s[-2:]))
@@ -67,9 +84,9 @@ def embed_meso(eid, filter_neurons=False, run_rastermap=False):
     all_ROI_data = Bunch()
     for fov in fov_folders:
         rec = {}
-        for obj in objects:
+        for obj in _FOV_DATASETS:
             try:
-                rec[obj] = one.load_object(eid, obj, collection=fov)
+                rec[obj] = _load_fov_object(eid, obj, fov)
             except Exception:
                 rec[obj] = {}
         all_ROI_data[fov.split('/')[-1]] = rec
@@ -108,11 +125,7 @@ def embed_meso(eid, filter_neurons=False, run_rastermap=False):
         roi_times = (np.tile(frame_times, (roi_offsets.size, 1)) +
                      roi_offsets[:, None])  # (Nroi, T)
 
-        # Prefer deconvolved, fall back to fluorescence if needed
-        if 'ROIActivityDeconvolved' in ROI['mpci']:
-            roi_signal = ROI['mpci']['ROIActivityDeconvolved'].T
-        else:
-            roi_signal = ROI['mpci']['ROIActivityF'].T
+        roi_signal = ROI['mpci']['ROIActivityDeconvolved'].T
 
         print(roi_times.shape[1], 'time bins',
               'from', float(roi_times[0].min()), 'to', float(roi_times[0].max()),

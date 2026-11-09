@@ -1,0 +1,4 @@
+output/*
+!output/fig*.pdf
+output/*_panels.pdf
+!output/*.csv

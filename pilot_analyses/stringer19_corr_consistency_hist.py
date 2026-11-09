@@ -34,7 +34,7 @@ _REQUIRED_DATASETS = (
     "mpciROIs.mpciROITypes.npy",
     "mpciROIs.mlapdv_estimate.npy",
 )
-_SIGNAL_DATASETS = ("mpci.ROIActivityDeconvolved.npy", "mpci.ROIActivityF.npy")
+_SIGNAL_DATASETS = ("mpci.ROIActivityDeconvolved.npy",)
 
 
 def _load_canonical_paths(path: Path = CANONICAL_SESSIONS_PATH) -> List[str]:

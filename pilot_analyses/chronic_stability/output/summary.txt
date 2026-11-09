@@ -1,0 +1,39 @@
+subjects 6, sessions 83, pairs 644
+spatial QC pass 95.3%; median deviation 1.47 px vs nearest-ROI distance 8.25 px
+
+neurons tracked with QC, per mouse:
+  SP054: 10 sessions, 5117 neurons/session; in >=2: 5396, >=5: 1517, >=half: 1517, >=80%: 312, all: 28
+  SP058: 23 sessions, 8441 neurons/session; in >=2: 17016, >=5: 10195, >=half: 4905, >=80%: 468, all: 67
+  SP061: 10 sessions, 8502 neurons/session; in >=2: 12949, >=5: 6147, >=half: 6147, >=80%: 1998, all: 329
+  SP066: 3 sessions, 7129 neurons/session; in >=2: 5585, >=5: 0, >=half: 5585, >=80%: 2256, all: 2256
+  SP067: 20 sessions, 8168 neurons/session; in >=2: 19378, >=5: 10111, >=half: 4239, >=80%: 254, all: 0
+  SP072: 18 sessions, 8365 neurons/session; in >=2: 16527, >=5: 9755, >=half: 5224, >=80%: 895, all: 211
+
+fraction of even/odd baseline kept (mean ± sem over mice):
+  profile              1-2 d 0.53 ± 0.05   >14 d 0.42 ± 0.02   slope/log10 day -0.076 (t-test p=0.089, 5 mice)
+  activity level       1-2 d 0.79 ± 0.03   >14 d 0.73 ± 0.03   slope/log10 day -0.051 (t-test p=0.018, 5 mice)
+  stim map             1-2 d 0.66 ± 0.07   >14 d 0.56 ± 0.03   slope/log10 day -0.053 (t-test p=0.423, 5 mice)
+  reward map           1-2 d 0.52 ± 0.09   >14 d 0.43 ± 0.03   slope/log10 day -0.069 (t-test p=0.321, 5 mice)
+  stim sensitivity     1-2 d 0.71 ± 0.04   >14 d 0.59 ± 0.05   slope/log10 day -0.081 (t-test p=0.105, 5 mice)
+  stim decoder         1-2 d 0.72 ± 0.06   >14 d 0.61 ± 0.03   slope/log10 day -0.059 (t-test p=0.335, 5 mice)
+  choice sensitivity   1-2 d 0.60 ± 0.09   >14 d 0.59 ± 0.12   slope/log10 day -0.024 (t-test p=0.808, 5 mice)
+
+raw values (mean over mice):
+dtbin            1-2    3-7   8-14  15-30    >30
+rw             0.381  0.358  0.349  0.347  0.369
+rx             0.214  0.186  0.172  0.161  0.169
+rnn            0.053  0.046  0.044  0.042  0.044
+r0             0.031  0.028  0.022  0.021  0.025
+stability      0.531  0.484  0.460  0.424  0.415
+act_w          0.969  0.967  0.965  0.964  0.960
+act_x          0.762  0.742  0.712  0.710  0.718
+stim_sig       0.035  0.034  0.033  0.034  0.034
+stim_kept_w    0.233  0.228  0.224  0.224  0.233
+stim_kept_x    0.173  0.165  0.155  0.138  0.153
+choice_sig     0.030  0.028  0.026  0.029  0.023
+choice_kept_w  0.149  0.141  0.131  0.137  0.121
+choice_kept_x  0.101  0.093  0.081  0.085  0.075
+dec_stim_w     0.671  0.670  0.664  0.664  0.660
+dec_stim_x     0.626  0.626  0.607  0.601  0.593
+dec_choice_w   0.620  0.611  0.598  0.603  0.588
+dec_choice_x   0.579  0.567  0.554  0.548  0.542
