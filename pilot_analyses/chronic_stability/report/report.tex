@@ -79,11 +79,11 @@ SP066 has only 6 days and was excluded from this test.
 \emph{Single-neuron trends}: for neurons tracked in $\geq$6 sessions and stimulus-selective overall (mean sign-aligned $d'>0.2$), we computed the slope of $d'$ against recording day.
 This slope was compared with 2\,000 shuffles of the session order; a neuron counts as losing or gaining selectivity at $p<0.025$ per tail.
 
-\paragraph{Decoder transfer across days.}
-To ask how the stimulus code changes, the stimulus decoders of each session pair were analysed in three further ways (\texttt{decoder\_drift.py}), each with a same-day baseline from the same neurons and the same amount of data.
-(1)~\emph{Transfer matrix}: the decoder trained on one half of day $i$ was tested on the other half of day $j$, keeping the two directions ($i\to j$, $j\to i$) separate, and expressed as the fraction of the within-day accuracy kept, $(\mathrm{acc}_{i\to j}-0.5)/(\overline{\mathrm{acc}}_w-0.5)$.
-(2)~\emph{Recalibrated vs.\ fixed}: the test data were z-scored either with their own mean and s.d.\ (recalibrated, as in Fig.~\ref{fig:main}f; this undoes a session-wide change in gain or offset of each neuron) or with those of the training half (fixed: the decoder is applied exactly as trained).
-(3)~\emph{Weight similarity}: the cosine between the decoder weight vectors (on z-scored activity) of day $a$ and day $b$, against the cosine between the weights fitted on the even and odd halves of the same day.
+\paragraph{Regions.}
+The profile stability index was also computed separately per cortical region (\texttt{regions.py}). We chose it because it is the most robust metric: every tracked neuron counts, there is no significance threshold, it is scale-free, and it is normalised by both chance and the within-day baseline, so it compares fairly between regions with different reliability or neuron numbers.
+Each neuron was assigned the Beryl region of its ROI centre in the Allen CCF; it counted for a region only if both sessions of the pair placed it there. AUDp, AUDpo and AUDd were pooled (AUD). Six regions had enough data: VISp, VISal, VISrl, VISa, SSp-bfd and AUD. A region entered a session pair only with $\geq$30 tracked neurons, and a mouse entered a region only with $\geq$5 such pairs.
+Following the region-matched shuffle of the earlier analysis (\texttt{pairwise\_correl.py}), chance $r_0$ used a random partner from the same region \emph{and} FOV. This removes any response shape shared by neurons of a region, so the index measures only neuron-specific stability. The chance level with a partner from any region was computed for comparison.
+Regions were compared within the same session pairs (index of region minus that of VISp, averaged per mouse). The decline was measured as the slope of a linear fit of the index against days apart, per mouse and region.
 
 \section{Results}
 
@@ -156,23 +156,25 @@ stimulus decoder 0.72 vs.\ 0.61.
 Choice sensitivity (0.60 vs.\ 0.59) varies widely between mice because its baseline is close to chance (h). The choice decoder could not be normalised for the same reason: its within-day accuracy is often near chance, so the ratio diverges for single pairs.
 The ordering is consistent: \emph{which} neurons are active is the most stable, while detailed response shapes and reward tuning are the least stable.
 
-
 \begin{figure}[!t]
 \centering
-\includegraphics{decoder_drift.pdf}
-\caption{\textbf{How the stimulus decoder changes across days.} Stimulus-side ridge decoders on the neurons tracked in both sessions of a pair. Line styles and colours as in Fig.~\ref{fig:main}: dotted, same-day baseline; grey, chance; error bars, s.e.m.\ over mice.
-\textbf{a}~Transfer matrices: decoder trained on day $i$ (rows) and tested on day $j$ (columns), as the fraction of the within-day accuracy kept (recalibrated). Axes: days since the first session (ticks at first, middle and last session). Grey: diagonal (baseline by definition) and pairs that did not meet the pair criteria (e.g.\ SP067's last two sessions, from a separate ROICaT run).
-\textbf{b}~Fraction of baseline kept when the test data are z-scored with their own statistics (recalibrated, filled) or with those of the training half (fixed, open).
-\textbf{c}~Cosine between decoder weight vectors fitted on the same day (even vs.\ odd half, dotted) and on two days (solid), and their ratio (black, right axis).
-\textbf{d}~Transfer forward in time (trained on the earlier session, filled) and backward (trained on the later session, open). The difference is largely explained by later sessions having more trials (see text).}
-\label{fig:drift}
+\includegraphics{regions.pdf}
+\caption{\textbf{Profile stability per cortical region.} Profile stability index (Fig.~\ref{fig:main}b), computed on the tracked neurons of each region, with chance $r_0$ from a partner of the same region and FOV. Region colours are shades of the Allen atlas colours: teal for visual areas, green for SSp-bfd, and slate for AUD (whose Allen teal would clash with the visual areas). Dotted line, same-day baseline (1); grey line, chance (0); dots, mice (colours as in Fig.~\ref{fig:main}); bars, mean over mice; error bars, s.e.m.\ over mice.
+\textbf{a}~Tracked neurons of all mice in a dorsal view of the CCF (ML, AP), coloured by region; other regions in grey.
+\textbf{b}~Index against days apart, per region.
+\textbf{c}~Inputs to the index at 1--2 days apart (medians, mean over mice). $r_w$: same day, even vs.\ odd trials (open). $r_x$: across days (filled). $r_0$: random partner of the same region (bar) or of any region (cross). The index is $(r_x-r_0)/(r_w-r_0)$.
+\textbf{d}~Index at 1--2 days (blue bars) and $>$14 days apart (red bars); symbols, individual mice.}
+\label{fig:regions}
 \end{figure}
 
-\paragraph{Decoder transfer across days (Fig.~\ref{fig:drift}).}
-\emph{Transfer matrices (a).} Transfer is noisy from pair to pair but falls off gradually away from the diagonal. There are no sharp blocks that would mark a sudden reorganisation of the code. Single sessions transfer poorly in both directions (dark rows and columns, e.g.\ in SP054 and SP061), which points to session-specific recording quality rather than a change in the code.
-\emph{Recalibrated vs.\ fixed (b).} Applying the decoder exactly as trained keeps less of the baseline than recalibrating the test day (0.64 vs.\ 0.72 at 1--2 days, 0.53 vs.\ 0.63 beyond 30 days; lower in 5 of 6 mice, paired $t$-test across mice $p=0.016$). Part of the across-day loss, about a tenth of the baseline, is therefore a change in each neuron's gain or offset that a simple re-standardisation undoes. The rest is a change in which neurons carry the stimulus.
-\emph{Decoder weights (c).} With thousands of neurons, decoder weights are noisy, and even two halves of the same session give a cosine of only $\approx$0.11 (constant over the recording period). Across days the cosine falls from 0.074 to 0.052, i.e.\ from 0.69 to 0.54 of the same-day value. The coding direction therefore changes gradually over weeks, more clearly than the accuracy, which is less sensitive to small rotations of the weights (slope against $\log$ days negative in 4 of 5 mice, $p=0.15$).
-\emph{Direction in time (d).} Decoders trained on the later session transfer better than the reverse (mean difference 0.07, 5 of 6 mice, $p=0.09$), most clearly beyond 30 days (0.78 vs.\ 0.48). This asymmetry, however, is largely a training-set effect. The later session has more trials in 65\% of pairs, the asymmetry tracks the difference in trial counts (Spearman $\rho=-0.14$, $p=3\times10^{-4}$; $-0.47$ in SP072), and at equal trial counts it is close to zero ($-0.05$ to $+0.06$ across mice). A test with matched training-set sizes would be needed before interpreting it.
+\paragraph{No region is clearly more stable than the others (Fig.~\ref{fig:regions}).}
+Coverage differs by region (a): VISp, VISrl (5 mice), VISal and VISa (4 mice) are well sampled, SSp-bfd (3 mice) and AUD (2 mice) less so.
+In all six regions the index follows the pattern of the whole population, a step at day 1 followed by a slow decline (b). It ranges from 0.42 to 0.56 at 1--2 days (VISp 0.50) and from 0.32 to 0.43 beyond 14 days (VISp 0.42).
+Within-day reliability differs more between regions than stability does (c). $r_w$ is highest in VISa (0.45) and AUD (0.39) and lowest in SSp-bfd (0.27), but $r_x$ scales with it, so the fraction kept is similar.
+The region-matched chance (0.02--0.04) is barely above the chance from any region. Neurons of one region therefore share little response shape beyond what all neurons share, and the index is nearly the same with either chance level (differences $\leq$0.05).
+Compared within the same session pairs, no region differs consistently from VISp (not shown). Mean differences are between $-0.04$ and $+0.01$, the mice disagree in sign, and no test reaches significance (VISrl lower in 4 of 5 mice, $p=0.13$; VISal and VISa $p=1$; SSp-bfd and AUD have too few mice to test).
+The decline over days is negative in nearly every mouse and region, at $-0.04$ to $-0.11$ per 10 days on average over mice (linear fit per mouse; not shown). The steeper values (VISrl, AUD) rest on single mice, e.g.\ SP067 VISrl at $-0.24$.
+At the present sample size, stability of response profiles is therefore a property shared across dorsal cortex rather than one that distinguishes regions. Differences smaller than about 0.1 of the baseline cannot be excluded, and regions sampled in only 2--3 mice (SSp-bfd, AUD) need more animals.
 
 \paragraph{Single neurons that gain or lose selectivity.}
 Of 31\,577 neurons tracked in $\geq$6 QC sessions, 531 are clearly stimulus-selective.
@@ -184,11 +186,12 @@ Example rasters are in \texttt{output/examples\_*.pdf}. They include a stable ce
 
 \paragraph{Conclusion and caveats.}
 Tracked neurons keep a clearly cell-specific response. Across days they retain about 50--80\% of what is reproducible within a session, depending on the metric.
-Most of the loss occurs between consecutive days, with only a slow further decline over weeks, and well-driven neurons are close to fully stable. For the stimulus decoder, about a tenth of the baseline lost across days is a change in neurons' gain or offset that re-standardisation recovers; the rest is a gradual rotation of the coding direction (weight similarity falls from 0.69 to 0.54 of the same-day value over a month).
+Most of the loss occurs between consecutive days, with only a slow further decline over weeks, and well-driven neurons are close to fully stable. Profile stability is similar across the six dorsal cortical regions tested.
 Caveats:
 (i) The overall amplitude of the deconvolved signal varies up to $\sim$10$\times$ between sessions, so all metrics here are scale-free and absolute activity is not compared.
 (ii) Only five mice contribute to the decline test.
 (iii) Coverage is uneven: SP058, SP067 and SP072 end with blocks of sessions that share few neurons with earlier ones, and SP067's last two sessions share no IDs with the rest.
-(iv) Part of the day-1 step may come from day-specific factors (behavioural state, imaging quality) rather than changes in the neurons' tuning.
+(iv) Regional comparisons rest on 2--5 mice per region and on the CCF registration of each FOV; neurons near region borders may be misassigned.
+(v) Part of the day-1 step may come from day-specific factors (behavioural state, imaging quality) rather than changes in the neurons' tuning.
 
 \end{document}

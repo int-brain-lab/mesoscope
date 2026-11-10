@@ -399,6 +399,129 @@ def _drift_figure(d):
     plt.close(fig)
 
 
+# region colours: Allen hues (visual teal, somatosensory green); the four visual
+# areas share one Allen colour, so they get shades of it and their own markers;
+# auditory (Allen teal as well) gets a slate blue to stay distinct
+RCOL = {"VISp": "#08858C", "VISal": "#03474B", "VISrl": "#19C3D1", "VISa": "#8ED8DE",
+        "SSp-bfd": "#188064", "AUD": "#5B6C9A"}
+RMK = {"VISp": "o", "VISal": "s", "VISrl": "^", "VISa": "v", "SSp-bfd": "D", "AUD": "P"}
+
+
+def region_figure(d, pos):
+    with plt.rc_context(NATURE_RC):
+        return _region_figure(d, pos)
+
+
+def _region_figure(d, pos):
+    """Profile stability index per cortical region."""
+    from scipy.stats import wilcoxon
+    d = d[d.groupby(["subject", "region"]).dt.transform("size") >= 5].copy()   # >= 5 pairs per mouse and region
+    regions = [r for r in RCOL if r in set(d.region)]
+    subjects = sorted(d.subject.unique())
+    d["dtbin"] = pd.cut(d.dt, BINS, labels=BIN_LAB)
+    d["span"] = pd.cut(d.dt, [0, 2, 14, 1000], labels=["1-2 days", "3-14", ">14 days"])
+    x = np.arange(len(BIN_LAB))
+    edge = dict(mec="k", mew=0.3)
+    fig, ax = plt.subplots(1, 4, figsize=(NATURE_DOUBLE_IN, 2.0), constrained_layout=True,
+                           gridspec_kw=dict(width_ratios=[1.45, 1, 1, 1]))
+    stats = {}
+
+    # a where the regions are (tracked neurons of all mice, dorsal view)
+    a = ax[0]
+    q = pos[~pos.region.isin(regions)]
+    a.scatter(q.ml, q.ap, s=0.3, color="0.85", lw=0, rasterized=True)
+    for r in regions:
+        q = pos[pos.region == r]
+        a.scatter(q.ml, q.ap, s=0.3, color=RCOL[r], lw=0, rasterized=True)
+        a.text(q.ml.median(), q.ap.median(), r, fontsize=5, ha="center", va="center",
+               color="k" if r == "VISa" else "w", fontweight="bold")
+    a.set(xlabel="ML (mm)", ylabel="AP (mm)", aspect="equal", title="tracked neurons, all mice")
+    _ticks(a)
+
+    # b stability vs days apart per region (mean over mice of per-mouse bin means)
+    a = ax[1]
+    for r in regions:
+        t = d[d.region == r].groupby(["subject", "dtbin"], observed=True).stab_reg.mean().unstack(0)
+        t = t.reindex(BIN_LAB)
+        m, e = t.mean(axis=1), t.std(axis=1) / np.sqrt(t.notna().sum(axis=1))
+        a.errorbar(x + 0.06 * (regions.index(r) - 2.5), m, e, color=RCOL[r], marker=RMK[r], ms=2.5,
+                   lw=0.9, capsize=0, label=r, **edge)
+    a.axhline(1, color="0.6", **BASE), a.axhline(0, **CHANCE)
+    a.set(xticks=x, xticklabels=BIN_LAB, xlabel="days apart", ylabel="profile stability index",
+          ylim=(-0.05, 1.1), title="profile stability per region")
+    a.legend(frameon=False, fontsize=4.5, ncol=2, loc="lower left", handlelength=1.2,
+             columnspacing=0.6)
+    a.yaxis.set_major_locator(MaxNLocator(3))
+
+    # c the ingredients at 1-2 days: r_w, r_x and the two chance levels
+    a = ax[2]
+    q = d[d.span == "1-2 days"].groupby(["region", "subject"])[["rw", "rx", "r0reg", "r0any"]].mean()
+    q = q.groupby("region").mean().reindex(regions)
+    xr = np.arange(len(regions))
+    for col, mk, fc, lab in (("rw", "o", "white", "$r_w$ same day"), ("rx", "o", None, "$r_x$ 1-2 days"),
+                             ("r0reg", "_", None, "$r_0$ same region"), ("r0any", "x", None, "$r_0$ any region")):
+        for i, r in enumerate(regions):
+            a.plot(i, q.loc[r, col], mk, color=RCOL[r], mfc=fc if fc else RCOL[r], ms=3.5 if mk != "x" else 2.5,
+                   mew=0.8 if mk in "_x" else 0.5)
+        a.plot([], [], mk, color="0.3", mfc=fc if fc else "0.3", ms=3, label=lab)
+    for i, r in enumerate(regions):
+        a.plot([i, i], [q.loc[r, "r0any"], q.loc[r, "rw"]], color=RCOL[r], lw=0.4, zorder=0)
+    a.set(xticks=xr, ylabel="median profile correlation", title="inputs to the index (1-2 days)",
+          ylim=(-0.02, 0.68))
+    a.set_xticklabels(regions, rotation=45, ha="right")
+    a.legend(frameon=False, fontsize=4.5, loc="upper left", handlelength=1, ncol=2, columnspacing=0.6,
+             handletextpad=0.3)
+    a.yaxis.set_major_locator(MaxNLocator(3))
+
+    # d per mouse, 1-2 and >14 days
+    a = ax[3]
+    for k, span in enumerate(("1-2 days", ">14 days")):
+        t = d[d.span == span].groupby(["region", "subject"]).stab_reg.mean().unstack()
+        for i, r in enumerate(regions):
+            if r not in t.index:
+                continue
+            v = t.loc[r].dropna()
+            xx = i + (k - 0.5) * 0.36
+            a.bar(xx, v.mean(), 0.32, color=TCOL[span], alpha=0.35, lw=0)
+            for s, y in v.items():
+                j = subjects.index(s)
+                a.plot(xx, y, MOUSE_MK[j], color=MOUSE_COL[j], ms=2, mew=0)
+    a.axhline(1, color="0.6", **BASE), a.axhline(0, **CHANCE)
+    a.set(xticks=xr, ylabel="profile stability index", ylim=(-0.05, 1.5), title="per mouse",
+          yticks=[0, 0.5, 1])
+    a.set_xticklabels(regions, rotation=45, ha="right")
+    from matplotlib.patches import Patch
+    a.legend([Patch(color=TCOL[k], alpha=0.35, lw=0) for k in ("1-2 days", ">14 days")],
+             ["1-2 days", ">14 days"], frameon=False, fontsize=5, loc=(0.0, 0.87), ncol=2)
+    from matplotlib.lines import Line2D
+    a.add_artist(a.get_legend())
+    a.legend([Line2D([], [], ls="", marker=MOUSE_MK[j], color=MOUSE_COL[j], ms=2.5) for j in range(len(subjects))],
+             subjects, frameon=False, fontsize=4.5, ncol=3, loc=(0.0, 0.69), handletextpad=0.1,
+             columnspacing=0.6)
+
+    # statistics for the text (no panel): paired difference to VISp within the same
+    # session pairs, and per-mouse linear slope of the index over days apart
+    w = d.pivot_table(index=["subject", "a", "b"], columns="region", values="stab_reg")
+    for r in regions[1:]:
+        diff = (w[r] - w["VISp"]).dropna().groupby("subject").mean()
+        p = wilcoxon(diff.values).pvalue if len(diff) >= 4 else np.nan
+        stats[r] = dict(diff=diff.mean(), n_mice=len(diff), n_pos=int((diff > 0).sum()), p=p,
+                        n_pairs=int((w[r] - w["VISp"]).notna().sum()))
+    slopes = {r: pd.Series({s: 10 * np.polyfit(g.dt, g.stab_reg, 1)[0]
+                            for s, g in d[d.region == r].groupby("subject") if g.dt.nunique() >= 5})
+              for r in regions}
+    txt = ["difference to VISp (same pairs, mean over mice):", pd.DataFrame(stats).T.round(3).to_string(),
+           "", "slope of the index per 10 days, per mouse:",
+           pd.DataFrame(slopes).round(3).to_string()]
+    (OUT / "region_stats.txt").write_text("\n".join(txt) + "\n")
+
+    panel_letters(fig, ax)
+    fig.savefig(OUT / "regions.pdf")
+    fig.savefig(OUT / "regions.png", dpi=150)
+    plt.close(fig)
+    return stats, slopes
+
+
 def main():
     qc = pd.read_parquet(OUT / "qc_positions.parquet")
     sess = pd.read_csv(OUT / "sessions.csv")
@@ -409,6 +532,8 @@ def main():
     summary(qc, sess, pairs, N, short, long_)
     if (OUT / "decoder_drift.parquet").exists():
         drift_figure(pd.read_parquet(OUT / "decoder_drift.parquet"))
+    if (OUT / "region_pairs.csv").exists():
+        region_figure(pd.read_csv(OUT / "region_pairs.csv"), pd.read_parquet(OUT / "region_positions.parquet"))
 
 
 if __name__ == "__main__":
