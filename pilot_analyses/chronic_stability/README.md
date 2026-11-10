@@ -19,11 +19,13 @@ Clean re-do of the chronic analyses in `../pairwise_correl.py` and
 * `trends.py`: per-neuron trend of stimulus selectivity over days (permutation test).
 * `decoder_drift.py`: stimulus/choice decoders across days: transfer matrix (per direction),
   recalibrated vs fixed z-scoring, weight cosine (`decoder_drift.parquet`).
-* `figure.py`: `tracking_qc.pdf`, `chronic_stability.pdf`, `decoder_drift.pdf`, `summary.txt`.
+* `regions.py`: profile stability index per cortical region (Beryl; AUD pooled), chance from a
+  same-region partner (`region_pairs.csv`, `region_positions.parquet`).
+* `figure.py`: `tracking_qc.pdf`, `chronic_stability.pdf`, `regions.pdf`, `decoder_drift.pdf` (not in the report), `summary.txt`.
 * `report/report.tex`: LaTeX report (compile with `tectonic report.tex`).
 * `examples.py`: example neurons (footprints, rasters, d' over days),
   `examples_stable.pdf`, `examples_losing.pdf`, `examples_metrics.pdf`,
   `sensitivity_trends.pdf`. Downloads the traces of the example FOVs only.
 
 Every figure has a LaTeX caption (`.tex`) next to it. Run in order with the `iblenv`
-environment: `data.py, qc.py, stability.py, decoder_drift.py, trends.py, figure.py, examples.py`.
+environment: `data.py, qc.py, stability.py, decoder_drift.py, regions.py, trends.py, figure.py, examples.py`.

@@ -1,0 +1,15 @@
+difference to VISp (same pairs, mean over mice):
+          diff  n_mice  n_pos      p  n_pairs
+VISal    0.010     4.0    2.0  1.000    477.0
+VISrl   -0.033     5.0    1.0  0.125    479.0
+VISa     0.006     4.0    2.0  1.000    308.0
+SSp-bfd -0.042     3.0    1.0    NaN    158.0
+AUD     -0.036     2.0    1.0    NaN    226.0
+
+slope of the index per 10 days, per mouse:
+        VISp  VISal  VISrl   VISa  SSp-bfd    AUD
+SP054 -0.008    NaN -0.064 -0.019   -0.098    NaN
+SP058 -0.055 -0.063 -0.078 -0.068      NaN    NaN
+SP061 -0.015 -0.046  0.002  0.004    0.002    NaN
+SP067 -0.102 -0.122 -0.238    NaN   -0.151 -0.141
+SP072 -0.034 -0.053 -0.038 -0.083      NaN -0.072

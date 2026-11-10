@@ -5,3 +5,4 @@ output/qc_positions.parquet
 output/neuron_sessions.parquet
 output/*.log
 __pycache__/
+output/region_positions.parquet
