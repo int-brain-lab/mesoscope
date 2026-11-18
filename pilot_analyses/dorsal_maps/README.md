@@ -104,6 +104,24 @@ python maps_v2.py                         # v2_counts, v2_decoding_n20/_all, v2_
 python depth_profile.py                   # si_depth_profile: tuning and wheel correlates vs depth
 ```
 
+## v7 decoding figures
+
+Figures 1 and 2 use 0.5 mm mesoscope hexagons (vertex to vertex) and BWM
+dots at the Alyx insertion coordinates, with separate rows for superficial
+and all-depth BWM units. Both figures follow the same trial and neuron
+thresholds. The headline table and supplementary bin-wise comparisons
+use the original 1 mm analysis.
+
+Once the feature files and mesoscope trial coverage masks are present, run:
+
+```sh
+python decode_v2.py meso --hex 0.25  # centre-to-vertex radius in mm
+python make_bwm_depth.py
+python decode_probe.py bwm bwm_d640
+python maps_v2.py --report-decoding
+python build_report_v7.py --decoding-only
+```
+
 ## Choices and caveats
 
 - **Data.** Meso uses 153 of the 165 sessions in `canonical_sessions.txt`.

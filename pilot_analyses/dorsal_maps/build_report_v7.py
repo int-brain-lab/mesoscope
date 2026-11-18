@@ -10,6 +10,7 @@ page shows this same PDF.
 
 Usage: python build_report_v7.py
 """
+import argparse
 import re
 import shutil
 import subprocess
@@ -53,14 +54,19 @@ def figure_tex(key, stem):
             f"  \\caption{{{caption_of(stem)}}}\n  \\label{{fig:{key}}}\n\\end{{figure}}\n")
 
 
-def build():
+def build(decoding_only=False):
     fig_dir = REPORT / "figures"
     fig_dir.mkdir(parents=True, exist_ok=True)
-    for key, stem in FIGURES.items():
+    keys = ("decoding_n20", "decoding_all") if decoding_only else FIGURES
+    for key in keys:
+        stem = FIGURES[key]
         shutil.copy(stem.parent / f"{stem.name}_panels.pdf", fig_dir / f"{key}.pdf")
         (fig_dir / f"{key}.tex").write_text(figure_tex(key, stem))
     subprocess.run(["tectonic", "-X", "compile", "main.tex"], cwd=REPORT, check=True)
 
 
 if __name__ == "__main__":
-    build()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--decoding-only", action="store_true",
+                        help="Replace Figures 1 and 2 and reuse the other report panels.")
+    build(decoding_only=parser.parse_args().decoding_only)

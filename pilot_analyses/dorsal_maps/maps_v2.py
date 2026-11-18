@@ -5,7 +5,8 @@ Rows: mesoscope; BWM units within 640 um of the pial surface (bwm_d640, the
 main comparison); BWM units at all depths (reference).
 Inputs: output/tuning_meso.pqt, output/tuning_bwm.pqt (one row per neuron;
 the bwm_d640 rows are the BWM neurons within 640 um, same test), and
-output/v2/decoding_<modality>.pqt (decode_v2.py).
+output/v2/decoding_<modality>.pqt (decode_v2.py). The report decoding
+figures also use the 0.5 mm mesoscope bins and the BWM per-probe tables.
 
 Figures in output/v2/ (each _panels.pdf, .tex, .pdf with caption):
 - v2_counts: neurons and sessions (>= N_PICK neurons) per bin
@@ -24,18 +25,19 @@ import pandas as pd
 from matplotlib.colors import LogNorm
 
 from common import ALPHA, MIN_NEURONS, OUT, VARIABLES, WHEEL_EDGES, bin_neurons
-from decode_v2 import HEX_V2, N_DRAWS, N_PICK, OUT_V2
+from decode_probe import probe_output
+from decode_v2 import HEX_V2, MIN_TRIALS, N_DRAWS, N_PICK, OUT_V2, out_name
 from make_bwm_depth import MAX_DEPTH_UM, depth_below_surface
 from maps import _tuning_methods, _win, joint_norm, map_grid
 from plotstyle import NATURE_DOUBLE_COL_IN, save_with_caption, style_axes
 
 # Keep score hue separate from the lightness change caused by support opacity.
 DORSAL_CMAP = colorcet.cm["CET_I3"]
+REPORT_HEX_SIZE = 0.25  # mm, centre to vertex
 ROWS = ("meso", "bwm_d640", "bwm")
 ROW_NAME = {"meso": "Mesoscope", "bwm_d640": f"BWM $\\leq${MAX_DEPTH_UM} µm",
-            "bwm": "BWM all depths", "bwm_probe": "BWM per probe"}
-ROW_TEXT = {"meso": "mesoscope", "bwm_d640": f"BWM $\\leq${MAX_DEPTH_UM}\\,$\\mu$m", "bwm": "BWM all depths",
-            "bwm_probe": "BWM per probe"}
+            "bwm": "BWM all depths"}
+ROW_TEXT = {"meso": "mesoscope", "bwm_d640": f"BWM $\\leq${MAX_DEPTH_UM}\\,$\\mu$m", "bwm": "BWM all depths"}
 COL = {"meso": "tab:green", "bwm_d640": "tab:purple", "bwm": "0.6"}
 TARGETS = ("stim", "choice", "feedback", "wheel", "wheel_trial")
 TITLE = {"stim": "Stimulus side", "choice": "Choice", "feedback": "Feedback", "wheel": "Wheel speed",
@@ -56,7 +58,6 @@ def load():
         tun[m]["hex"] = bin_neurons(tun[m][["x", "y", "z"]].values, size=HEX_V2)
     dec = {m: pd.read_parquet(OUT_V2 / f"decoding_{m}.pqt") for m in ROWS}
     dec["meso"] = dec["meso"][~dec["meso"].session.isin(excluded_sessions())]
-    dec["bwm_probe"] = pd.read_parquet(OUT_V2 / "decoding_bwm_probe.pqt")   # decode_probe.py
     return tun, dec
 
 
@@ -106,51 +107,54 @@ def counts(tun, summary):
              out_dir=OUT_V2, cmap=DORSAL_CMAP)
 
 
-def decoding(dec, ver, summary):
+def report_decoding():
+    """Render the two v7 decoding maps from fine-bin and per-probe scores."""
+    from decode_v2 import excluded_sessions
+
+    meso = pd.read_parquet(out_name("meso", REPORT_HEX_SIZE))
+    meso = meso[~meso.session.isin(excluded_sessions())]
+    probes = {m: pd.read_parquet(probe_output(m)) for m in ROWS[1:]}
+    for ver in ("n20", "all"):
+        decoding(meso, probes, ver)
+
+
+def decoding(meso, probes, ver):
     from controls2 import SUBJ, opacity
-    per = {}
-    for m in ROWS:
-        d = dec[m].dropna(subset=[ver]).assign(subject=lambda x: x.session.map(SUBJ))
-        g = d.groupby(["target", "hex"]).agg(v=(ver, "mean"), na=("subject", "nunique"))
-        per[m] = [(g.loc[t].index, g.loc[t].v.values, opacity(g.loc[t].na.values)) if t in g.index.levels[0]
-                  else ([], [], []) for t in TARGETS]
-    rows = ROWS
-    if ver == "all":     # extra row: BWM decoded per probe, a circle at the probe's entry point
-        rows = ROWS + ("bwm_probe",)
-        p = dec["bwm_probe"].sort_values("all")          # strongest drawn on top where probes overlap
-        per["bwm_probe"] = [dict(x=np.abs(p.entry_x[p.target == t].values), y=p.entry_y[p.target == t].values,
-                                 v=p["all"][p.target == t].values) for t in TARGETS]
-    # colour scales from the hexagon rows only (probe circles above the top saturate)
-    binary = joint_norm([per[m][i][1] for m in ROWS for i, t in enumerate(TARGETS[:3]) if len(per[m][i][1])], lo=0.5)
-    norms = [binary] * 3 + [joint_norm([per[m][3][1] for m in ROWS], lo=0),
-                            joint_norm([per[m][4][1] for m in ROWS], lo=0)]
-    for m in ROWS:
-        for t in TARGETS:
-            d = dec[m][dec[m].target == t][ver]
-            summary.append(dict(row=m, measure=f"decoding_{ver}_{t}", value=d.mean(), session_bins=d.notna().sum()))
+
+    d = meso.dropna(subset=[ver]).assign(subject=lambda x: x.session.map(SUBJ))
+    g = d.groupby(["target", "hex"]).agg(v=(ver, "mean"), na=("subject", "nunique"))
+    per = {"meso": [(a.index, a.v.values, opacity(a.na.values))
+                    for a in (g.xs(t) for t in TARGETS)]}
+    for m in ROWS[1:]:
+        d = probes[m].dropna(subset=[ver, "entry_x", "entry_y"]).sort_values(ver)
+        per[m] = [dict(x=np.abs(p.entry_x.values), y=p.entry_y.values, v=p[ver].values)
+                  for p in (d[d.target == t] for t in TARGETS)]
+
+    values = [[per["meso"][i][1]] + [per[m][i]["v"] for m in ROWS[1:]]
+              for i in range(len(TARGETS))]
+    binary = joint_norm([v for target in values[:3] for v in target], lo=0.5)
+    norms = [binary] * 3 + [joint_norm(v, lo=0) for v in values[3:]]
     if ver == "n20":
         title = f"Decoding from {N_PICK} neurons"
-        who = (f"{N_PICK} random neurons of one session in that bin (mean of {N_DRAWS} draws; "
-               f"sessions with $\\geq${N_PICK} neurons there)")
+        population = f"{N_PICK} randomly drawn neurons (mean of {N_DRAWS} draws)"
     else:
         title = "Decoding from all neurons"
-        who = (f"all neurons of one session in that bin (sessions with $\\geq${N_PICK} neurons there); "
-               "mesoscope bins hold far more neurons than BWM bins")
-        p = dec["bwm_probe"].drop_duplicates("pid")
-        probe = (f" Bottom row: BWM decoded per probe from all its isocortex units at all depths, whichever bins "
-                 f"they fall in ({len(p)} probes with $\\geq${N_PICK} units, median {p.n_neurons.median():.0f}); "
-                 "each circle sits at the probe's brain entry point (histology-aligned Alyx trajectory, "
-                 "hemispheres folded), higher scores drawn on top where circles overlap; colour scales as in the rows "
-                 "above, so circles beyond the top of a scale saturate.")
-    head = (f"\\textbf{{{title}}}. Rows: mesoscope; BWM units within {MAX_DEPTH_UM}\\,$\\mu$m of the pial "
-            "surface; BWM at all depths. Each bin (1\\,mm hexagon, hemispheres folded) shows the mean over "
-            f"sessions of decoders trained on {who}. Opacity: number of animals (full at $\\geq$4)."
-            + (probe if ver == "all" else ""))
+        population = "all eligible neurons"
+
+    head = (f"\\textbf{{{title}}}. Top row: mesoscope decoding from {population} in each "
+            f"session and {2 * REPORT_HEX_SIZE:g}\\,mm hexagon (vertex to vertex), averaged over "
+            "sessions. Opacity represents the number of animals (full at $\\geq$4). Middle and "
+            f"bottom rows: BWM decoders fit to {population} on each probe, using units within "
+            f"{MAX_DEPTH_UM}\\,$\\mu$m of the pial surface and at all depths, respectively. Each "
+            "dot is at the probe's Alyx trajectory entry point. Hemispheres are folded onto the "
+            f"right. Sessions require at least {MIN_TRIALS} trials and bins or probes need at least {N_PICK} "
+            "neurons. Colour scales are shared across rows.")
     map_grid(per, [TITLE[t] for t in TARGETS], ["balanced accuracy"] * 3 + ["$R^2$"] * 2, norms,
              f"v2_decoding_{ver}",
-             ["Stimulus side, balanced accuracy (chance 0.5; colour scale shared by \\textbf{a}--\\textbf{c}).",
-              "Choice.", "Feedback.", "Wheel speed, cross-validated $R^2$.", "Trial-specific wheel speed, $R^2$."],
-             f"v2_decoding_{ver}", intro=head, rows=rows, row_names=ROW_NAME, size=HEX_V2,
+             ["Stimulus side, balanced accuracy (chance 0.5; scale shared by \\textbf{a}--\\textbf{c}).",
+              "Choice.", "Feedback.", "Wheel speed, cross-validated $R^2$.",
+              "Trial-specific wheel speed, $R^2$."],
+             f"v2_decoding_{ver}", intro=head, rows=ROWS, row_names=ROW_NAME, size=REPORT_HEX_SIZE,
              out_dir=OUT_V2, cmap=DORSAL_CMAP)
 
 
@@ -235,7 +239,12 @@ def main():
     summary = []
     counts(tun, summary)
     for ver in ("n20", "all"):
-        decoding(dec, ver, summary)
+        for m in ROWS:
+            for t in TARGETS:
+                d = dec[m][dec[m].target == t][ver]
+                summary.append(dict(row=m, measure=f"decoding_{ver}_{t}", value=d.mean(),
+                                    session_bins=d.notna().sum()))
+    report_decoding()
     tuning(tun, summary)
     summary_figure(dec, summary)
     s = pd.DataFrame(summary)
@@ -244,4 +253,13 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--report-decoding", action="store_true",
+                        help="Render only the two v7 decoding maps.")
+    args = parser.parse_args()
+    if args.report_decoding:
+        report_decoding()
+    else:
+        main()
