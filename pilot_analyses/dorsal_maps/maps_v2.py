@@ -17,6 +17,7 @@ Also output/v2/summary_v2.csv.
 
 Usage: python maps_v2.py
 """
+import colorcet
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -28,6 +29,8 @@ from make_bwm_depth import MAX_DEPTH_UM, depth_below_surface
 from maps import _tuning_methods, _win, joint_norm, map_grid
 from plotstyle import NATURE_DOUBLE_COL_IN, save_with_caption, style_axes
 
+# Keep score hue separate from the lightness change caused by support opacity.
+DORSAL_CMAP = colorcet.cm["CET_I3"]
 ROWS = ("meso", "bwm_d640", "bwm")
 ROW_NAME = {"meso": "Mesoscope", "bwm_d640": f"BWM $\\leq${MAX_DEPTH_UM} µm",
             "bwm": "BWM all depths", "bwm_probe": "BWM per probe"}
@@ -99,7 +102,8 @@ def counts(tun, summary):
              ["Number of isocortex neurons per bin: " + "; ".join(
                  f"{ROW_TEXT[m]} {nn[m][0]:,} neurons, {nn[m][1]} sessions" for m in ROWS) + ".",
               f"Number of sessions contributing at least {N_PICK} neurons to each bin."],
-             "v2_counts", intro=intro("Coverage"), rows=ROWS, row_names=ROW_NAME, size=HEX_V2, out_dir=OUT_V2)
+             "v2_counts", intro=intro("Coverage"), rows=ROWS, row_names=ROW_NAME, size=HEX_V2,
+             out_dir=OUT_V2, cmap=DORSAL_CMAP)
 
 
 def decoding(dec, ver, summary):
@@ -146,7 +150,8 @@ def decoding(dec, ver, summary):
              f"v2_decoding_{ver}",
              ["Stimulus side, balanced accuracy (chance 0.5; colour scale shared by \\textbf{a}--\\textbf{c}).",
               "Choice.", "Feedback.", "Wheel speed, cross-validated $R^2$.", "Trial-specific wheel speed, $R^2$."],
-             f"v2_decoding_{ver}", intro=head, rows=rows, row_names=ROW_NAME, size=HEX_V2, out_dir=OUT_V2)
+             f"v2_decoding_{ver}", intro=head, rows=rows, row_names=ROW_NAME, size=HEX_V2,
+             out_dir=OUT_V2, cmap=DORSAL_CMAP)
 
 
 def tuning(tun, summary):
@@ -166,7 +171,7 @@ def tuning(tun, summary):
               f"neurons pooled across sessions); {_win('stim')}.", f"Choice; {_win('choice')}.",
               f"Feedback; {_win('feedback')}."],
              "v2_tuning", intro=intro("Tuning results") + " " + _tuning_methods(), rows=ROWS, row_names=ROW_NAME, size=HEX_V2,
-             out_dir=OUT_V2)
+             out_dir=OUT_V2, cmap=DORSAL_CMAP)
 
 
 def summary_figure(dec, summary):

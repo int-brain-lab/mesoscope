@@ -89,7 +89,11 @@ to save disk space.
 - **All-neuron binary decoding.** For sets with more neurons than trials, it fits in the row space of the trials (`gpu_decode.decode_binary(dual=True)`); this is exact and gives identical scores.
 - **20 random neurons per bin, mean over 10 draws** (`decode_v2.N_PICK`, `N_DRAWS`); bins need >= 20 neurons. The first run with 10 neurons x 3 draws is kept in `output/v2/n10_3draws`.
 - **Excluded meso sessions** (`decode_v2.excluded_sessions`). Two sessions whose task and imaging clocks are offset (`CLOCK_OFFSET`: bd92d5ef -146 s, 38438b7d -338 s; population-wheel cross-correlation peaks there and everything decodes at chance). Trials outside the imaging period are dropped and sessions with < 50 % coverage excluded (`imaging_coverage.py` -> `FEATURE_ROOT/meso_trial_coverage`).
-- **Map display.** Opacity encodes the number of animals per bin. The meso vs `bwm_d640` per-bin correlations are tested against a variogram-matched spatial null (`controls2.spatial_test`).
+- **Map display.** The maps use the isoluminant ColorCET CET-I3 palette (install
+  with `pip install colorcet`). On decoding maps, opacity encodes the number
+  of animals per bin, reaching full opacity at four animals. The meso vs
+  `bwm_d640` per-bin correlations are tested against a variogram-matched
+  spatial null (`controls2.spatial_test`).
 
 ```
 python fix_wheel_glitches.py              # patch wheel_y of affected feature files (backup kept)
