@@ -33,6 +33,8 @@ from plotstyle import NATURE_DOUBLE_COL_IN, save_with_caption, style_axes
 
 # Keep score hue separate from the lightness change caused by support opacity.
 DORSAL_CMAP = colorcet.cm["CET_I3"]
+REPORT_CMAP = "cool"
+BWM_MARKER_ALPHA = 0.8
 REPORT_HEX_SIZE = 0.25  # mm, centre to vertex
 ROWS = ("meso", "bwm_d640", "bwm")
 ROW_NAME = {"meso": "Mesoscope", "bwm_d640": f"BWM $\\leq${MAX_DEPTH_UM} µm",
@@ -107,18 +109,19 @@ def counts(tun, summary):
              out_dir=OUT_V2, cmap=DORSAL_CMAP)
 
 
-def report_decoding():
+def report_decoding(cmap=REPORT_CMAP):
     """Render the two v7 decoding maps from fine-bin and per-probe scores."""
     from decode_v2 import excluded_sessions
 
+    cmap = plt.get_cmap(cmap)
     meso = pd.read_parquet(out_name("meso", REPORT_HEX_SIZE))
     meso = meso[~meso.session.isin(excluded_sessions())]
     probes = {m: pd.read_parquet(probe_output(m)) for m in ROWS[1:]}
     for ver in ("n20", "all"):
-        decoding(meso, probes, ver)
+        decoding(meso, probes, ver, cmap=cmap)
 
 
-def decoding(meso, probes, ver):
+def decoding(meso, probes, ver, cmap=REPORT_CMAP):
     from controls2 import SUBJ, opacity
 
     d = meso.dropna(subset=[ver]).assign(subject=lambda x: x.session.map(SUBJ))
@@ -130,13 +133,13 @@ def decoding(meso, probes, ver):
     for m in ROWS[1:]:
         d = probes[m].dropna(subset=[ver, "entry_x", "entry_y"]).sort_values(ver)
         n_probes[m] = d.pid.nunique()
-        per[m] = [dict(x=np.abs(p.entry_x.values), y=p.entry_y.values, v=p[ver].values)
+        per[m] = [dict(x=np.abs(p.entry_x.values), y=p.entry_y.values, v=p[ver].values,
+                       alpha=BWM_MARKER_ALPHA)
                   for p in (d[d.target == t] for t in TARGETS)]
 
     values = [[per["meso"][i][1]] + [per[m][i]["v"] for m in ROWS[1:]]
               for i in range(len(TARGETS))]
-    binary = joint_norm([v for target in values[:3] for v in target], lo=0.5)
-    norms = [binary] * 3 + [joint_norm(v, lo=0) for v in values[3:]]
+    norms = [joint_norm(v) for v in values]
     if ver == "n20":
         title = f"Decoding from {N_PICK} neurons"
         population = f"{N_PICK} randomly drawn neurons (mean of {N_DRAWS} draws)"
@@ -149,18 +152,19 @@ def decoding(meso, probes, ver):
             "sessions. Opacity represents the number of animals (full at $\\geq$4). Middle and "
             f"bottom rows: BWM decoders fit to {population} on each probe, using units within "
             f"{MAX_DEPTH_UM}\\,$\\mu$m of the pial surface and at all depths, respectively. Each "
-            "dot is at the probe's Alyx trajectory entry point. Hemispheres are folded onto the "
+            "semi-transparent dot is at the probe's Alyx trajectory entry point. Hemispheres are folded onto the "
             f"right. Sessions require at least {MIN_TRIALS} trials and bins or probes need at least {N_PICK} "
             f"neurons. Decoding scores are available for {n_sessions} mesoscope sessions, "
             f"{n_probes['bwm_d640']} superficial BWM insertions and {n_probes['bwm']} "
-            "all-depth BWM insertions. Colour scales are shared across rows.")
+            "all-depth BWM insertions. Each variable has a colour scale shared across rows, "
+            "spanning the 1st to 99th percentiles of its plotted scores.")
     map_grid(per, [TITLE[t] for t in TARGETS], ["balanced accuracy"] * 3 + ["$R^2$"] * 2, norms,
              f"v2_decoding_{ver}",
-             ["Stimulus side, balanced accuracy (chance 0.5; scale shared by \\textbf{a}--\\textbf{c}).",
+             ["Stimulus side, balanced accuracy (chance 0.5).",
               "Choice.", "Feedback.", "Wheel speed, cross-validated $R^2$.",
               "Trial-specific wheel speed, $R^2$."],
              f"v2_decoding_{ver}", intro=head, rows=ROWS, row_names=ROW_NAME, size=REPORT_HEX_SIZE,
-             out_dir=OUT_V2, cmap=DORSAL_CMAP)
+             out_dir=OUT_V2, cmap=cmap)
 
 
 def tuning(tun, summary):
@@ -239,7 +243,7 @@ def summary_figure(dec, summary):
     plt.close(fig)
 
 
-def main():
+def main(cmap=REPORT_CMAP):
     tun, dec = load()
     summary = []
     counts(tun, summary)
@@ -249,7 +253,7 @@ def main():
                 d = dec[m][dec[m].target == t][ver]
                 summary.append(dict(row=m, measure=f"decoding_{ver}_{t}", value=d.mean(),
                                     session_bins=d.notna().sum()))
-    report_decoding()
+    report_decoding(cmap=cmap)
     tuning(tun, summary)
     summary_figure(dec, summary)
     s = pd.DataFrame(summary)
@@ -263,8 +267,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--report-decoding", action="store_true",
                         help="Render only the two v7 decoding maps.")
+    parser.add_argument("--cmap", default=REPORT_CMAP,
+                        help="Matplotlib colormap for the v7 decoding maps (default: %(default)s).")
     args = parser.parse_args()
     if args.report_decoding:
-        report_decoding()
+        report_decoding(cmap=args.cmap)
     else:
-        main()
+        main(cmap=args.cmap)

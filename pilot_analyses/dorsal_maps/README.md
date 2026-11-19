@@ -89,7 +89,7 @@ to save disk space.
 - **All-neuron binary decoding.** For sets with more neurons than trials, it fits in the row space of the trials (`gpu_decode.decode_binary(dual=True)`); this is exact and gives identical scores.
 - **20 random neurons per bin, mean over 10 draws** (`decode_v2.N_PICK`, `N_DRAWS`); bins need >= 20 neurons. The first run with 10 neurons x 3 draws is kept in `output/v2/n10_3draws`.
 - **Excluded meso sessions** (`decode_v2.excluded_sessions`). Two sessions whose task and imaging clocks are offset (`CLOCK_OFFSET`: bd92d5ef -146 s, 38438b7d -338 s; population-wheel cross-correlation peaks there and everything decodes at chance). Trials outside the imaging period are dropped and sessions with < 50 % coverage excluded (`imaging_coverage.py` -> `FEATURE_ROOT/meso_trial_coverage`).
-- **Map display.** The maps use the isoluminant ColorCET CET-I3 palette (install
+- **Map display.** Coverage and tuning maps use the ColorCET CET-I3 palette (install
   with `pip install colorcet`). On decoding maps, opacity encodes the number
   of animals per bin, reaching full opacity at four animals. The meso vs
   `bwm_d640` per-bin correlations are tested against a variogram-matched
@@ -108,9 +108,12 @@ python depth_profile.py                   # si_depth_profile: tuning and wheel c
 
 Figures 1 and 2 use 0.5 mm mesoscope hexagons (vertex to vertex) and BWM
 dots at the Alyx insertion coordinates, with separate rows for superficial
-and all-depth BWM units. Both figures follow the same trial and neuron
-thresholds. The headline table and supplementary bin-wise comparisons
-use the original 1 mm analysis.
+and all-depth BWM units. BWM dots use 80% opacity. Each variable has its
+own colour scale shared across rows, spanning the 1st to 99th percentiles
+of its plotted scores. Use `--cmap NAME` to change the Matplotlib colormap
+(default `cool`). Both figures follow the same trial and neuron thresholds.
+The headline table and supplementary bin-wise comparisons use the original
+1 mm analysis.
 
 Once the feature files and mesoscope trial coverage masks are present, run:
 
@@ -118,7 +121,7 @@ Once the feature files and mesoscope trial coverage masks are present, run:
 python decode_v2.py meso --hex 0.25  # centre-to-vertex radius in mm
 python make_bwm_depth.py
 python decode_probe.py bwm bwm_d640
-python maps_v2.py --report-decoding
+python maps_v2.py --report-decoding --cmap cool
 python build_report_v7.py --decoding-only
 ```
 
