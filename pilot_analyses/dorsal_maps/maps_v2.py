@@ -122,11 +122,14 @@ def decoding(meso, probes, ver):
     from controls2 import SUBJ, opacity
 
     d = meso.dropna(subset=[ver]).assign(subject=lambda x: x.session.map(SUBJ))
+    n_sessions = d.session.nunique()
     g = d.groupby(["target", "hex"]).agg(v=(ver, "mean"), na=("subject", "nunique"))
     per = {"meso": [(a.index, a.v.values, opacity(a.na.values))
                     for a in (g.xs(t) for t in TARGETS)]}
+    n_probes = {}
     for m in ROWS[1:]:
         d = probes[m].dropna(subset=[ver, "entry_x", "entry_y"]).sort_values(ver)
+        n_probes[m] = d.pid.nunique()
         per[m] = [dict(x=np.abs(p.entry_x.values), y=p.entry_y.values, v=p[ver].values)
                   for p in (d[d.target == t] for t in TARGETS)]
 
@@ -148,7 +151,9 @@ def decoding(meso, probes, ver):
             f"{MAX_DEPTH_UM}\\,$\\mu$m of the pial surface and at all depths, respectively. Each "
             "dot is at the probe's Alyx trajectory entry point. Hemispheres are folded onto the "
             f"right. Sessions require at least {MIN_TRIALS} trials and bins or probes need at least {N_PICK} "
-            "neurons. Colour scales are shared across rows.")
+            f"neurons. Decoding scores are available for {n_sessions} mesoscope sessions, "
+            f"{n_probes['bwm_d640']} superficial BWM insertions and {n_probes['bwm']} "
+            "all-depth BWM insertions. Colour scales are shared across rows.")
     map_grid(per, [TITLE[t] for t in TARGETS], ["balanced accuracy"] * 3 + ["$R^2$"] * 2, norms,
              f"v2_decoding_{ver}",
              ["Stimulus side, balanced accuracy (chance 0.5; scale shared by \\textbf{a}--\\textbf{c}).",
