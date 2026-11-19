@@ -61,15 +61,16 @@ def auc_selectivity(F, y, train):
     return torch.stack(out)
 
 
-def corr_selectivity(F, y, train):
-    """|Pearson r| with y per fold and neuron. F (M, n), y (M,), train (k, M)."""
+def corr_selectivity(F, y, train, absolute=True):
+    """Training-fold Pearson r. Signed mode marks undefined correlations NaN."""
     out = []
     for tr in train:
         X, t = F[tr], y[tr]
         X = X - X.mean(0)
         t = t - t.mean()
-        r = (X * t[:, None]).sum(0) / (X.norm(dim=0) * t.norm()).clamp(min=1e-12)
-        out.append(r.abs())
+        scale = X.norm(dim=0) * t.norm()
+        r = (X * t[:, None]).sum(0) / scale.clamp(min=1e-12)
+        out.append(r.abs() if absolute else r.masked_fill(scale == 0, torch.nan))
     return torch.stack(out)
 
 

@@ -16,7 +16,8 @@ decode(F, sets, y, inner="loo"|"trial", lags=(0,), target="speed"|"residual",
   removed), R^2 against that residual;
 - shuffle: trials of y are permuted (bins kept), a null for trial-specific
   information.
-Returns R^2 of the pooled outer-test predictions per set.
+Pass fixed index vectors for all sets, or one index vector per outer fold
+for every set. Returns R^2 of the pooled outer-test predictions per set.
 """
 from functools import lru_cache
 
@@ -138,22 +139,23 @@ def decode(F, sets, y, inner="loo", lags=(0,), target="speed", shuffle=False, se
     L = len(lags)
     if lags != (0,):
         F = lagged(F, lags)
-        sets = [np.concatenate([np.asarray(s) + k * n for k in range(L)]) for s in sets]
+        sets = [np.concatenate([np.asarray(s) + k * n for k in range(L)], axis=-1) for s in sets]
     Ft = torch.as_tensor(F, device=DEVICE)
     yt = torch.as_tensor(y, device=DEVICE)
     al = torch.as_tensor(alphas, dtype=torch.float64, device=DEVICE)
     out = np.full(len(sets), np.nan)
     best_alpha = np.full((len(sets), 5), np.nan)
-    sizes = np.array([len(s) for s in sets])
+    sizes = np.array([np.shape(s)[-1] for s in sets])
     for p in np.unique(sizes):                                   # equal-size sets in one batch
         gi = np.flatnonzero(sizes == p)
         for c0 in range(0, len(gi), max(1, int(2e8 // (nt * nb * p * 8)))):
             g = gi[c0:c0 + max(1, int(2e8 // (nt * nb * p * 8)))]
             idx = torch.as_tensor(np.stack([sets[i] for i in g]), device=DEVICE)
-            X = Ft[:, :, idx].permute(2, 0, 1, 3)                 # (G, nt, nb, p)
+            fixed = Ft[:, :, idx].permute(2, 0, 1, 3) if idx.ndim == 2 else None
             pred = torch.zeros(len(g), nt, nb, dtype=torch.float64, device=DEVICE)
             tgt = torch.zeros(nt, nb, dtype=torch.float64, device=DEVICE)
             for k, (tr, te) in enumerate(_folds(nt)):
+                X = fixed if fixed is not None else Ft[:, :, idx[:, k]].permute(2, 0, 1, 3)
                 tr_t, te_t = torch.as_tensor(tr, device=DEVICE), torch.as_tensor(te, device=DEVICE)
                 Xtr = X[:, tr_t].reshape(len(g), -1, p)
                 mu, sd = Xtr.mean(1, keepdim=True), Xtr.std(1, unbiased=False, keepdim=True)

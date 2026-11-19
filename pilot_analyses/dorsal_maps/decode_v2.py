@@ -46,6 +46,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "wheel_decoding2"))
 import ridge  # noqa: E402
 
 HEX_V2 = 0.5
+REPORT_HEX_SIZE = 0.25  # mm, centre to vertex
 N_PICK = 20       # neurons per random draw (and minimum neurons per session and bin)
 N_DRAWS = 10
 MIN_TRIALS = 50

@@ -128,6 +128,12 @@ python build_report_v7.py --decoding-only
 
 The original bin-wise analyses use the vertical DV offset in `bwm_d640`.
 The report figures use `bwm_pial640`, built with `iblatlas.streamlines.utils.xyz_to_depth`.
+For the best-ten map, run `python decode_top10.py`, then
+`python maps_v2.py --top10 --cmap plasma` and
+`python build_report_v7.py --figure decoding_top10`. It ranks units
+inside each outer training fold and shares the candidate pools of the
+other two report maps.
+
 To regenerate the supplementary depth and insertion histograms from cached
 features, run `python depth_coverage.py` followed by
 `python build_report_v7.py --figure depth_coverage`.

@@ -26,7 +26,8 @@ from matplotlib.colors import LogNorm
 
 from common import ALPHA, MIN_NEURONS, OUT, VARIABLES, WHEEL_EDGES, bin_neurons
 from decode_probe import probe_output
-from decode_v2 import HEX_V2, MIN_TRIALS, N_DRAWS, N_PICK, OUT_V2, out_name
+from decode_top10 import top10_output
+from decode_v2 import HEX_V2, MIN_TRIALS, N_DRAWS, N_PICK, OUT_V2, REPORT_HEX_SIZE, out_name
 from make_bwm_depth import MAX_DEPTH_UM, STREAMLINE_MODALITY, depth_below_surface
 from maps import _tuning_methods, _win, joint_norm, map_grid
 from plotstyle import NATURE_DOUBLE_COL_IN, save_with_caption, style_axes
@@ -35,7 +36,6 @@ from plotstyle import NATURE_DOUBLE_COL_IN, save_with_caption, style_axes
 DORSAL_CMAP = colorcet.cm["CET_I3"]
 REPORT_CMAP = "cool"
 BWM_MARKER_ALPHA = 0.8
-REPORT_HEX_SIZE = 0.25  # mm, centre to vertex
 ROWS = ("meso", "bwm_d640", "bwm")
 ROW_NAME = {"meso": "Mesoscope", "bwm_d640": f"BWM $\\leq${MAX_DEPTH_UM} µm",
             "bwm": "BWM all depths"}
@@ -109,16 +109,18 @@ def counts(tun, summary):
              out_dir=OUT_V2, cmap=DORSAL_CMAP)
 
 
-def report_decoding(cmap=REPORT_CMAP):
-    """Render the two v7 decoding maps from fine-bin and per-probe scores."""
+def report_decoding(cmap=REPORT_CMAP, *, top10=False):
+    """Render the requested v7 maps from fine-bin and per-probe scores."""
     from decode_v2 import excluded_sessions
 
     cmap = plt.get_cmap(cmap)
-    meso = pd.read_parquet(out_name("meso", REPORT_HEX_SIZE))
+    meso_path = top10_output("meso") if top10 else out_name("meso", REPORT_HEX_SIZE)
+    probe_path = top10_output if top10 else probe_output
+    meso = pd.read_parquet(meso_path)
     meso = meso[~meso.session.isin(excluded_sessions())]
-    probes = {"bwm_d640": pd.read_parquet(probe_output(STREAMLINE_MODALITY)),
-              "bwm": pd.read_parquet(probe_output("bwm"))}
-    for ver in ("n20", "all"):
+    probes = {"bwm_d640": pd.read_parquet(probe_path(STREAMLINE_MODALITY)),
+              "bwm": pd.read_parquet(probe_path("bwm"))}
+    for ver in (("top10",) if top10 else ("n20", "all")):
         decoding(meso, probes, ver, cmap=cmap)
 
 
@@ -144,6 +146,9 @@ def decoding(meso, probes, ver, cmap=REPORT_CMAP):
     if ver == "n20":
         title = f"Decoding from {N_PICK} neurons"
         population = f"{N_PICK} randomly drawn neurons (mean of {N_DRAWS} draws)"
+    elif ver == "top10":
+        title = f"Decoding from the best {MIN_NEURONS} neurons"
+        population = f"the {MIN_NEURONS} highest-ranked neurons"
     else:
         title = "Decoding from all neurons"
         population = "all eligible neurons"
@@ -160,6 +165,11 @@ def decoding(meso, probes, ver, cmap=REPORT_CMAP):
             f"{n_probes['bwm_d640']} superficial BWM insertions and {n_probes['bwm']} "
             "all-depth BWM insertions. Each variable has a colour scale shared across rows, "
             "spanning the 1st to 99th percentiles of its plotted scores.")
+    if ver == "top10":
+        head += (r" Ranking was repeated on the training trials of each outer fold. "
+                 r"Binary variables use $|\mathrm{AUC}-0.5|$. Both wheel targets use "
+                 r"the highest signed Pearson $r$ with raw wheel speed across all wheel bins. "
+                 r"Wheel scores require ten defined correlations per training fold.")
     map_grid(per, [TITLE[t] for t in TARGETS], ["balanced accuracy"] * 3 + ["$R^2$"] * 2, norms,
              f"v2_decoding_{ver}",
              ["Stimulus side, balanced accuracy (chance 0.5).",
@@ -267,12 +277,15 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--report-decoding", action="store_true",
-                        help="Render only the two v7 decoding maps.")
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--report-decoding", action="store_true",
+                           help="Render the random-20 and all-neuron v7 maps.")
+    selection.add_argument("--top10", action="store_true",
+                           help="Render the best-10 v7 map.")
     parser.add_argument("--cmap", default=REPORT_CMAP,
                         help="Matplotlib colormap for the v7 decoding maps (default: %(default)s).")
     args = parser.parse_args()
-    if args.report_decoding:
-        report_decoding(cmap=args.cmap)
+    if args.report_decoding or args.top10:
+        report_decoding(cmap=args.cmap, top10=args.top10)
     else:
         main(cmap=args.cmap)

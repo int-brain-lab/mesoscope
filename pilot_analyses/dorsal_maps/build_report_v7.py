@@ -27,6 +27,7 @@ FIGURES = {  # key in main.tex: output stem (path without suffix)
     "tuning": OUT / "v2" / "v2_tuning",
     "decoding_n20": OUT / "v2" / "v2_decoding_n20",
     "decoding_all": OUT / "v2" / "v2_decoding_all",
+    "decoding_top10": OUT / "v2" / "v2_decoding_top10",
     "region_variance": OUT / "v2" / "region_variance",
     "summary": OUT / "v2" / "v2_summary",
     "depth": OUT / "v2" / "si_depth_profile",
