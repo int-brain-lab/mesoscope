@@ -39,6 +39,7 @@ Usage: python region_variance.py
 Writes output/v2/region_variance{_panels.pdf,.tex,.pdf} and output/v2/region_variance_stats.csv.
 """
 import warnings
+from itertools import combinations
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -252,6 +253,30 @@ def short(t):
     return TITLE[t].replace("\n", " ").replace("Wheel speed, trial-specific", "Wheel, trial")
 
 
+def complete_rectangle(valid):
+    """Keep a nonempty rectangle with the fewest total row and column deletions."""
+    n_rows, n_cols = valid.shape
+    best = None
+    for n_removed in range(n_cols):
+        if best is not None and n_removed > best[0]:
+            break
+        for removed in combinations(range(n_cols), n_removed):
+            cols = np.ones(n_cols, dtype=bool)
+            cols[list(removed)] = False
+            # With these columns fixed, every complete row can be kept.
+            rows = valid[:, cols].all(axis=1)
+            n_kept = rows.sum()
+            if not n_kept:
+                continue
+            # Among equally small deletions, keep the most scored cells.
+            key = (n_removed + n_rows - n_kept, -n_kept * cols.sum())
+            if best is None or key < best:
+                best, keep_rows, keep_cols = key, rows, cols
+    if best is None:
+        raise ValueError("The illustrative matrix has no valid session-region scores.")
+    return keep_rows, keep_cols
+
+
 def figure(d, shared, st, pm):
     nr = len(ROWS)
     fig = plt.figure(figsize=(NATURE_DOUBLE_COL_IN, 9.4))
@@ -371,7 +396,8 @@ def figure(d, shared, st, pm):
             m = dt[dt.animal == a].pivot_table(index="session", columns="region", values="y")
             m = m[sorted(m.columns, key=allen_order)]
             m = m.loc[m.mean(axis=1).sort_values(ascending=False).index]
-            ax.set_facecolor("0.9")
+            keep_rows, keep_cols = complete_rectangle(np.isfinite(m.values))
+            m = m.iloc[keep_rows, keep_cols]
             im = ax.imshow(m.values, aspect="auto", cmap="viridis", vmin=lo, vmax=hi, interpolation="nearest")
             ax.set_xticks(range(m.shape[1]), m.columns, rotation=90, fontsize=3.5)
             ax.set_yticks([])
@@ -415,8 +441,9 @@ def caption(d, shared, st, pm):
         "decoding paper, one dot per session and region, filled if $p<0.05$ (wheel velocity in the last column). "
         "Inset: region share from \\textbf{c}.",
         "Session $\\times$ region scores (log $N$ removed) of a region-dominated, a balanced and a "
-        "session-dominated mouse; grey: region not imaged. Horizontal stripes are session effects, vertical "
-        "stripes region effects.",
+        "session-dominated mouse. For illustration, each matrix omits the fewest session rows and "
+        "region columns needed to retain only valid scores. Horizontal stripes show session effects "
+        "and vertical stripes show region effects.",
         "Mesoscope variance shares from the mixed model; error bars: 95\\% intervals over resampled mice; numbers: "
         "fraction of resamples with session plus animal above region.",
         "Permutation tests, adjusted $\\eta^2$ (0 = chance): region (circles), session including (squares) and "
