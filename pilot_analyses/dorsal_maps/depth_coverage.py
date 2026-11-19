@@ -5,11 +5,10 @@ Reads positions and trial counts from the cached meso and bwm feature files.
 """
 import matplotlib.pyplot as plt
 import numpy as np
-from iblatlas.atlas import AllenAtlas
 
 from common import FEATURE_ROOT
 from decode_v2 import MIN_TRIALS, N_PICK, OUT_V2, excluded_sessions
-from make_bwm_depth import MAX_DEPTH_UM, depth_below_surface
+from make_bwm_depth import MAX_DEPTH_UM, streamline_depth_um
 from plotstyle import NATURE_DOUBLE_COL_IN, panel_label, save_with_caption, style_axes
 
 
@@ -21,8 +20,8 @@ COUNT_BIN = 5
 COUNT_OVERFLOW = 100
 
 
-def load_depths(atlas):
-    meso, bwm, counts = [], [], []
+def load_depths():
+    meso_xyz, bwm_xyz, trials = [], [], []
     excluded = excluded_sessions()
     for path in sorted((FEATURE_ROOT / "meso").glob("*.npz")):
         if path.stem in excluded:
@@ -30,17 +29,19 @@ def load_depths(atlas):
         with np.load(path) as z:
             # Projected ROI positions carry no measured depth.
             if str(z["xyz_source"]) == "mlapdv":
-                meso.append(depth_below_surface(z["xyz"], atlas))
+                meso_xyz.append(z["xyz"])
     for path in sorted((FEATURE_ROOT / "bwm").glob("*.npz")):
         with np.load(path) as z:
-            depth = depth_below_surface(z["xyz"], atlas)
-            bwm.append(depth)
-            if len(z["choice"]) >= MIN_TRIALS:
-                counts.append((depth.size, np.count_nonzero(depth <= MAX_DEPTH_UM)))
-    if not meso or not bwm or not counts:
+            bwm_xyz.append(z["xyz"])
+            trials.append(len(z["choice"]))
+    if not meso_xyz or not bwm_xyz or not any(n >= MIN_TRIALS for n in trials):
         raise ValueError("Depth coverage needs cached mesoscope and BWM features.")
-    return np.concatenate(meso), np.concatenate(bwm), len(meso), np.asarray(counts)
-
+    meso = streamline_depth_um(np.concatenate(meso_xyz))
+    bwm = streamline_depth_um(np.concatenate(bwm_xyz))
+    by_probe = np.split(bwm, np.cumsum([len(x) for x in bwm_xyz])[:-1])
+    counts = [(d.size, np.count_nonzero(d <= MAX_DEPTH_UM))
+              for n, d in zip(trials, by_probe) if n >= MIN_TRIALS]
+    return meso, bwm, len(meso_xyz), np.asarray(counts)
 
 def depth_hist(ax, depths, edges, color, title):
     freq, _ = np.histogram(depths, bins=edges)
@@ -54,9 +55,7 @@ def depth_hist(ax, depths, edges, color, title):
 
 
 def main():
-    atlas = AllenAtlas()
-    atlas.compute_surface()
-    meso, bwm, n_meso, counts = load_depths(atlas)
+    meso, bwm, n_meso, counts = load_depths()
     meso, bwm = meso[np.isfinite(meso)], bwm[np.isfinite(bwm)]
     lo = DEPTH_BIN_UM * np.floor(min(meso.min(), bwm.min()) / DEPTH_BIN_UM)
     hi = DEPTH_BIN_UM * np.ceil(max(meso.max(), bwm.max()) / DEPTH_BIN_UM)
@@ -76,10 +75,10 @@ def main():
     a.tick_params(labelbottom=False)
     a.text(MAX_DEPTH_UM + DEPTH_BIN_UM, 0.94, f"{MAX_DEPTH_UM} µm cutoff",
            transform=a.get_xaxis_transform(), va="top")
-    b.text(MAX_DEPTH_UM + DEPTH_BIN_UM, 0.94, f"{n_shallow / bwm.size:.1%} within cutoff",
-           transform=b.get_xaxis_transform(), va="top")
+    b.text(0.98, 0.94, f"{n_shallow / bwm.size:.1%} within cutoff",
+           transform=b.transAxes, ha="right", va="top")
     b.set_xlabel("Depth below pial surface (µm)")
-    b.set_xticks([0, MAX_DEPTH_UM, 1600, 3200])
+    b.set_xticks([0, MAX_DEPTH_UM, 1000, 1500])
 
     count_edges = np.arange(0, COUNT_OVERFLOW + 2 * COUNT_BIN, COUNT_BIN)
     for values, color, label in (
@@ -116,8 +115,8 @@ def main():
         f"{COUNT_OVERFLOW} units share the final bin.",
     ]
     save_with_caption(fig, OUT_V2 / "si_depth_coverage", caps, "depth_coverage",
-                      intro="Recording depth and probe eligibility. Depth is Allen CCF "
-                            "pial surface height at each unit's ML--AP position minus its DV.")
+                      intro="Recording depth and probe eligibility. The IBL 25-micron "
+                            "Allen CCF streamline lookup estimates local pial depth.")
     plt.close(fig)
 
 

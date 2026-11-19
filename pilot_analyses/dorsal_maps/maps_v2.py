@@ -27,7 +27,7 @@ from matplotlib.colors import LogNorm
 from common import ALPHA, MIN_NEURONS, OUT, VARIABLES, WHEEL_EDGES, bin_neurons
 from decode_probe import probe_output
 from decode_v2 import HEX_V2, MIN_TRIALS, N_DRAWS, N_PICK, OUT_V2, out_name
-from make_bwm_depth import MAX_DEPTH_UM, depth_below_surface
+from make_bwm_depth import MAX_DEPTH_UM, STREAMLINE_MODALITY, depth_below_surface
 from maps import _tuning_methods, _win, joint_norm, map_grid
 from plotstyle import NATURE_DOUBLE_COL_IN, save_with_caption, style_axes
 
@@ -116,7 +116,8 @@ def report_decoding(cmap=REPORT_CMAP):
     cmap = plt.get_cmap(cmap)
     meso = pd.read_parquet(out_name("meso", REPORT_HEX_SIZE))
     meso = meso[~meso.session.isin(excluded_sessions())]
-    probes = {m: pd.read_parquet(probe_output(m)) for m in ROWS[1:]}
+    probes = {"bwm_d640": pd.read_parquet(probe_output(STREAMLINE_MODALITY)),
+              "bwm": pd.read_parquet(probe_output("bwm"))}
     for ver in ("n20", "all"):
         decoding(meso, probes, ver, cmap=cmap)
 
@@ -151,7 +152,8 @@ def decoding(meso, probes, ver, cmap=REPORT_CMAP):
             f"session and {2 * REPORT_HEX_SIZE:g}\\,mm hexagon (vertex to vertex), averaged over "
             "sessions. Opacity represents the number of animals (full at $\\geq$4). Middle and "
             f"bottom rows: BWM decoders fit to {population} on each probe, using units within "
-            f"{MAX_DEPTH_UM}\\,$\\mu$m of the pial surface and at all depths, respectively. Each "
+            f"{MAX_DEPTH_UM}\\,$\\mu$m of the pia by Allen CCF streamline depth and at all depths, "
+            "respectively. Each "
             "semi-transparent dot is at the probe's Alyx trajectory entry point. Hemispheres are folded onto the "
             f"right. Sessions require at least {MIN_TRIALS} trials and bins or probes need at least {N_PICK} "
             f"neurons. Decoding scores are available for {n_sessions} mesoscope sessions, "

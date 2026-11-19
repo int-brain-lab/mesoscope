@@ -5,7 +5,7 @@ Use all eligible isocortex units or ten reproducible draws of 20 units on
 each probe. Coordinates are Alyx trajectory entry points, preferring aligned
 histology, then histology, then micro-manipulator records.
 
-Usage: python decode_probe.py [bwm bwm_d640]
+Usage: python decode_probe.py [bwm bwm_d640 bwm_pial640]
 Writes output/v2/decoding_<modality>_probe.pqt.
 """
 import argparse
@@ -17,6 +17,7 @@ import pandas as pd
 
 from common import FEATURE_ROOT
 from decode_v2 import MIN_TRIALS, N_DRAWS, N_PICK, OUT_V2, decode_sets
+from make_bwm_depth import STREAMLINE_MODALITY
 from sessions import load_session
 
 PROVENANCE = ("Ephys aligned histology track", "Histology track", "Micro-manipulator")
@@ -76,7 +77,7 @@ if __name__ == "__main__":
     parser.add_argument("modality", nargs="*", default=["bwm"])
     args = parser.parse_args()
     for modality in args.modality:
-        if modality not in ("bwm", "bwm_d640"):
+        if modality not in ("bwm", "bwm_d640", STREAMLINE_MODALITY):
             parser.error(f"unsupported BWM modality: {modality}")
         d = run(modality)
         print(d.groupby("target")[["all", "n20"]].describe())

@@ -60,7 +60,7 @@ Bin-means-only wheel $R^2$ (no neurons, median session) & 0.47 & 0.44 & 0.44 \\
 \label{tab:headline}
 \end{table}
 
-Figures~\ref{fig:decoding_n20} and \ref{fig:decoding_all} show decoding from 20 random neurons and all eligible neurons, respectively. Mesoscope scores are mapped in 0.5\,mm hexagons and averaged across sessions. BWM scores are computed per probe and shown at the trajectory entry point, with separate rows for units within 640\um{} of the pial surface and units at all depths. Most BWM units lie deeper than the cutoff, which leaves fewer probes with the 20 units required for decoding (\figref{depth_coverage}).
+Figures~\ref{fig:decoding_n20} and \ref{fig:decoding_all} show decoding from 20 random neurons and all eligible neurons, respectively. Mesoscope scores are mapped in 0.5\,mm hexagons and averaged across sessions. BWM scores are computed per probe and shown at the trajectory entry point, with separate rows for units within 640\um{} of the pia by the Allen CCF cortical streamline lookup and units at all depths. The cutoff leaves fewer probes with the 20 units required for decoding (\figref{depth_coverage}).
 
 \input{figures/decoding_n20}
 
@@ -147,7 +147,7 @@ The wheel-speed bins are identical for both datasets. BWM stimulus, choice and f
   \item \textbf{Excluded mesoscope sessions:} two sessions whose task and imaging clocks disagree. In both, the cross-correlation of population activity with wheel speed peaks at $-146$\,s and $-338$\,s instead of near 0, and every variable decodes at chance. Trials outside the imaging period are dropped (19 trials of one further session).
   \item \textbf{Trials:} BWM criteria for both datasets: all event times present, a choice was made, and reaction time between 0.08 and 2\,s. Sessions need at least 50 such trials (median 347 for the mesoscope and 414 for BWM).
   \item \textbf{Spatial bins:} each neuron is assigned to one hexagonal bin by its ML--AP Allen CCF position relative to bregma. The bin-wise comparison uses hexagons 1\,mm across. Figures~\ref{fig:decoding_n20} and \ref{fig:decoding_all} use 0.5\,mm hexagons for mesoscope data and probe trajectory entry points for BWM. For decoding, both hemispheres are folded onto the right one.
-  \item \textbf{Depth:} depth below the pial surface is the Allen top surface at the unit's ML--AP position minus its DV. Histology-registered mesoscope sessions image 174--318\um{} deep (5--95\%). The depth-limited BWM set keeps units within 640\um.
+  \item \textbf{Depth:} Figures~\ref{fig:decoding_n20} and \ref{fig:decoding_all} and the coverage histograms (\figref{depth_coverage}) use the IBL atlas's \href{https://docs.internationalbrainlab.org/notebooks_external/atlas_streamlines.html}{25\,$\mu$m Allen CCF cortical streamline lookup} for local pial depth. The BWM cutoff is 640\um. The original 1\,mm comparisons and depth-profile analyses use the vertical DV offset from the dorsal atlas surface. That offset can overestimate local pial depth where the cortical sheet bends, especially in lateral and ventral areas.
 \end{itemize}
 
 \paragraph{Features and targets.}

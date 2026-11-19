@@ -108,7 +108,8 @@ python depth_profile.py                   # si_depth_profile: tuning and wheel c
 
 Figures 1 and 2 use 0.5 mm mesoscope hexagons (vertex to vertex) and BWM
 dots at the Alyx insertion coordinates, with separate rows for superficial
-and all-depth BWM units. BWM dots use 80% opacity. Each variable has its
+and all-depth BWM units. The depth-limited row uses the IBL 25 ?m Allen
+CCF streamline lookup for local pial depth. BWM dots use 80% opacity. Each variable has its
 own colour scale shared across rows, spanning the 1st to 99th percentiles
 of its plotted scores. Use `--cmap NAME` to change the Matplotlib colormap
 (default `cool`). Both figures follow the same trial and neuron thresholds.
@@ -119,12 +120,14 @@ Once the feature files and mesoscope trial coverage masks are present, run:
 
 ```sh
 python decode_v2.py meso --hex 0.25  # centre-to-vertex radius in mm
-python make_bwm_depth.py
-python decode_probe.py bwm bwm_d640
-python maps_v2.py --report-decoding --cmap cool
+python make_bwm_depth.py --streamlines  # writes bwm_pial640 alongside the original bwm_d640 cache
+python decode_probe.py bwm bwm_pial640
+python maps_v2.py --report-decoding --cmap plasma
 python build_report_v7.py --decoding-only
 ```
 
+The original bin-wise analyses use the vertical DV offset in `bwm_d640`.
+The report figures use `bwm_pial640`, built with `iblatlas.streamlines.utils.xyz_to_depth`.
 To regenerate the supplementary depth and insertion histograms from cached
 features, run `python depth_coverage.py` followed by
 `python build_report_v7.py --figure depth_coverage`.
