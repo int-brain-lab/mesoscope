@@ -253,11 +253,14 @@ def short(t):
     return TITLE[t].replace("\n", " ").replace("Wheel speed, trial-specific", "Wheel, trial")
 
 
-def complete_rectangle(valid):
-    """Keep a nonempty rectangle with the fewest total row and column deletions."""
+def complete_rectangle(valid, min_regions=5):
+    """Keep a complete rectangle with at least min_regions columns.
+
+    Minimize total deletions, preferring session deletions when tied.
+    """
     n_rows, n_cols = valid.shape
     best = None
-    for n_removed in range(n_cols):
+    for n_removed in range(n_cols - min_regions + 1):
         if best is not None and n_removed > best[0]:
             break
         for removed in combinations(range(n_cols), n_removed):
@@ -268,12 +271,11 @@ def complete_rectangle(valid):
             n_kept = rows.sum()
             if not n_kept:
                 continue
-            # Among equally small deletions, keep the most scored cells.
-            key = (n_removed + n_rows - n_kept, -n_kept * cols.sum())
+            key = (n_removed + n_rows - n_kept, n_removed)
             if best is None or key < best:
                 best, keep_rows, keep_cols = key, rows, cols
     if best is None:
-        raise ValueError("The illustrative matrix has no valid session-region scores.")
+        raise ValueError(f"No complete illustrative matrix with at least {min_regions} regions.")
     return keep_rows, keep_cols
 
 
@@ -441,8 +443,9 @@ def caption(d, shared, st, pm):
         "decoding paper, one dot per session and region, filled if $p<0.05$ (wheel velocity in the last column). "
         "Inset: region share from \\textbf{c}.",
         "Session $\\times$ region scores (log $N$ removed) of a region-dominated, a balanced and a "
-        "session-dominated mouse. For illustration, each matrix omits the fewest session rows and "
-        "region columns needed to retain only valid scores. Horizontal stripes show session effects "
+        "session-dominated mouse. For illustration, each matrix retains at least five regions "
+        "with valid scores in every displayed session. Among equally small sets of omissions, "
+        "the display keeps more regions. Horizontal stripes show session effects "
         "and vertical stripes show region effects.",
         "Mesoscope variance shares from the mixed model; error bars: 95\\% intervals over resampled mice; numbers: "
         "fraction of resamples with session plus animal above region.",
