@@ -60,7 +60,7 @@ Bin-means-only wheel $R^2$ (no neurons, median session) & 0.47 & 0.44 & 0.44 \\
 \label{tab:headline}
 \end{table}
 
-Figures~\ref{fig:decoding_n20} and \ref{fig:decoding_all} show decoding from 20 random neurons and all eligible neurons, respectively. Mesoscope scores are mapped in 0.5\,mm hexagons and averaged across sessions. BWM scores are computed per probe and shown at the trajectory entry point, with separate rows for units within 640\um{} of the pial surface and units at all depths.
+Figures~\ref{fig:decoding_n20} and \ref{fig:decoding_all} show decoding from 20 random neurons and all eligible neurons, respectively. Mesoscope scores are mapped in 0.5\,mm hexagons and averaged across sessions. BWM scores are computed per probe and shown at the trajectory entry point, with separate rows for units within 640\um{} of the pial surface and units at all depths. Most BWM units lie deeper than the cutoff, which leaves fewer probes with the 20 units required for decoding (\figref{depth_coverage}).
 
 \input{figures/decoding_n20}
 
@@ -215,6 +215,10 @@ The wheel-speed bins are identical for both datasets. BWM stimulus, choice and f
 Coverage at 1\,mm. The depth-limited BWM row is sparse: most bins hold one or two sessions (\figref{counts}).
 
 \input{figures/counts}
+
+Depth coverage and its effect on the number of eligible BWM insertions are shown in \figref{depth_coverage}.
+
+\input{figures/depth_coverage}
 
 Fraction of tuned neurons. The mesoscope has about twice as many stimulus-side-tuned neurons as BWM, whether or not BWM is restricted to superficial units (\figref{tuning}).
 

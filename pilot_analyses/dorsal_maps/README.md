@@ -125,6 +125,10 @@ python maps_v2.py --report-decoding --cmap cool
 python build_report_v7.py --decoding-only
 ```
 
+To regenerate the supplementary depth and insertion histograms from cached
+features, run `python depth_coverage.py` followed by
+`python build_report_v7.py --figure depth_coverage`.
+
 ## Choices and caveats
 
 - **Data.** Meso uses 153 of the 165 sessions in `canonical_sessions.txt`.

@@ -30,6 +30,7 @@ FIGURES = {  # key in main.tex: output stem (path without suffix)
     "region_variance": OUT / "v2" / "region_variance",
     "summary": OUT / "v2" / "v2_summary",
     "depth": OUT / "v2" / "si_depth_profile",
+    "depth_coverage": OUT / "v2" / "si_depth_coverage",
     "rasters": WD2 / "fig1_rasters",
     "checks": WD2 / "fig2_checks",
     "population": WD2 / "fig3_population",
@@ -54,10 +55,10 @@ def figure_tex(key, stem):
             f"  \\caption{{{caption_of(stem)}}}\n  \\label{{fig:{key}}}\n\\end{{figure}}\n")
 
 
-def build(decoding_only=False):
+def build(decoding_only=False, figures=None):
     fig_dir = REPORT / "figures"
     fig_dir.mkdir(parents=True, exist_ok=True)
-    keys = ("decoding_n20", "decoding_all") if decoding_only else FIGURES
+    keys = ("decoding_n20", "decoding_all") if decoding_only else (figures or FIGURES)
     for key in keys:
         stem = FIGURES[key]
         shutil.copy(stem.parent / f"{stem.name}_panels.pdf", fig_dir / f"{key}.pdf")
@@ -67,6 +68,10 @@ def build(decoding_only=False):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--decoding-only", action="store_true",
-                        help="Replace Figures 1 and 2 and reuse the other report panels.")
-    build(decoding_only=parser.parse_args().decoding_only)
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--decoding-only", action="store_true",
+                       help="Replace Figures 1 and 2 and reuse the other report panels.")
+    group.add_argument("--figure", action="append", choices=FIGURES,
+                       help="Replace a named figure. Repeat to select multiple figures.")
+    args = parser.parse_args()
+    build(decoding_only=args.decoding_only, figures=args.figure)
