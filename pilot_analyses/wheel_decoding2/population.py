@@ -21,7 +21,7 @@ Usage: python population.py -> output/population.pqt
 import numpy as np
 import pandas as pd
 
-from wd_common import OUT, load_session, session_files, wheel_corr
+from wd_common import OUT, STREAMLINE_MODALITY, load_session, session_files, wheel_corr
 
 N_MATCH = 30
 N_DRAWS = 20
@@ -60,9 +60,11 @@ def session_stats(s, rng):
 def main():
     rows = []
     rng = np.random.default_rng(0)
-    for m in ("meso", "bwm", "bwm_d640"):
+    for m in ("meso", "bwm", STREAMLINE_MODALITY):
         for sid, f in session_files(m).items():
             s = load_session(f)
+            if len(s["xyz"]) < MIN_NEURONS:
+                continue
             Xf = s["X_wheel"].astype(np.float64).reshape(len(s["X_wheel"]), -1)
             if len(s["choice"]) < MIN_TRIALS or (Xf.std(1) > 0).sum() < MIN_NEURONS:
                 continue

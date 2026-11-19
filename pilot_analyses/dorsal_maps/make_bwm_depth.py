@@ -1,22 +1,11 @@
 #!/usr/bin/env python3
-"""Depth-limited BWM features: keep only units within MAX_DEPTH_UM of the
-pial surface, the depth range the mesoscope could plausibly image.
+"""Cache BWM features for units within 640 µm of local pia.
 
-The mesoscope images 174-318 um below the surface (5th-95th percentile of
-the 24 sessions with histology-registered ROI positions, median 257 um;
-sessions with only estimated positions are projected onto the surface and
-carry no depth). The BWM "voxel" below each hexagon is taken twice as deep,
-0-640 um, to keep enough units while excluding deep layers 5-6. Depth = Allen
-top surface at the unit's ML-AP minus its DV.
+The default uses the IBL Allen CCF streamline lookup and writes bwm_pial640.
+For historical reproducibility, --vertical uses the former dorsal DV offset
+and writes bwm_d640.
 
-Writes FEATURE_ROOT/bwm_d640/<pid>.npz (same format as bwm/, units filtered;
-probes without such units are skipped), so every script can use modality
-"bwm_d640".
-
-Use --streamlines for the report's local pial depth estimate from the
-IBL Allen CCF streamline lookup. This writes bwm_pial640 separately.
-
-Usage: python make_bwm_depth.py [--streamlines]
+Usage: python make_bwm_depth.py [--streamlines | --vertical]
 """
 import numpy as np
 
@@ -27,7 +16,7 @@ STREAMLINE_MODALITY = f"bwm_pial{MAX_DEPTH_UM}"
 UNIT_KEYS = ("xyz", "atlas_id", "X_task", "X_wheel")
 
 
-def depth_below_surface(xyz_mm, ba):
+def vertical_depth_um(xyz_mm, ba):
     x, y, z = (np.asarray(xyz_mm, float) / 1e3).T
     ix = np.clip(ba.bc.x2i(x, mode="clip"), 0, ba.bc.nx - 1)
     iy = np.clip(ba.bc.y2i(y, mode="clip"), 0, ba.bc.ny - 1)
@@ -35,13 +24,13 @@ def depth_below_surface(xyz_mm, ba):
 
 
 def streamline_depth_um(xyz_mm):
-    """Local pial depth using IBL's 25 ?m Allen CCF cortical streamline lookup."""
+    """Local pial depth using IBL's 25-micron Allen CCF cortical streamline lookup."""
     from iblatlas.streamlines.utils import xyz_to_depth
 
     return xyz_to_depth(np.asarray(xyz_mm, dtype=float) / 1e3, per=False, res_um=25)
 
 
-def main(src="bwm", dst=None, *, streamlines=False):
+def main(src="bwm", dst=None, *, streamlines=True):
     if dst is None:
         dst = STREAMLINE_MODALITY if streamlines else f"bwm_d{MAX_DEPTH_UM}"
     files = sorted((FEATURE_ROOT / src).glob("*.npz"))
@@ -59,7 +48,7 @@ def main(src="bwm", dst=None, *, streamlines=False):
 
         ba = AllenAtlas()
         ba.compute_surface()
-        depth = depth_below_surface(xyz, ba)
+        depth = vertical_depth_um(xyz, ba)
     by_probe = np.split(depth, np.cumsum([len(x) for x in positions])[:-1])
     out = FEATURE_ROOT / dst
     out.mkdir(exist_ok=True)
@@ -88,6 +77,10 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--streamlines", action="store_true",
-                        help="Use local pial depth from IBL cortical streamlines.")
+    method = parser.add_mutually_exclusive_group()
+    method.add_argument("--streamlines", dest="streamlines", action="store_true",
+                        help="Use local pial depth from IBL cortical streamlines (default).")
+    method.add_argument("--vertical", dest="streamlines", action="store_false",
+                        help="Reproduce the historical dorsal vertical cutoff.")
+    parser.set_defaults(streamlines=True)
     main(streamlines=parser.parse_args().streamlines)

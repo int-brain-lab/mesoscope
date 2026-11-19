@@ -80,7 +80,7 @@ to save disk space.
 `output/v2/` holds the revised maps; they replace the 0.4 mm maps above as the default.
 
 - **1 mm hexagons.** Centre-to-vertex 0.5 mm (`decode_v2.HEX_V2`).
-- **Depth-limited BWM (`bwm_d640`).** Only units within 640 um of the pial surface: twice the depth of the mesoscope fields (174-318 um, 5-95 % of histology-registered sessions), so more ephys units are kept that the mesoscope could still plausibly see. This keeps 2,929 of 13,002 units (204 sessions). BWM at all depths stays as a reference row.
+- **Depth-limited BWM (`bwm_pial640`).** Use isocortex units within 640 µm of the pia by the Allen CCF streamline lookup. This keeps 6,125 of 12,890 units in the report cache. BWM at all depths is the reference row.
 - **Revised wheel decoding.** See `../wheel_decoding2/README.md`.
   - The wheel targets had encoder overflow jumps in 16 meso sessions; these are fixed (`fix_wheel_glitches.py`, `common.remove_wheel_jumps`).
   - The ridge penalty is chosen by exact leave-one-trial-out error.
@@ -92,14 +92,14 @@ to save disk space.
 - **Map display.** Coverage and tuning maps use the ColorCET CET-I3 palette (install
   with `pip install colorcet`). On decoding maps, opacity encodes the number
   of animals per bin, reaching full opacity at four animals. The meso vs
-  `bwm_d640` per-bin correlations are tested against a variogram-matched
+  `bwm_pial640` per-bin correlations are tested against a variogram-matched
   spatial null (`controls2.spatial_test`).
 
 ```
 python fix_wheel_glitches.py              # patch wheel_y of affected feature files (backup kept)
-python make_bwm_depth.py                  # FEATURE_ROOT/bwm_d640/<pid>.npz
+python make_bwm_depth.py                  # FEATURE_ROOT/bwm_pial640/<pid>.npz
 python imaging_coverage.py                # trials covered by imaging, per meso session
-python decode_v2.py meso bwm_d640 bwm     # output/v2/decoding_<modality>.pqt (+ --fill-binary-all)
+python decode_v2.py meso bwm_pial640 bwm     # output/v2/decoding_<modality>.pqt (+ --fill-binary-all)
 python maps_v2.py                         # v2_counts, v2_decoding_n20/_all, v2_tuning, v2_summary
 python depth_profile.py                   # si_depth_profile: tuning and wheel correlates vs depth
 ```
@@ -108,26 +108,28 @@ python depth_profile.py                   # si_depth_profile: tuning and wheel c
 
 Figures 1 and 2 use 0.5 mm mesoscope hexagons (vertex to vertex) and BWM
 dots at the Alyx insertion coordinates, with separate rows for superficial
-and all-depth BWM units. The depth-limited row uses the IBL 25 ?m Allen
+and all-depth BWM units. The depth-limited row uses the IBL 25 µm Allen
 CCF streamline lookup for local pial depth. BWM dots use 80% opacity. Each variable has its
 own colour scale shared across rows, spanning the 1st to 99th percentiles
 of its plotted scores. Use `--cmap NAME` to change the Matplotlib colormap
 (default `cool`). Both figures follow the same trial and neuron thresholds.
-The headline table and supplementary bin-wise comparisons use the original
-1 mm analysis.
+The headline table and supplementary bin-wise comparisons use 1 mm bins
+with the same superficial BWM selection.
 
 Once the feature files and mesoscope trial coverage masks are present, run:
 
 ```sh
 python decode_v2.py meso --hex 0.25  # centre-to-vertex radius in mm
-python make_bwm_depth.py --streamlines  # writes bwm_pial640 alongside the original bwm_d640 cache
+python make_bwm_depth.py  # writes bwm_pial640
 python decode_probe.py bwm bwm_pial640
 python maps_v2.py --report-decoding --cmap plasma
 python build_report_v7.py --decoding-only
 ```
 
-The original bin-wise analyses use the vertical DV offset in `bwm_d640`.
-The report figures use `bwm_pial640`, built with `iblatlas.streamlines.utils.xyz_to_depth`.
+The report uses `iblatlas.streamlines.utils.xyz_to_depth` for local pial
+depth throughout. Use `python make_bwm_depth.py --vertical` to reproduce the
+historical `bwm_d640` cache. Generate individual bin-wise supplement plots
+with `python maps_v2.py --supplement counts` (or `tuning` or `summary`).
 For the best-ten map, run `python decode_top10.py`, then
 `python maps_v2.py --top10 --cmap plasma` and
 `python build_report_v7.py --figure decoding_top10`. It ranks units

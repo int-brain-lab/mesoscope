@@ -9,7 +9,7 @@ Panel a, one row per data set, scores per region:
 - BWM decoding paper (BWM_PAPER, stage-2 tables): one score per session and region, with
   its pseudo-session p-value and median null; wheel velocity in place of trial-specific
   wheel speed.
-Regions: >= MIN_PER_REGION mesoscope sessions and BWM probes.
+The region cohort is fixed to the original v7 comparison.
 
 Panels b, c (mesoscope only; BWM has about one probe per session, so session variance
 cannot be separated there). Statistics per target, on the score with log(neuron count)
@@ -52,7 +52,8 @@ from decode_v2 import OUT_V2
 from maps_v2 import CHANCE, COL, TARGETS, TITLE
 from plotstyle import NATURE_DOUBLE_COL_IN, allen_color, save_with_caption, style_axes
 
-MIN_PER_REGION = 3
+REGIONS = ("MOp", "MOs", "SSp-bfd", "SSp-ll", "SSp-m", "SSp-ul", "SSp-tr",
+           "VISam", "VISl", "VISp", "VISpm", "RSPagl", "RSPd", "VISa", "VISrl")
 N_PERM = 5000
 N_BOOT = 200
 MIN_MOUSE_SESSIONS = 4
@@ -81,9 +82,7 @@ def load():
     for k in MODS:
         d[k] = d[k].dropna(subset=["all", "region"]).assign(animal=lambda x: x.session.map(SUBJ),
                                                            logN=lambda x: np.log(x.n_neurons))
-    count = {k: d[k].drop_duplicates(["unit", "region"]).groupby("region").size() for k in MODS}
-    shared = sorted(set(count["meso"][count["meso"] >= MIN_PER_REGION].index)
-                    & set(count["bwm"][count["bwm"] >= MIN_PER_REGION].index), key=allen_order)
+    shared = list(REGIONS)
     d["bwm_paper"] = pd.concat(
         [pd.read_parquet(BWM_PAPER / f"{v}_stage2.pqt").assign(target=t) for t, v in PAPER_VAR.items()]).rename(
         columns={"eid": "session", "subject": "animal", "score": "all", "n_units": "n_neurons",
@@ -279,6 +278,27 @@ def complete_rectangle(valid, min_regions=5):
     return keep_rows, keep_cols
 
 
+def plot_region_scores(ax, df, shared, t, rng):
+    base = [col for col in df.columns if col.startswith("shuf_")] or (["null"] if "null" in df else [])
+    for i, reg in enumerate(shared):
+        dr = df[df.region == reg]
+        bv = dr[base].values.ravel() if base else np.array([])
+        bv = bv[np.isfinite(bv)]
+        if bv.size:                              # baseline: 5-95th percentile and median
+            lo, med, hi = np.percentile(bv, [5, 50, 95])
+            ax.fill_between([i - 0.38, i + 0.38], lo, hi, color="0.85", lw=0, zorder=0)
+            ax.plot([i - 0.38, i + 0.38], [med] * 2, color="0.55", lw=0.6, zorder=1)
+        v = dr["all"].values
+        jit = rng.uniform(-0.22, 0.22, len(v))
+        col = allen_color(reg)
+        face = np.where(dr.p.values < 0.05, col, "white") if "p" in dr else col
+        ax.scatter(i + jit, v, s=4, facecolors=face, edgecolors=col if "p" in dr else "0.3",
+                   lw=0.4 if "p" in dr else 0.2, zorder=2)
+        if len(v):
+            ax.plot([i - 0.3, i + 0.3], [np.median(v)] * 2, color="k", lw=0.9, zorder=3)
+    ax.axhline(CHANCE[t], color="0.5", lw=0.5, ls="--", zorder=1)
+
+
 def figure(d, shared, st, pm):
     nr = len(ROWS)
     fig = plt.figure(figsize=(NATURE_DOUBLE_COL_IN, 9.4))
@@ -292,24 +312,7 @@ def figure(d, shared, st, pm):
             ax = fig.add_subplot(gs[r, c], sharey=share.get(grp))
             share.setdefault(grp, ax)
             df = d[k][d[k].target == t]
-            base = [col for col in df.columns if col.startswith("shuf_")] or (["null"] if "null" in df else [])
-            for i, reg in enumerate(shared):
-                dr = df[df.region == reg]
-                bv = dr[base].values.ravel() if base else np.array([])
-                bv = bv[np.isfinite(bv)]
-                if bv.size:                              # baseline: 5-95th percentile and median
-                    lo, med, hi = np.percentile(bv, [5, 50, 95])
-                    ax.fill_between([i - 0.38, i + 0.38], lo, hi, color="0.85", lw=0, zorder=0)
-                    ax.plot([i - 0.38, i + 0.38], [med] * 2, color="0.55", lw=0.6, zorder=1)
-                v = dr["all"].values
-                jit = rng.uniform(-0.22, 0.22, len(v))
-                col = allen_color(reg)
-                face = np.where(dr.p.values < 0.05, col, "white") if "p" in dr else col
-                ax.scatter(i + jit, v, s=4, facecolors=face, edgecolors=col if "p" in dr else "0.3",
-                           lw=0.4 if "p" in dr else 0.2, zorder=2)
-                if len(v):
-                    ax.plot([i - 0.3, i + 0.3], [np.median(v)] * 2, color="k", lw=0.9, zorder=3)
-            ax.axhline(CHANCE[t], color="0.5", lw=0.5, ls="--", zorder=1)
+            plot_region_scores(ax, df, shared, t, rng)
             ax.set_xticks(xs, shared if r == nr - 1 else [], rotation=90, fontsize=4.5)
             ax.set_xlim(-0.6, len(shared) - 0.4)
             style_axes(ax, categorical_x=True)
@@ -434,7 +437,7 @@ def example_mice(d, pm):
 def caption(d, shared, st, pm):
     n = {k: (d[k].unit.nunique(), d[k].session.nunique(), d[k].animal.nunique()) for k in ROWS}
     intro = ("\\textbf{Variance of decoding across regions and sessions (all neurons).} "
-             f"The {len(shared)} regions with $\\geq${MIN_PER_REGION} mesoscope sessions and BWM probes; models, "
+             f"The {len(shared)} regions in the original v7 comparison; models, "
              "tests and baselines in Methods, \\emph{Region and session variance}.")
     caps = [
         "Scores per region (Allen order and colours; bar: median; dashed: chance; grey band and line: 5--95th "

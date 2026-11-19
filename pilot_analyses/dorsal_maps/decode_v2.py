@@ -4,7 +4,7 @@
 Changes from decode.py:
 - 1 mm hexagons (centre-to-vertex 0.5 mm) are the default spatial bins;
 - BWM is also decoded from units within 640 um of the pial surface
-  (modality bwm_d640, make_bwm_depth.py), the depth range the mesoscope could
+  (modality bwm_pial640, make_bwm_depth.py), the depth range the mesoscope could
   plausibly see; bwm (all depths) is kept as a reference;
 - wheel speed (wheel_decoding2): wheel targets with encoder glitches fixed
   (fix_wheel_glitches.py); ridge penalty chosen by exact leave-one-trial-out
@@ -24,7 +24,7 @@ are dropped, and sessions with fewer than half of their trials covered
 trials decode at chance) and sessions with task-imaging clock offsets
 (CLOCK_OFFSET) are left out (maps_v2 and wheel_decoding2 filter them).
 
-Usage: python decode_v2.py [meso bwm_d640 bwm] [--hex 0.5] [--fill-binary-all]
+Usage: python decode_v2.py [meso bwm_pial640 bwm] [--hex 0.5] [--fill-binary-all]
 Writes output/v2/decoding_<modality>[_hex<size>].pqt and
 output/v2/wheel_baseline_<modality>.pqt (per-session bin-only R^2).
 """
@@ -40,6 +40,7 @@ import torch
 
 from common import FEATURE_ROOT, OUT, bin_neurons
 from gpu_decode import DEVICE, decode_binary
+from make_bwm_depth import STREAMLINE_MODALITY
 from sessions import load_session, session_files
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "wheel_decoding2"))
@@ -107,7 +108,7 @@ def excluded_sessions():
     return low | set(CLOCK_OFFSET)
 
 
-def run_session(sid, s, hex_size, binary=True):
+def run_session(sid, s, hex_size, binary=True, *, random_only=False):
     if len(s["choice"]) < MIN_TRIALS:
         return pd.DataFrame()
     keys = bin_neurons(s["xyz"], size=hex_size)
@@ -118,17 +119,20 @@ def run_session(sid, s, hex_size, binary=True):
         if idx.size < N_PICK:
             continue
         bins.append((int(k), idx.size))
-        sets += [idx] + [rng.choice(idx, N_PICK, replace=False) for _ in range(N_DRAWS)]
+        if not random_only:
+            sets.append(idx)
+        sets.extend(rng.choice(idx, N_PICK, replace=False) for _ in range(N_DRAWS))
     if not bins:
         return pd.DataFrame()
     sc = decode_sets(s, sets, binary)
-    per = N_DRAWS + 1
+    per = N_DRAWS + int(not random_only)
     rows = []
     for b, (k, n) in enumerate(bins):
         for t in sc:
             v = sc[t][b * per:(b + 1) * per]
             rows.append(dict(session=sid, hex=k, n_neurons=n, n_trials=len(s["choice"]), target=t,
-                             all=v[0], n20=np.nanmean(v[1:])))
+                             all=np.nan if random_only else v[0],
+                             n20=np.nanmean(v if random_only else v[1:])))
     return pd.DataFrame(rows)
 
 
@@ -186,7 +190,7 @@ def fill_binary_all(modality, hex_size=HEX_V2):
 if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("modality", nargs="*", default=["meso", "bwm_d640", "bwm"])
+    ap.add_argument("modality", nargs="*", default=["meso", STREAMLINE_MODALITY, "bwm"])
     ap.add_argument("--hex", type=float, default=HEX_V2, help="hexagon centre-to-vertex size, mm")
     ap.add_argument("--fill-binary-all", action="store_true",
                     help="only fill missing all-neuron binary scores of an existing output")

@@ -32,11 +32,11 @@ N_SHUFFLE = 1
 LABELS = ("stim_left", "choice", "reward", "wheel_y")
 
 
-def decode_shuffled(s, sets, seed):
+def decode_shuffled(s, sets, seed, n_shuffle=N_SHUFFLE):
     """{target: (n_sets, N_SHUFFLE)} scores with trials of labels and wheel speed permuted."""
     rng = np.random.default_rng(seed)
     out = []
-    for _ in range(N_SHUFFLE):
+    for _ in range(n_shuffle):
         perm = rng.permutation(len(s["choice"]))
         out.append(decode_sets(dict(s, **{k: s[k][perm] for k in LABELS}), sets))
     return {t: np.stack([o[t] for o in out], axis=1) for t in out[0]}
@@ -84,7 +84,7 @@ def bwm_shuffle():
     rows = []
     for i, pid in enumerate(pids):
         s = load_session([FEATURE_ROOT / "bwm" / f"{pid}.npz"])
-        rows += shuffled_rows(decode_shuffled(s, [np.arange(len(s["xyz"]))], zlib.crc32(pid.encode())),
+        rows += shuffled_rows(decode_shuffled(s, [np.arange(len(s["xyz"]))], zlib.crc32(pid.encode()), n_shuffle=3),
                               [dict(pid=pid)])
         print("bwm shuffle", i + 1, len(pids), pid, flush=True)
     d = pd.DataFrame(rows)
@@ -92,24 +92,52 @@ def bwm_shuffle():
     return d
 
 
+def entry_regions(positions, atlas):
+    """Beryl region at approximately 300 µm local depth in each entry column."""
+    from make_bwm_depth import streamline_depth_um
+
+    regions = np.full(len(positions), None, dtype=object)
+    finite = np.isfinite(positions).all(axis=1)
+    if not finite.any():
+        return regions
+    xy = positions[finite] / 1e3
+    nz = atlas.bc.nz
+    x = np.repeat(atlas.bc.x2i(xy[:, 0], mode="clip"), nz)
+    y = np.repeat(atlas.bc.y2i(xy[:, 1], mode="clip"), nz)
+    z = np.tile(np.arange(nz), len(xy))
+    xyz = atlas.bc.i2xyz(np.c_[x, y, z])
+    depths = streamline_depth_um(xyz * 1e3).reshape(len(xy), nz)
+    selected = []
+    rows = []
+    for i, (row, d) in enumerate(zip(np.flatnonzero(finite), depths)):
+        cortex = np.flatnonzero(np.isfinite(d))
+        if cortex.size:
+            first = np.split(cortex, np.flatnonzero(np.diff(cortex) > 1) + 1)[0]
+            selected.append(i * nz + first[np.argmin(abs(d[first] - ENTRY_DEPTH_UM))])
+            rows.append(row)
+    if rows:
+        labels = atlas.get_labels(xyz[selected], mapping="Beryl")
+        regions[rows] = atlas.regions.id2acronym(labels)
+    return regions
+
+
 def bwm():
     from iblatlas.atlas import AllenAtlas
     from common import FEATURE_ROOT
-    from make_bwm_depth import MAX_DEPTH_UM, depth_below_surface
+    from make_bwm_depth import STREAMLINE_MODALITY
+
     ba = AllenAtlas()
-    ba.compute_surface()
     d = pd.read_parquet(OUT_V2 / "decoding_bwm_probe.pqt")
     p = d.drop_duplicates("pid").set_index("pid")
-    x, y = p.entry_x.values / 1e3, p.entry_y.values / 1e3            # m
-    top = ba.top[ba.bc.y2i(y), ba.bc.x2i(x)]                          # m
-    ids = ba.get_labels(np.c_[x, y, top - ENTRY_DEPTH_UM * 1e-6], mapping="Beryl")
-    p["region"] = ba.regions.id2acronym(ids)
+    p["region"] = entry_regions(p[["entry_x", "entry_y"]].to_numpy(), ba)
     major = {}
     for pid in p.index:
-        z = np.load(FEATURE_ROOT / "bwm" / f"{pid}.npz")
-        keep = depth_below_surface(z["xyz"], ba) <= MAX_DEPTH_UM
-        acr = ba.regions.id2acronym(z["atlas_id"][keep], mapping="Beryl")
-        major[pid] = pd.Series(acr).mode().iloc[0] if keep.any() else None
+        f = FEATURE_ROOT / STREAMLINE_MODALITY / f"{pid}.npz"
+        if not f.exists():
+            continue
+        with np.load(f) as z:
+            acr = ba.regions.id2acronym(z["atlas_id"], mapping="Beryl")
+        major[pid] = pd.Series(acr).mode().iloc[0]
     p["region_units"] = pd.Series(major)
     from one.api import ONE
     one = ONE(base_url="https://alyx.internationalbrainlab.org")

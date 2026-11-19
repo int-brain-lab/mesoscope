@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Revised dorsal maps (v2): 1 mm hexagons, depth-limited BWM, revised wheel decoding.
 
-Rows: mesoscope; BWM units within 640 um of the pial surface (bwm_d640, the
+Rows: mesoscope; BWM units within 640 um of the pial surface (bwm_pial640, the
 main comparison); BWM units at all depths (reference).
 Inputs: output/tuning_meso.pqt, output/tuning_bwm.pqt (one row per neuron;
-the bwm_d640 rows are the BWM neurons within 640 um, same test), and
+the bwm_pial640 rows are the BWM neurons within 640 um, same test), and
 output/v2/decoding_<modality>.pqt (decode_v2.py). The report decoding
 figures also use the 0.5 mm mesoscope bins and the BWM per-probe tables.
 
@@ -22,52 +22,75 @@ import colorcet
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from matplotlib.colors import LogNorm
 
 from common import ALPHA, MIN_NEURONS, OUT, VARIABLES, WHEEL_EDGES, bin_neurons
 from decode_probe import probe_output
 from decode_top10 import top10_output
 from decode_v2 import HEX_V2, MIN_TRIALS, N_DRAWS, N_PICK, OUT_V2, REPORT_HEX_SIZE, out_name
-from make_bwm_depth import MAX_DEPTH_UM, STREAMLINE_MODALITY, depth_below_surface
+from make_bwm_depth import MAX_DEPTH_UM, STREAMLINE_MODALITY, streamline_depth_um
 from maps import _tuning_methods, _win, joint_norm, map_grid
 from plotstyle import NATURE_DOUBLE_COL_IN, save_with_caption, style_axes
+from sessions import session_files
 
 # Keep score hue separate from the lightness change caused by support opacity.
 DORSAL_CMAP = colorcet.cm["CET_I3"]
 REPORT_CMAP = "cool"
 BWM_MARKER_ALPHA = 0.8
-ROWS = ("meso", "bwm_d640", "bwm")
-ROW_NAME = {"meso": "Mesoscope", "bwm_d640": f"BWM $\\leq${MAX_DEPTH_UM} µm",
+ROWS = ("meso", STREAMLINE_MODALITY, "bwm")
+ROW_NAME = {"meso": "Mesoscope", STREAMLINE_MODALITY: f"BWM $\\leq${MAX_DEPTH_UM} µm",
             "bwm": "BWM all depths"}
-ROW_TEXT = {"meso": "mesoscope", "bwm_d640": f"BWM $\\leq${MAX_DEPTH_UM}\\,$\\mu$m", "bwm": "BWM all depths"}
-COL = {"meso": "tab:green", "bwm_d640": "tab:purple", "bwm": "0.6"}
+ROW_TEXT = {"meso": "mesoscope", STREAMLINE_MODALITY: f"BWM $\\leq${MAX_DEPTH_UM}\\,$\\mu$m", "bwm": "BWM all depths"}
+COL = {"meso": "tab:green", STREAMLINE_MODALITY: "tab:purple", "bwm": "0.6"}
 TARGETS = ("stim", "choice", "feedback", "wheel", "wheel_trial")
 TITLE = {"stim": "Stimulus side", "choice": "Choice", "feedback": "Feedback", "wheel": "Wheel speed",
          "wheel_trial": "Wheel speed,\ntrial-specific"}
 CHANCE = {"stim": 0.5, "choice": 0.5, "feedback": 0.5, "wheel": 0.0, "wheel_trial": 0.0}
 
 
-def load():
-    from iblatlas.atlas import AllenAtlas
+def load_tuning():
     from decode_v2 import excluded_sessions
+
     tun = {m: pd.read_parquet(OUT / f"tuning_{m}.pqt") for m in ("meso", "bwm")}
     tun["meso"] = tun["meso"][~tun["meso"].session.isin(excluded_sessions())]
-    ba = AllenAtlas()
-    ba.compute_surface()
-    d = depth_below_surface(tun["bwm"][["x", "y", "z"]].values, ba)
-    tun["bwm_d640"] = tun["bwm"][d <= MAX_DEPTH_UM].copy()
+    d = streamline_depth_um(tun["bwm"][["x", "y", "z"]].values)
+    tun[STREAMLINE_MODALITY] = tun["bwm"][d <= MAX_DEPTH_UM].copy()
     for m in ROWS:
         tun[m]["hex"] = bin_neurons(tun[m][["x", "y", "z"]].values, size=HEX_V2)
-    dec = {m: pd.read_parquet(OUT_V2 / f"decoding_{m}.pqt") for m in ROWS}
+    return tun
+
+
+def load_binned_scores():
+    from decode_v2 import excluded_sessions
+
+    dec = {m: pd.read_parquet(out_name(m)) for m in ROWS}
     dec["meso"] = dec["meso"][~dec["meso"].session.isin(excluded_sessions())]
-    return tun, dec
+    return dec
+
+
+def coverage_data():
+    """One row per unit from cached coordinates, independent of tuning scores."""
+    from decode_v2 import excluded_sessions
+
+    out = {}
+    excluded = excluded_sessions()
+    for m in ROWS:
+        rows = []
+        for sid, files in session_files(m).items():
+            if m == "meso" and sid in excluded:
+                continue
+            for path in files:
+                with np.load(path) as z:
+                    keys = bin_neurons(z["xyz"], size=HEX_V2)
+                rows.append(pd.DataFrame(dict(hex=keys, session=sid)))
+        out[m] = pd.concat(rows, ignore_index=True)
+    return out
 
 
 def intro(title="Dorsal cortex maps"):
     return (f"{title}: mesoscope two-photon imaging (top row; deconvolved activity of "
             "isocortex neurons) vs Brain Wide Map Neuropixels units within "
-            f"{MAX_DEPTH_UM}\\,$\\mu$m of the pial surface (middle row; twice the depth range the "
-            "mesoscope images, 174--318\\,$\\mu$m) and at all depths (bottom row; reference). Each neuron is "
+            f"{MAX_DEPTH_UM}\\,$\\mu$m of the pia by Allen CCF streamline depth (middle row) "
+            "and at all depths (bottom row). Each neuron is "
             f"assigned to a hexagonal bin ({HEX_V2 * 2:.0f}\\,mm vertex to vertex) by its ML and AP Allen "
             "CCF position; hemispheres folded onto the right. Grey lines: Allen top-view region "
             "boundaries. Colour scales are shared across rows.")
@@ -118,7 +141,7 @@ def report_decoding(cmap=REPORT_CMAP, *, top10=False):
     probe_path = top10_output if top10 else probe_output
     meso = pd.read_parquet(meso_path)
     meso = meso[~meso.session.isin(excluded_sessions())]
-    probes = {"bwm_d640": pd.read_parquet(probe_path(STREAMLINE_MODALITY)),
+    probes = {STREAMLINE_MODALITY: pd.read_parquet(probe_path(STREAMLINE_MODALITY)),
               "bwm": pd.read_parquet(probe_path("bwm"))}
     for ver in (("top10",) if top10 else ("n20", "all")):
         decoding(meso, probes, ver, cmap=cmap)
@@ -162,7 +185,7 @@ def decoding(meso, probes, ver, cmap=REPORT_CMAP):
             "semi-transparent dot is at the probe's Alyx trajectory entry point. Hemispheres are folded onto the "
             f"right. Sessions require at least {MIN_TRIALS} trials and bins or probes need at least {N_PICK} "
             f"neurons. Decoding scores are available for {n_sessions} mesoscope sessions, "
-            f"{n_probes['bwm_d640']} superficial BWM insertions and {n_probes['bwm']} "
+            f"{n_probes[STREAMLINE_MODALITY]} superficial BWM insertions and {n_probes['bwm']} "
             "all-depth BWM insertions. Each variable has a colour scale shared across rows, "
             "spanning the 1st to 99th percentiles of its plotted scores.")
     if ver == "top10":
@@ -199,8 +222,9 @@ def tuning(tun, summary):
              out_dir=OUT_V2, cmap=DORSAL_CMAP)
 
 
-def summary_figure(dec, summary):
+def summary_figure(dec, summary, meso_all_estimates=None):
     from controls2 import spatial_test
+
     fig, axs = plt.subplots(2, 5, figsize=(NATURE_DOUBLE_COL_IN, 3.6), gridspec_kw=dict(hspace=0.75, wspace=0.55))
     stats = {}
     for c, t in enumerate(TARGETS):
@@ -209,9 +233,12 @@ def summary_figure(dec, summary):
             for j, ver in enumerate(("n20", "all")):
                 d = dec[m][dec[m].target == t]
                 ses = d.groupby("session")[ver].mean()
-                ax.bar(j + (k - 1) * 0.27, ses.mean(), 0.25, yerr=ses.sem(), color=COL[m], alpha=0.8 if j == 0 else 0.5,
+                mean, sem = ses.mean(), ses.sem()
+                if meso_all_estimates is not None and m == "meso" and ver == "all":
+                    mean, sem = meso_all_estimates[t]
+                ax.bar(j + (k - 1) * 0.27, mean, 0.25, yerr=sem, color=COL[m], alpha=0.8 if j == 0 else 0.5,
                        error_kw=dict(lw=0.5, capsize=1), label=ROW_TEXT[m] if (c == 0 and j == 0) else None)
-                stats[m, t, ver] = ses.mean()
+                stats[m, t, ver] = mean
         ax.axhline(CHANCE[t], color="k", lw=0.5)
         ax.set_xticks([0, 1], [f"{N_PICK} neurons", "all"], fontsize=5)
         if CHANCE[t]:
@@ -221,12 +248,12 @@ def summary_figure(dec, summary):
         if c == 0:
             ax.set_ylabel("score (mean over sessions)")
         ax = axs[1, c]
-        g = {m: dec[m][dec[m].target == t].groupby("hex")["n20"].mean() for m in ("meso", "bwm_d640")}
+        g = {m: dec[m][dec[m].target == t].groupby("hex")["n20"].mean() for m in ("meso", STREAMLINE_MODALITY)}
         both = pd.concat(g, axis=1, join="inner").dropna()
-        ax.scatter(both["bwm_d640"], both["meso"], s=6, color="k", lw=0)
+        ax.scatter(both[STREAMLINE_MODALITY], both["meso"], s=6, color="k", lw=0)
         lo, hi = np.nanmin(both.values), np.nanmax(both.values)
         ax.plot([lo, hi], [lo, hi], color="0.6", lw=0.5, ls="--")
-        st = spatial_test(f"v2_{t}", both.index.values, both["bwm_d640"].values, both["meso"].values, HEX_V2)
+        st = spatial_test(f"v2_{t}", both.index.values, both[STREAMLINE_MODALITY].values, both["meso"].values, HEX_V2)
         r, p = st["r"], st["p_spatial"]
         stats[t, "r"] = (r, p, len(both), st["p_naive"])
         ax.text(0.04, 0.97, f"$r_s$={r:.2f}\n$p_{{sp}}$={p:.2f}", transform=ax.transAxes, va="top", fontsize=5)
@@ -234,7 +261,7 @@ def summary_figure(dec, summary):
         if c == 0:
             ax.set_ylabel("Mesoscope", fontsize=6)
         style_axes(ax)
-        summary.append(dict(row="meso_vs_bwm_d640", measure=f"spearman_n20_{t}", value=r, p=p, session_bins=len(both),
+        summary.append(dict(row=f"meso_vs_{STREAMLINE_MODALITY}", measure=f"spearman_n20_{t}", value=r, p=p, session_bins=len(both),
                             p_naive=st["p_naive"]))
     axs[0, 0].legend(frameon=False, fontsize=5, loc="upper left", bbox_to_anchor=(0, -0.35), ncol=3)
     for c in range(5):
@@ -249,16 +276,19 @@ def summary_figure(dec, summary):
             "session's mean score over its 1\\,mm bins, from " + str(N_PICK) + " random neurons (left, solid) and all neurons "
             "(right, light). \\textbf{f--j} Per 1\\,mm bin, " + str(N_PICK) + " neurons: BWM $\\leq$640\\,$\\mu$m (x) vs "
             f"mesoscope (y), the {stats[TARGETS[0], 'r'][2]} bins covered by both; Spearman $r_s$, naive $p$, and "
-            "$p_{sp}$ against 1000 variogram-matched surrogates of either map (larger $p$ reported). ")
+            "$p_{sp}$ against 1000 variogram-matched surrogates of either map (larger $p$ reported). "
+            "BWM depth uses the Allen CCF streamline lookup. ")
+    if meso_all_estimates is not None:
+        head += "The all-neuron mesoscope bars reuse the original v7 session summaries. "
     save_with_caption(fig, OUT_V2 / "v2_summary", caps, "v2_summary",
                       intro=head + decoding_methods("n20").split(f" {N_PICK} randomly")[0])
     plt.close(fig)
 
 
 def main(cmap=REPORT_CMAP):
-    tun, dec = load()
+    tun, dec = load_tuning(), load_binned_scores()
     summary = []
-    counts(tun, summary)
+    counts(coverage_data(), summary)
     for ver in ("n20", "all"):
         for m in ROWS:
             for t in TARGETS:
@@ -282,10 +312,18 @@ if __name__ == "__main__":
                            help="Render the random-20 and all-neuron v7 maps.")
     selection.add_argument("--top10", action="store_true",
                            help="Render the best-10 v7 map.")
+    selection.add_argument("--supplement", choices=("counts", "tuning", "summary"),
+                           help="Render just the selected supplement figure.")
     parser.add_argument("--cmap", default=REPORT_CMAP,
                         help="Matplotlib colormap for the v7 decoding maps (default: %(default)s).")
     args = parser.parse_args()
     if args.report_decoding or args.top10:
         report_decoding(cmap=args.cmap, top10=args.top10)
+    elif args.supplement == "counts":
+        counts(coverage_data(), [])
+    elif args.supplement == "tuning":
+        tuning(load_tuning(), [])
+    elif args.supplement == "summary":
+        summary_figure(load_binned_scores(), [])
     else:
         main(cmap=args.cmap)

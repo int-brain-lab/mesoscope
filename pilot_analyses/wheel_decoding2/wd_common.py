@@ -15,7 +15,8 @@ for p in (str(REPO), str(DM)):
 from common import FEATURE_ROOT, WHEEL_EDGES  # noqa: E402,F401
 from plotstyle import (NATURE_DOUBLE_COL_IN, NATURE_SINGLE_COL_IN, panel_label,  # noqa: E402,F401
                        save_with_caption, style_axes)
-from sessions import load_session, session_files as _session_files  # noqa: E402
+from sessions import load_session, session_files as _session_files  # noqa: E402,F401
+from make_bwm_depth import STREAMLINE_MODALITY, streamline_depth_um as depth_below_surface  # noqa: E402,F401
 from decode_v2 import excluded_sessions  # noqa: E402
 
 
@@ -42,16 +43,6 @@ def atlas():
         _ATLAS = AllenAtlas()
         _ATLAS.compute_surface()
     return _ATLAS
-
-
-def depth_below_surface(xyz_mm):
-    """Depth (um) of each point below the pial surface (Allen top surface at
-    the same ML-AP); NaN outside the brain."""
-    ba = atlas()
-    x, y, z = (np.asarray(xyz_mm, float) / 1e3).T
-    ix = np.clip(ba.bc.x2i(x, mode="clip"), 0, ba.bc.nx - 1)
-    iy = np.clip(ba.bc.y2i(y, mode="clip"), 0, ba.bc.ny - 1)
-    return (ba.top[iy, ix] - z) * 1e6
 
 
 def wheel_corr(X, y):

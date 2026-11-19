@@ -10,11 +10,11 @@ import numpy as np
 import pandas as pd
 from scipy.stats import mannwhitneyu
 
-from wd_common import COL, NAME, NATURE_DOUBLE_COL_IN, OUT, panel_label, save_with_caption, style_axes
+from wd_common import COL, NAME, NATURE_DOUBLE_COL_IN, OUT, STREAMLINE_MODALITY, panel_label, save_with_caption, style_axes
 
-MODS = ("meso", "bwm", "bwm_d640")
-NAME = dict(NAME, bwm_d640="BWM, \u2264640 \u00b5m")
-COL = dict(COL, bwm_d640="tab:pink")
+MODS = ("meso", "bwm", STREAMLINE_MODALITY)
+NAME = {**NAME, STREAMLINE_MODALITY: "BWM, \u2264640 \u00b5m"}
+COL = {**COL, STREAMLINE_MODALITY: "tab:pink"}
 
 
 def main():
@@ -68,8 +68,8 @@ def main():
         "in both the even and the odd trials: median "
         f"{med.loc['meso', 'frac_pos']:.1%} (mesoscope, {cnt['meso']} sessions), "
         f"{med.loc['bwm', 'frac_pos']:.1%} (BWM isocortex, {cnt['bwm']}), "
-        f"{med.loc['bwm_d640', 'frac_pos']:.1%} (BWM units within 640\\,$\\mu$m of the surface, "
-        f"{cnt['bwm_d640']}).".replace("%", "\\%"),
+        f"{med.loc[STREAMLINE_MODALITY, 'frac_pos']:.1%} (BWM units within 640\\,$\\mu$m of the pia by Allen CCF streamline depth, "
+        f"{cnt[STREAMLINE_MODALITY]}).".replace("%", "\\%"),
         "Correlation with wheel speed in the odd trials of the mean z-scored activity of the 10 neurons that "
         "correlate best on the even trials, against the number of neurons in the session (one dot per session).",
         f"The same with all neurons of a session (median mesoscope {f('meso', 'r_top10')}, BWM "
