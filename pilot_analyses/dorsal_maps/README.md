@@ -99,7 +99,7 @@ to save disk space.
 python fix_wheel_glitches.py              # patch wheel_y of affected feature files (backup kept)
 python make_bwm_depth.py                  # FEATURE_ROOT/bwm_pial640/<pid>.npz
 python imaging_coverage.py                # trials covered by imaging, per meso session
-python decode_v2.py meso bwm_pial640 bwm     # output/v2/decoding_<modality>.pqt (+ --fill-binary-all)
+python decode_v2.py meso bwm_pial640 bwm     # output/v2/decoding_<modality>_auc.pqt
 python maps_v2.py                         # v2_counts, v2_decoding_n20/_all, v2_tuning, v2_summary
 python depth_profile.py                   # si_depth_profile: tuning and wheel correlates vs depth
 ```
@@ -110,8 +110,11 @@ Figures 1 and 2 use 0.5 mm mesoscope hexagons (vertex to vertex) and BWM
 dots at the Alyx insertion coordinates, with separate rows for superficial
 and all-depth BWM units. The depth-limited row uses the IBL 25 µm Allen
 CCF streamline lookup for local pial depth. BWM dots use 80% opacity. Each variable has its
-own colour scale shared across rows, spanning the 1st to 99th percentiles
-of its plotted scores. Use `--cmap NAME` to change the Matplotlib colormap
+own colour scale shared across rows from chance (0.5 for ROC-AUC and 0
+for wheel $R^2$) to the 99th percentile of its plotted scores. Values below
+chance use the lowest colour. Binary scores are ROC-AUC calculated from
+pooled held-out logistic decision scores. The existing inner tuning criterion
+remains balanced accuracy. Use `--cmap NAME` to change the Matplotlib colormap
 (default `cool`). Both figures follow the same trial and neuron thresholds.
 The headline table and supplementary bin-wise comparisons use 1 mm bins
 with the same superficial BWM selection.

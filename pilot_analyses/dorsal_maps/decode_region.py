@@ -12,10 +12,10 @@ probe's isocortex units within 640 um is stored as a check.
 
 Shuffle control (--shuffle): the same decoders with the trials of all labels and of wheel
 speed permuted jointly (neural data untouched), N_SHUFFLE permutations per set; columns
-shuf_0.. in output/v2/decoding_{meso_region,bwm_probe}_shuf.pqt.
+shuf_0.. in output/v2/decoding_{meso_region,bwm_probe}_shuf_auc.pqt.
 
 Usage: python decode_region.py [--shuffle [--meso-only]]
-Writes output/v2/decoding_meso_region.pqt and output/v2/decoding_bwm_probe_region.pqt.
+Writes output/v2/decoding_meso_region_auc.pqt and output/v2/decoding_bwm_probe_region_auc.pqt.
 """
 import warnings
 import zlib
@@ -23,6 +23,7 @@ import zlib
 import numpy as np
 import pandas as pd
 
+from decode_probe import probe_output
 from decode_v2 import (MIN_TRIALS, N_PICK, OUT_V2, apply_coverage, decode_sets,
                        excluded_sessions)
 from sessions import load_session, session_files
@@ -32,13 +33,13 @@ N_SHUFFLE = 1
 LABELS = ("stim_left", "choice", "reward", "wheel_y")
 
 
-def decode_shuffled(s, sets, seed, n_shuffle=N_SHUFFLE):
+def decode_shuffled(s, sets, seed, n_shuffle=N_SHUFFLE, *, wheel=True):
     """{target: (n_sets, N_SHUFFLE)} scores with trials of labels and wheel speed permuted."""
     rng = np.random.default_rng(seed)
     out = []
     for _ in range(n_shuffle):
         perm = rng.permutation(len(s["choice"]))
-        out.append(decode_sets(dict(s, **{k: s[k][perm] for k in LABELS}), sets))
+        out.append(decode_sets(dict(s, **{k: s[k][perm] for k in LABELS}), sets, wheel=wheel))
     return {t: np.stack([o[t] for o in out], axis=1) for t in out[0]}
 
 
@@ -73,22 +74,22 @@ def meso(shuffle=False):
                  for j, (r, idx) in enumerate(zip(regions, sets)) for t in sc]
         print("meso", i + 1, len(groups), sid, regions, flush=True)
     d = pd.DataFrame(rows)
-    d.to_parquet(OUT_V2 / f"decoding_meso_region{'_shuf' if shuffle else ''}.pqt")
+    d.to_parquet(OUT_V2 / f"decoding_meso_region{'_shuf' if shuffle else ''}_auc.pqt")
     return d
 
 
-def bwm_shuffle():
+def bwm_shuffle(*, wheel=True):
     from common import FEATURE_ROOT
     warnings.filterwarnings("ignore")
-    pids = pd.read_parquet(OUT_V2 / "decoding_bwm_probe.pqt").pid.unique()
+    pids = pd.read_parquet(probe_output("bwm")).pid.unique()
     rows = []
     for i, pid in enumerate(pids):
         s = load_session([FEATURE_ROOT / "bwm" / f"{pid}.npz"])
-        rows += shuffled_rows(decode_shuffled(s, [np.arange(len(s["xyz"]))], zlib.crc32(pid.encode()), n_shuffle=3),
+        rows += shuffled_rows(decode_shuffled(s, [np.arange(len(s["xyz"]))], zlib.crc32(pid.encode()), n_shuffle=3, wheel=wheel),
                               [dict(pid=pid)])
         print("bwm shuffle", i + 1, len(pids), pid, flush=True)
     d = pd.DataFrame(rows)
-    d.to_parquet(OUT_V2 / "decoding_bwm_probe_shuf.pqt")
+    d.to_parquet(OUT_V2 / "decoding_bwm_probe_shuf_auc.pqt")
     return d
 
 
@@ -127,7 +128,7 @@ def bwm():
     from make_bwm_depth import STREAMLINE_MODALITY
 
     ba = AllenAtlas()
-    d = pd.read_parquet(OUT_V2 / "decoding_bwm_probe.pqt")
+    d = pd.read_parquet(probe_output("bwm"))
     p = d.drop_duplicates("pid").set_index("pid")
     p["region"] = entry_regions(p[["entry_x", "entry_y"]].to_numpy(), ba)
     major = {}
@@ -145,7 +146,7 @@ def bwm():
     p["probe_name"] = pd.Series({i["id"]: i["name"] for k in range(0, len(pids), 50)
                                  for i in one.alyx.rest("insertions", "list", django=f"id__in,{pids[k:k + 50]}")})
     d = d.join(p[["region", "region_units", "probe_name"]], on="pid")
-    d.to_parquet(OUT_V2 / "decoding_bwm_probe_region.pqt")
+    d.to_parquet(OUT_V2 / "decoding_bwm_probe_region_auc.pqt")
     return d
 
 

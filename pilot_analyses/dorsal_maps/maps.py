@@ -79,7 +79,7 @@ def style_map(ax, row, col, nrows, xlim=XLIM):
 
 
 def map_grid(per_mod, titles, cbar_labels, norms, out_stem, captions, label, intro, xlim=XLIM,
-             rows=MODS, row_names=ROW_NAME, size=HEX_SIZE, out_dir=None, cmap=CMAP):
+             rows=MODS, row_names=ROW_NAME, size=HEX_SIZE, out_dir=None, cmap=CMAP, cbar_ticks=None):
     """per_mod[row][c] = (keys, values) or (keys, values, alpha) for row
     (modality or session) and column c, or a dict(x=, y=, v=) of points (mm)
     drawn as small circles instead of hexagons, with optional alpha."""
@@ -114,7 +114,9 @@ def map_grid(per_mod, titles, cbar_labels, norms, out_stem, captions, label, int
                           aspect=15)
         cb.set_label(cbar_labels[c], fontsize=6)
         cb.ax.tick_params(labelsize=5)
-        if not isinstance(norms[c], LogNorm):
+        if cbar_ticks is not None:
+            cb.set_ticks(cbar_ticks[c])
+        elif not isinstance(norms[c], LogNorm):
             cb.locator = plt.MaxNLocator(3)
             cb.update_ticks()
     save_with_caption(fig, (out_dir or OUT) / out_stem, captions, label=label, intro=intro)

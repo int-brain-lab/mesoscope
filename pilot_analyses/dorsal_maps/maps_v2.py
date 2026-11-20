@@ -5,7 +5,7 @@ Rows: mesoscope; BWM units within 640 um of the pial surface (bwm_pial640, the
 main comparison); BWM units at all depths (reference).
 Inputs: output/tuning_meso.pqt, output/tuning_bwm.pqt (one row per neuron;
 the bwm_pial640 rows are the BWM neurons within 640 um, same test), and
-output/v2/decoding_<modality>.pqt (decode_v2.py). The report decoding
+output/v2/decoding_<modality>_auc.pqt (decode_v2.py). The report decoding
 figures also use the 0.5 mm mesoscope bins and the BWM per-probe tables.
 
 Figures in output/v2/ (each _panels.pdf, .tex, .pdf with caption):
@@ -22,6 +22,7 @@ import colorcet
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.colors import Normalize
 
 from common import ALPHA, MIN_NEURONS, OUT, VARIABLES, WHEEL_EDGES, bin_neurons
 from decode_probe import probe_output
@@ -99,7 +100,7 @@ def intro(title="Dorsal cortex maps"):
 def decoding_methods(ver):
     return ("Decoding per session and bin (sessions with $\\geq$50 trials and $\\geq$"
             f"{N_PICK} neurons in the bin), 5-fold cross-validation over trials. Binary variables: "
-            "L2 logistic regression, balanced accuracy (chance 0.5). Wheel speed in six 0.2\\,s bins from "
+            "L2 logistic regression, ROC-AUC (chance 0.5). Wheel speed in six 0.2\\,s bins from "
             f"${WHEEL_EDGES[0]:g}$ to ${WHEEL_EDGES[-1]:g}$\\,s around movement onset: ridge regression on "
             "the activity of the previous, same and next bin (penalty by exact leave-one-trial-out error), "
             "cross-validated $R^2$; trial-specific: the same with the mean speed profile of the training "
@@ -130,6 +131,14 @@ def counts(tun, summary):
               f"Number of sessions contributing at least {N_PICK} neurons to each bin."],
              "v2_counts", intro=intro("Coverage"), rows=ROWS, row_names=ROW_NAME, size=HEX_V2,
              out_dir=OUT_V2, cmap=DORSAL_CMAP)
+
+
+def score_norm(arrays, chance):
+    """Share a chance-anchored colour scale across modalities for one target."""
+    values = np.concatenate(arrays)
+    finite = values[np.isfinite(values)]
+    hi = float(np.percentile(finite, 99)) if finite.size else chance
+    return Normalize(vmin=chance, vmax=hi if hi > chance else chance + 0.01, clip=True)
 
 
 def report_decoding(cmap=REPORT_CMAP, *, top10=False):
@@ -165,7 +174,8 @@ def decoding(meso, probes, ver, cmap=REPORT_CMAP):
 
     values = [[per["meso"][i][1]] + [per[m][i]["v"] for m in ROWS[1:]]
               for i in range(len(TARGETS))]
-    norms = [joint_norm(v) for v in values]
+    norms = [score_norm(v, CHANCE[t]) for t, v in zip(TARGETS, values)]
+    ticks = [np.linspace(norm.vmin, norm.vmax, 3) for norm in norms]
     if ver == "n20":
         title = f"Decoding from {N_PICK} neurons"
         population = f"{N_PICK} randomly drawn neurons (mean of {N_DRAWS} draws)"
@@ -187,19 +197,20 @@ def decoding(meso, probes, ver, cmap=REPORT_CMAP):
             f"neurons. Decoding scores are available for {n_sessions} mesoscope sessions, "
             f"{n_probes[STREAMLINE_MODALITY]} superficial BWM insertions and {n_probes['bwm']} "
             "all-depth BWM insertions. Each variable has a colour scale shared across rows, "
-            "spanning the 1st to 99th percentiles of its plotted scores.")
+            "from chance to the 99th percentile of plotted scores. Below-chance scores "
+            "use the lowest colour.")
     if ver == "top10":
         head += (r" Ranking was repeated on the training trials of each outer fold. "
                  r"Binary variables use $|\mathrm{AUC}-0.5|$. Both wheel targets use "
                  r"the highest signed Pearson $r$ with raw wheel speed across all wheel bins. "
                  r"Wheel scores require ten defined correlations per training fold.")
-    map_grid(per, [TITLE[t] for t in TARGETS], ["balanced accuracy"] * 3 + ["$R^2$"] * 2, norms,
+    map_grid(per, [TITLE[t] for t in TARGETS], ["ROC-AUC"] * 3 + ["$R^2$"] * 2, norms,
              f"v2_decoding_{ver}",
-             ["Stimulus side, balanced accuracy (chance 0.5).",
+             ["Stimulus side, ROC-AUC (chance 0.5).",
               "Choice.", "Feedback.", "Wheel speed, cross-validated $R^2$.",
               "Trial-specific wheel speed, $R^2$."],
              f"v2_decoding_{ver}", intro=head, rows=ROWS, row_names=ROW_NAME, size=REPORT_HEX_SIZE,
-             out_dir=OUT_V2, cmap=cmap)
+             out_dir=OUT_V2, cmap=cmap, cbar_ticks=ticks)
 
 
 def tuning(tun, summary):
@@ -234,7 +245,7 @@ def summary_figure(dec, summary, meso_all_estimates=None):
                 d = dec[m][dec[m].target == t]
                 ses = d.groupby("session")[ver].mean()
                 mean, sem = ses.mean(), ses.sem()
-                if meso_all_estimates is not None and m == "meso" and ver == "all":
+                if meso_all_estimates is not None and m == "meso" and ver == "all" and t in meso_all_estimates:
                     mean, sem = meso_all_estimates[t]
                 ax.bar(j + (k - 1) * 0.27, mean, 0.25, yerr=sem, color=COL[m], alpha=0.8 if j == 0 else 0.5,
                        error_kw=dict(lw=0.5, capsize=1), label=ROW_TEXT[m] if (c == 0 and j == 0) else None)
@@ -279,7 +290,7 @@ def summary_figure(dec, summary, meso_all_estimates=None):
             "$p_{sp}$ against 1000 variogram-matched surrogates of either map (larger $p$ reported). "
             "BWM depth uses the Allen CCF streamline lookup. ")
     if meso_all_estimates is not None:
-        head += "The all-neuron mesoscope bars reuse the original v7 session summaries. "
+        head += "All-neuron mesoscope bars for targets with archived estimates reuse the original v7 session summaries. "
     save_with_caption(fig, OUT_V2 / "v2_summary", caps, "v2_summary",
                       intro=head + decoding_methods("n20").split(f" {N_PICK} randomly")[0])
     plt.close(fig)

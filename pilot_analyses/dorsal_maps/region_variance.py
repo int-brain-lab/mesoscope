@@ -70,12 +70,12 @@ rng = np.random.default_rng(0)
 
 
 def load():
-    m = pd.read_parquet(OUT_V2 / "decoding_meso_region.pqt")
-    b = pd.read_parquet(OUT_V2 / "decoding_bwm_probe_region.pqt")
-    f = OUT_V2 / "decoding_meso_region_shuf.pqt"      # decode_region.py --shuffle
+    m = pd.read_parquet(OUT_V2 / "decoding_meso_region_auc.pqt")
+    b = pd.read_parquet(OUT_V2 / "decoding_bwm_probe_region_auc.pqt")
+    f = OUT_V2 / "decoding_meso_region_shuf_auc.pqt"      # decode_region.py --shuffle
     if f.exists():
         m = m.merge(pd.read_parquet(f), on=["session", "region", "target"], how="left")
-    f = OUT_V2 / "decoding_bwm_probe_shuf.pqt"
+    f = OUT_V2 / "decoding_bwm_probe_shuf_auc.pqt"
     if f.exists():
         b = b.merge(pd.read_parquet(f), on=["pid", "target"], how="left")
     d = {"meso": m.assign(unit=m.session), "bwm": b.assign(unit=b.pid)}
@@ -192,7 +192,7 @@ def boot_shares(df):
 
 
 def bootstrap(d):
-    f = OUT_V2 / "region_variance_boot.csv"
+    f = OUT_V2 / "region_variance_boot_auc.csv"
     if f.exists():
         return pd.read_csv(f)
     rows = []
@@ -305,10 +305,11 @@ def figure(d, shared, st, pm):
     gs = fig.add_gridspec(nr + 4, 5, height_ratios=[1] * nr + [0.42, 1.25, 0.45, 0.95], hspace=0.28,
                           wspace=0.35)
     xs = np.arange(len(shared))
-    share = {}                                           # one y axis for balanced accuracy, one for R^2
+    share = {}                                           # group y axes by metric
     for r, k in enumerate(ROWS):
         for c, t in enumerate(TARGETS):
-            grp = c > 2
+            metric = "balanced accuracy" if k == "bwm_paper" else "ROC-AUC"
+            grp = "R2" if c > 2 else metric
             ax = fig.add_subplot(gs[r, c], sharey=share.get(grp))
             share.setdefault(grp, ax)
             df = d[k][d[k].target == t]
@@ -326,7 +327,7 @@ def figure(d, shared, st, pm):
                 ax.set_title(short(t).replace("Wheel, trial", "Wheel speed, trial") + (" ($R^2$)" if c > 2 else ""),
                              fontsize=6, pad=9)
             if c == 0:
-                ax.set_ylabel(f"{ROW_NAME[k]}\nbalanced accuracy", fontsize=6)
+                ax.set_ylabel(f"{ROW_NAME[k]}\n{metric}", fontsize=6)
             elif c != 3:
                 ax.tick_params(labelleft=False)
             if r == 0 and c == 0:
@@ -443,7 +444,8 @@ def caption(d, shared, st, pm):
         "Scores per region (Allen order and colours; bar: median; dashed: chance; grey band and line: 5--95th "
         f"percentile and median of the baseline). Rows: mesoscope, one dot per session and region ({n['meso'][0]} "
         f"sessions, {n['meso'][2]} mice); BWM, one dot per probe at its entry region ({n['bwm'][0]} probes); BWM "
-        "decoding paper, one dot per session and region, filled if $p<0.05$ (wheel velocity in the last column). "
+        "decoding paper, one dot per session and region, filled if $p<0.05$ (published balanced accuracy and "
+        "wheel velocity in the last column). Binary scores in the first two rows use ROC-AUC. "
         "Inset: region share from \\textbf{c}.",
         "Session $\\times$ region scores (log $N$ removed) of a region-dominated, a balanced and a "
         "session-dominated mouse. For illustration, each matrix retains at least five regions "

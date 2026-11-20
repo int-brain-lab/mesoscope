@@ -10,7 +10,8 @@ LogisticRegressionCV-style selection of C over Cs by 3-fold (unshuffled
 StratifiedKFold) balanced accuracy; L2 logistic regression with
 class_weight='balanced' (objective C * sum(sw * logloss) + ||w||^2 / 2,
 intercept unpenalised) refit on the outer training set with the best C;
-balanced accuracy of the pooled outer-test predictions.
+balanced accuracy of the pooled outer-test predictions by default, or
+ROC-AUC of pooled held-out decision scores when requested.
 
 decode_wheel: outer KFold(5, shuffle, seed) over trials; features
 standardised on the training rows; ridge penalty chosen by exact
@@ -188,8 +189,20 @@ def _bal_acc(y, pred, mask):
     return acc / 2
 
 
-def decode_binary(F, sets, y, seed=0, n_folds=5, Cs=CS, dtype=torch.float32, dual=True):
-    """Cross-validated balanced accuracy for each neuron set.
+def _pooled_auc(y, decision):
+    """ROC-AUC over out-of-fold decision scores, using mean ranks for ties."""
+    from scipy.stats import rankdata
+
+    ranks = rankdata(decision, axis=-1)
+    positive = y == 1
+    n_pos = positive.sum()
+    n_neg = len(y) - n_pos
+    return (ranks[:, positive].sum(axis=-1) - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg)
+
+
+def decode_binary(F, sets, y, seed=0, n_folds=5, Cs=CS, dtype=torch.float32, dual=True,
+                  *, roc_auc=False):
+    """Cross-validated balanced accuracy or ROC-AUC for each neuron set.
 
     F: (n_trials, n_neurons) array or tensor; sets: list of index arrays
     into the neuron axis; y: (n_trials,) binary labels. Returns (len(sets),).
@@ -226,14 +239,18 @@ def decode_binary(F, sets, y, seed=0, n_folds=5, Cs=CS, dtype=torch.float32, dua
         pen[-1] = 0
         swb = sw.repeat(G, 1, 1)                                 # (G k, K, N)
         theta = _newton_logreg(Xa, yf, swb, lam, pen)
-        pred = (torch.einsum("bnp,bkp->bkn", Xa, theta) > 0).long().view(G, n_folds, 4, nC, N)
+        decision = torch.einsum("bnp,bkp->bkn", Xa, theta).view(G, n_folds, 4, nC, N)
+        pred = (decision > 0).long()
         score = _bal_acc(yt, pred, test_k.view(1, n_folds, 4, nC, N))      # (G, k, 4, nC)
         best = score[:, :, :3].mean(2).argmax(2)  # first maximum = smallest C on ties, as sklearn
-        final = torch.gather(pred[:, :, 3], 2, best[:, :, None, None].expand(G, n_folds, 1, N))[:, :, 0]
-        pooled = (final * test[:, 3].long()).sum(1)              # (G, N): each trial tested once
-        acc = _bal_acc(yt, pooled, torch.ones_like(pooled, dtype=torch.bool))
-        acc = torch.where(n_var > 0, acc, torch.full_like(acc, float("nan")))
-        out[chunk] = acc.cpu().numpy()
+        held_out = decision if roc_auc else pred
+        final = torch.gather(held_out[:, :, 3], 2, best[:, :, None, None].expand(G, n_folds, 1, N))[:, :, 0]
+        pooled = final.masked_fill(~test[:, 3], 0).sum(1)       # (G, N): each trial tested once
+        if roc_auc:
+            metric = _pooled_auc(y, pooled.cpu().numpy())
+        else:
+            metric = _bal_acc(yt, pooled, torch.ones_like(pooled, dtype=torch.bool)).cpu().numpy()
+        out[chunk] = np.where(n_var.cpu().numpy() > 0, metric, np.nan)
     return out
 
 

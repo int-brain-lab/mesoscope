@@ -22,11 +22,12 @@ from sessions import load_session
 MODALITIES = ("meso", STREAMLINE_MODALITY, "bwm")
 
 
-def top10_output(modality):
-    return OUT_V2 / f"decoding_{modality}_top10.pqt"
+def top10_output(modality, *, legacy=False):
+    suffix = "" if legacy else "_auc"
+    return OUT_V2 / f"decoding_{modality}_top10{suffix}.pqt"
 
 
-def selected_scores(s, pools):
+def selected_scores(s, pools, *, wheel=True):
     """Rank units inside each outer training fold, then score its held-out trials."""
     y_binary = (s["stim_left"], (s["choice"] == 1).astype(int), s["reward"])
     scores = {}
@@ -37,8 +38,10 @@ def selected_scores(s, pools):
         x = torch.as_tensor(s["X_task"][:, :, i].T, device=DEVICE, dtype=torch.float64)
         train = torch.as_tensor(outer_train(y), device=DEVICE)
         rank = auc_selectivity(x, y, train).cpu().numpy()
-        scores[name] = decode_binary(x, top_sets(rank, pools), y)
+        scores[name] = decode_binary(x, top_sets(rank, pools), y, roc_auc=True)
 
+    if not wheel:
+        return scores
     f = s["X_wheel"].transpose(1, 2, 0)
     y = s["wheel_y"]
     nt, nb, n = f.shape
@@ -56,9 +59,9 @@ def selected_scores(s, pools):
     return scores
 
 
-def run(modality):
+def run(modality, *, wheel=True):
     exclude = excluded_sessions() if modality == "meso" else set()
-    probes = None if modality == "meso" else pd.read_parquet(probe_output(modality))
+    probes = None if modality == "meso" else pd.read_parquet(probe_output(modality, legacy=not wheel))
     if probes is not None:
         probes = probes.drop_duplicates("pid").set_index("pid")
     rows = []
@@ -80,13 +83,16 @@ def run(modality):
             loc = [dict(pid=path.stem, session=p.session, entry_x=p.entry_x, entry_y=p.entry_y)]
         if not pools:
             continue
-        scores = selected_scores(s, pools)
+        scores = selected_scores(s, pools, wheel=wheel)
         rows.extend(dict(**place, n_neurons=len(pool), n_trials=len(s["choice"]), target=t, top10=v)
                     for t, vals in scores.items() for place, pool, v in zip(loc, pools, vals))
         print(modality, path.stem, len(pools), flush=True)
     if not rows:
         raise ValueError(f"No eligible cached features for {modality}")
-    pd.DataFrame(rows).to_parquet(top10_output(modality), index=False)
+    result = pd.DataFrame(rows)
+    if wheel:
+        result.to_parquet(top10_output(modality), index=False)
+    return result
 
 
 if __name__ == "__main__":

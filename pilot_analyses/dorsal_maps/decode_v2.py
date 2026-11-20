@@ -25,7 +25,7 @@ trials decode at chance) and sessions with task-imaging clock offsets
 (CLOCK_OFFSET) are left out (maps_v2 and wheel_decoding2 filter them).
 
 Usage: python decode_v2.py [meso bwm_pial640 bwm] [--hex 0.5] [--fill-binary-all]
-Writes output/v2/decoding_<modality>[_hex<size>].pqt and
+Writes output/v2/decoding_<modality>_auc[_hex<size>].pqt and
 output/v2/wheel_baseline_<modality>.pqt (per-session bin-only R^2).
 """
 import sys
@@ -57,12 +57,14 @@ TARGETS = BINARY + ("wheel", "wheel_trial")
 OUT_V2 = OUT / "v2"
 
 
-def decode_sets(s, sets, binary=True):
+def decode_sets(s, sets, binary=True, *, wheel=True):
     out = {}
     if binary:
         labels = {"stim": s["stim_left"], "choice": (s["choice"] == 1).astype(int), "feedback": s["reward"]}
         Xt = torch.as_tensor(s["X_task"], device=DEVICE, dtype=torch.float64)
-        out = {t: decode_binary(Xt[:, :, j].T, sets, labels[t]) for j, t in enumerate(BINARY)}
+        out = {t: decode_binary(Xt[:, :, j].T, sets, labels[t], roc_auc=True) for j, t in enumerate(BINARY)}
+    if not wheel:
+        return out
     F = s["X_wheel"].astype(np.float64).transpose(1, 2, 0)
     out["wheel"] = ridge.decode(F, sets, s["wheel_y"], **WHEEL)
     out["wheel_trial"] = ridge.decode(F, sets, s["wheel_y"], target="residual", **WHEEL)
@@ -108,7 +110,7 @@ def excluded_sessions():
     return low | set(CLOCK_OFFSET)
 
 
-def run_session(sid, s, hex_size, binary=True, *, random_only=False):
+def run_session(sid, s, hex_size, binary=True, *, random_only=False, wheel=True):
     if len(s["choice"]) < MIN_TRIALS:
         return pd.DataFrame()
     keys = bin_neurons(s["xyz"], size=hex_size)
@@ -124,7 +126,7 @@ def run_session(sid, s, hex_size, binary=True, *, random_only=False):
         sets.extend(rng.choice(idx, N_PICK, replace=False) for _ in range(N_DRAWS))
     if not bins:
         return pd.DataFrame()
-    sc = decode_sets(s, sets, binary)
+    sc = decode_sets(s, sets, binary, wheel=wheel)
     per = N_DRAWS + int(not random_only)
     rows = []
     for b, (k, n) in enumerate(bins):
@@ -136,8 +138,9 @@ def run_session(sid, s, hex_size, binary=True, *, random_only=False):
     return pd.DataFrame(rows)
 
 
-def out_name(modality, hex_size=HEX_V2):
-    return OUT_V2 / f"decoding_{modality}{'' if hex_size == HEX_V2 else f'_hex{hex_size:g}'}.pqt"
+def out_name(modality, hex_size=HEX_V2, *, legacy=False):
+    metric = '' if legacy else '_auc'
+    return OUT_V2 / f"decoding_{modality}{'' if hex_size == HEX_V2 else f'_hex{hex_size:g}'}{metric}.pqt"
 
 
 def run(modality, hex_size=HEX_V2):
@@ -170,15 +173,12 @@ def fill_binary_all(modality, hex_size=HEX_V2):
     todo = d[miss].session.unique()
     files = session_files(modality)
     for i, sid in enumerate(todo):
-        s = load_session(files[sid])
+        s = apply_coverage(sid, load_session(files[sid]), modality)
         keys = bin_neurons(s["xyz"], size=hex_size)
         rows = d[miss & (d.session == sid)].drop_duplicates("hex")
         sets = [np.flatnonzero(keys == k) for k in rows.hex]
-        labels = {"stim": s["stim_left"], "choice": (s["choice"] == 1).astype(int), "feedback": s["reward"]}
-        Xt = torch.as_tensor(s["X_task"], device=DEVICE, dtype=torch.float64)
-        for j, t in enumerate(BINARY):
-            sc = decode_binary(Xt[:, :, j].T, sets, labels[t])
-            for k, v in zip(rows.hex, sc):
+        for t, scores in decode_sets(s, sets, wheel=False).items():
+            for k, v in zip(rows.hex, scores):
                 d.loc[(d.session == sid) & (d.hex == k) & (d.target == t), "all"] = v
         print(modality, "all-neuron binary", i + 1, len(todo), sid, flush=True)
         if (i + 1) % 10 == 0:
