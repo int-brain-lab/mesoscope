@@ -12,7 +12,7 @@ from matplotlib.ticker import MaxNLocator
 from common import ALPHA, OUT, VARIABLES
 from decode_bwm_depth import (
     LAYERS, MESO_SCORES, MESO_VISP_SCORES, N_DRAWS, N_UNITS, REGION_STEM, SCORES,
-    VISP_LABEL, VISP_SCORES, layer_units, unit_layers, visp_bins,
+    VISP_LABEL, VISP_SCORES, layer_units, unit_layers,
 )
 from decode_v2 import OUT_V2, TARGETS, apply_coverage
 from plotstyle import NATURE_DOUBLE_COL_IN, panel_label, save_with_caption, style_axes
@@ -24,7 +24,7 @@ PANEL_TARGETS = VARIABLES + ("wheel",)
 TITLE = {"stim": "Stimulus side", "choice": "Choice", "feedback": "Feedback",
          "wheel": "Wheel speed"}
 WHEEL_CACHE = OUT_V2 / f"report_v7_{REGION_STEM}_layer_wheel.pqt"
-VISP_WHEEL_CACHE = OUT_V2 / "report_v7_VISp_top3_layer_wheel.pqt"
+VISP_WHEEL_CACHE = OUT_V2 / "report_v7_VISp_layer_wheel.pqt"
 N_BOOTSTRAP = 10_000
 
 
@@ -197,18 +197,39 @@ def load_area(visp):
     return bwm, meso, bwm_t, meso_t
 
 
+def plot_matched_visp(axes, bwm):
+    scores = bwm.set_index(["session", "layer"]).sort_index()
+    complete = scores[list(PANEL_TARGETS)].notna().all(axis=1).groupby("session").sum()
+    matched = scores.loc[scores.index.get_level_values("session").isin(complete[complete.eq(len(LAYERS))].index)]
+    if matched.empty:
+        raise ValueError("No VISp sessions with valid scores in all four layers.")
+    matched.reset_index().to_csv(OUT_V2 / "si_depth_visp_matched.csv", index=False, float_format="%.6f")
+    for i, (sid, frame) in enumerate(matched.groupby("session"), start=1):
+        frame = frame.droplevel("session").reindex(LAYERS)
+        for ax, v in zip(axes, PANEL_TARGETS):
+            ax.plot(CATEGORIES, frame[v], marker=("o", "s", "^")[(i - 1) % 3],
+                    color="teal", ls=("-", "--", ":")[(i - 1) % 3], lw=0.9, ms=3,
+                    label=f"Session {i} ({sid[:8]})")
+    return matched
+
+
 def main():
     animals = pd.read_csv(OUT / "session_subjects.csv").set_index("session").subject
-    fig = plt.figure(figsize=(NATURE_DOUBLE_COL_IN, 3.9), layout="constrained")
-    grid = fig.add_gridspec(4, 4, height_ratios=(0.13, 1, 0.13, 1))
-    for row, title in ((0, "Single-unit tuning"), (2, f"Decoding with {N_UNITS} units")):
+    fig = plt.figure(figsize=(NATURE_DOUBLE_COL_IN, 5.5), layout="constrained")
+    grid = fig.add_gridspec(6, 4, height_ratios=(0.13, 1, 0.13, 1, 0.36, 1))
+    for row, title in ((0, "Single-unit tuning"), (2, f"Decoding with {N_UNITS} units"),
+                       (4, "VISp decoding in sessions with all four layers")):
         heading = fig.add_subplot(grid[row, :])
         heading.set_axis_off()
-        heading.text(0.5, 0.5, title, ha="center", va="center", fontsize=8)
+        heading.text(0.5, 0.83 if row == 4 else 0.5, title, ha="center", va="center", fontsize=8)
+        if row == 4:
+            matched_heading = heading
     a = [fig.add_subplot(grid[1, col]) for col in range(4)]
     b = [fig.add_subplot(grid[3, col], sharex=a[col]) for col in range(4)]
+    c = [fig.add_subplot(grid[5, col], sharex=a[col]) for col in range(4)]
     format_row(a, "abcd")
     format_row(b, "efgh")
+    format_row(c, "ijkl")
     tuning, decoding, tuning_max, decoding_limits = [], [], [], []
     for visp, label, color, offset in (
         (False, "VISa + VISam", "tab:purple", -0.075),
@@ -224,18 +245,24 @@ def main():
         decoding.append(bottom.assign(area=label))
         tuning_max.append(maxima)
         decoding_limits.append(limits)
+        if visp:
+            matched = plot_matched_visp(c, bwm)
+    matched_heading.legend(*c[0].get_legend_handles_labels(), loc="lower center", bbox_to_anchor=(0.5, -0.1),
+                           ncol=3, frameon=False, fontsize=6.5)
     save_summary(tuning, "si_depth_profile.csv")
     summary = save_summary(decoding, "si_depth_decoding.csv")
-    visp_bins().to_csv(OUT_V2 / "si_depth_visp_bins.csv", float_format="%.6f")
     maxima = np.max(tuning_max, axis=0)
     for ax, high in zip(a, [max(maxima[:3])] * 3 + [maxima[3]]):
         ax.set_ylim(0, min(1, 1.12 * high))
-    for i, (axes, chance) in enumerate(((b[:3], 0.5), (b[3:], 0))):
-        low = min(limits[i][0] for limits in decoding_limits)
-        high = max(limits[i][1] for limits in decoding_limits)
+    for i, (axes, variables, chance) in enumerate(((b[:3] + c[:3], VARIABLES, 0.5),
+                                                   (b[3:] + c[3:], ("wheel",), 0))):
+        observed = matched[list(variables)]
+        low = min(observed.min().min(), *(limits[i][0] for limits in decoding_limits))
+        high = max(observed.max().max(), *(limits[i][1] for limits in decoding_limits))
+        padding = 0.07 * (high - low)
         for ax in axes:
             ax.axhline(chance, color="0.5", lw=0.6, ls="--", zorder=0)
-            ax.set_ylim(low, high + 0.1 * (high - low))
+            ax.set_ylim(low - padding if low < chance else chance, high + padding)
             ax.yaxis.set_major_locator(MaxNLocator(nbins=3, steps=[1, 2, 2.5, 5, 10]))
             if low == chance:
                 ax.spines["bottom"].set_visible(False)
@@ -244,6 +271,8 @@ def main():
     a[0].set_ylabel("Fraction of units")
     b[0].set_ylabel("ROC-AUC")
     b[3].set_ylabel("$R^2$")
+    c[0].set_ylabel("ROC-AUC")
+    c[3].set_ylabel("$R^2$")
     fig.supxlabel("Cortical layer", fontsize=7)
 
     stimulus = summary.loc[summary.target.eq("stim")]
@@ -260,11 +289,13 @@ def main():
         "BWM bands and whiskers show the standard error where at least two sessions contribute. "
         f"BWM stimulus-side session counts from L2/3 to L6 were {support}. Dashed lines show chance.",
         "Choice ROC-AUC.", "Feedback ROC-AUC.", "Wheel-speed $R^2$.",
+        f"Stimulus-side ROC-AUC for each of the {matched.index.get_level_values('session').nunique()} BWM VISp "
+        f"sessions with at least {N_UNITS} units in every layer and valid scores across the plotted targets. "
+        "Each point averages the same draws used in the middle row. The y-axis ranges match the middle row.",
+        "Choice ROC-AUC.", "Feedback ROC-AUC.", "Wheel-speed $R^2$.",
     ]
     save_with_caption(fig, OUT_V2 / "si_depth_profile", caps, "v2_depth_profile",
-                      intro="Tuning and decoding by cortical layer for pooled VISa and VISam and for "
-                            "VISp neurons in the three majority-VISp hexagons with highest mean "
-                            "mesoscope stimulus-side ROC-AUC in Figure~2. "
+                      intro="Tuning and decoding by cortical layer for pooled Beryl VISa and VISam and for all of VISp. "
                             "BWM layers use the registered Allen CCF labels and pool L6a with L6b. "
                             "Mesoscope ROIs are assigned to L2/3 (open diamonds). "
                             "Vertical whiskers show 95\\,\\% confidence intervals from resampling mice.")

@@ -101,8 +101,8 @@ python make_bwm_depth.py                  # FEATURE_ROOT/bwm_pial640/<pid>.npz
 python imaging_coverage.py                # trials covered by imaging, per meso session
 python decode_v2.py meso bwm_pial640 bwm     # output/v2/decoding_<modality>_auc.pqt
 python maps_v2.py                         # v2_counts, v2_decoding_n20/_all, v2_tuning, v2_summary
-python decode_bwm_depth.py                # refit 10-unit BWM decoders by registered layer
-python decode_bwm_depth.py --meso-reference  # refit 10-ROI mesoscope decoders
+python decode_bwm_depth.py                # refit five-unit BWM decoders by registered layer
+python decode_bwm_depth.py --meso-reference  # refit five-ROI mesoscope decoders
 python depth_profile.py                   # si_depth_profile: VISa and VISam tuning and decoding
 ```
 
@@ -147,9 +147,9 @@ To regenerate the supplementary depth and insertion histograms from cached
 features, run `python depth_coverage.py` followed by
 `python build_report_v7.py --figure depth_coverage`.
 
-Figure 5 compares pooled Beryl VISa and VISam with VISp neurons in the three
-majority-VISp Figure 2 hexagons with the highest mean stimulus-side ROC-AUC.
-It uses registered Allen CCF layers for BWM and assigns mesoscope ROIs to L2/3. Run
+Figure 5 compares pooled Beryl VISa and VISam with all of VISp. It uses
+registered Allen CCF layers for BWM and assigns mesoscope ROIs to L2/3. The
+bottom row shows the individual BWM VISp sessions with five units in every layer. Run
 `python decode_bwm_depth.py` to refit the BWM decoders from cached features
 and `python decode_bwm_depth.py --meso-reference` to fit the mesoscope
 decoders. Repeat both commands with `--visp` for the VISp area. Then run

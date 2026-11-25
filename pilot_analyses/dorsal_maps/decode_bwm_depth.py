@@ -1,62 +1,35 @@
-"""Refit fixed-size VISa and VISam decoders by cortical layer for Figure 5.
+"""Refit fixed-size VISa, VISam, and VISp decoders by cortical layer for Figure 5.
 
 Run python decode_bwm_depth.py to cache one draw-averaged row per eligible BWM
 session and layer. Add --meso-reference to fit the pooled mesoscope scores.
 """
 import argparse
 import zlib
-from functools import lru_cache
 
 import numpy as np
 import pandas as pd
 from iblatlas.regions import BrainRegions
 
-from common import bin_neurons, hex_center, hex_unkey
-from decode_v2 import MIN_TRIALS, OUT_V2, REPORT_HEX_SIZE, TARGETS, apply_coverage, decode_sets, excluded_sessions
+from decode_v2 import MIN_TRIALS, OUT_V2, TARGETS, apply_coverage, decode_sets, excluded_sessions
 from sessions import load_session, session_files
 
 
-N_UNITS = 10
+N_UNITS = 5
 N_DRAWS = 5
 REGIONS = ("VISa", "VISam")
 REGION_LABEL = " and ".join(REGIONS)
 REGION_STEM = "_".join(REGIONS)
 LAYERS = ("L2/3", "L4", "L5", "L6")
-SCORES = OUT_V2 / f"report_v7_bwm_{REGION_STEM}_layer_scores.pqt"
-MESO_SCORES = OUT_V2 / f"report_v7_meso_{REGION_STEM}_layer_reference.pqt"
-VISP_LABEL = "VISp top 3"
-VISP_SCORES = OUT_V2 / "report_v7_bwm_VISp_top3_layer_scores.pqt"
-MESO_VISP_SCORES = OUT_V2 / "report_v7_meso_VISp_top3_layer_scores.pqt"
+SCORES = OUT_V2 / f"report_v7_bwm_{REGION_STEM}_layer_n{N_UNITS}_scores.pqt"
+MESO_SCORES = OUT_V2 / f"report_v7_meso_{REGION_STEM}_layer_n{N_UNITS}_reference.pqt"
+VISP_LABEL = "VISp"
+VISP_SCORES = OUT_V2 / f"report_v7_bwm_VISp_layer_n{N_UNITS}_scores.pqt"
+MESO_VISP_SCORES = OUT_V2 / f"report_v7_meso_VISp_layer_n{N_UNITS}_scores.pqt"
 ALLEN_LAYERS = {
     f"{region}{suffix}": layer
     for region in (*REGIONS, "VISp")
     for suffix, layer in zip(("2/3", "4", "5", "6a", "6b"), (*LAYERS, "L6"))
 }
-
-
-@lru_cache(maxsize=1)
-def visp_bins():
-    """Rank majority-VISp hexagons using the matched Figure 2 stimulus scores."""
-    from maps_v2 import load_matched_decoding
-
-    scores = load_matched_decoding()[0]["meso"].query("target == 'stim'")
-    regions = BrainRegions()
-    files = session_files("meso")
-    counts = []
-    for sid, rows in scores.groupby("session"):
-        with np.load(files[sid][0]) as z:
-            keys = bin_neurons(z["xyz"], size=REPORT_HEX_SIZE)
-            keep = np.isin(keys, rows.hex)
-            is_visp = regions.id2acronym(z["atlas_id"][keep], mapping="Beryl") == "VISp"
-        counts.append(pd.DataFrame({"hex": keys[keep], "visp": is_visp}))
-    ranked = scores.groupby("hex")["all"].mean().rename("mean_auc").to_frame()
-    ranked["visp_fraction"] = pd.concat(counts).groupby("hex").visp.mean()
-    selected = ranked.query("visp_fraction > 0.5").sort_values("mean_auc", ascending=False,
-                                                               kind="stable").head(3).copy()
-    if len(selected) != 3:
-        raise ValueError("Figure 2 does not contain three majority-VISp bins.")
-    selected["ml_mm"], selected["ap_mm"] = hex_center(*hex_unkey(selected.index), size=REPORT_HEX_SIZE)
-    return selected
 
 
 def unit_layers(atlas_ids, regions, modality, *, visp=False):
@@ -84,9 +57,6 @@ def layer_units(modality, *, visp=False):
                 choice = apply_coverage(sid, {"choice": z["choice"]}, modality)["choice"]
                 n_trials.add(len(choice))
                 layers = unit_layers(z["atlas_id"], regions, modality, visp=visp)
-                if visp:
-                    keys = bin_neurons(z["xyz"], size=REPORT_HEX_SIZE)
-                    layers = layers.where(np.isin(keys, visp_bins().index))
                 keep = np.flatnonzero(layers.notna())
                 if keep.size:
                     session_units.append(pd.DataFrame({
@@ -138,7 +108,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--meso-reference", action="store_true",
                         help="Fit the mesoscope reference using whole-session ROI pools.")
-    parser.add_argument("--visp", action="store_true", help="Use the three Figure 2 VISp hexagons.")
+    parser.add_argument("--visp", action="store_true", help="Use the whole Beryl VISp region.")
     args = parser.parse_args()
     modality, path = ("meso", MESO_SCORES) if args.meso_reference else ("bwm", SCORES)
     if args.visp:
