@@ -147,11 +147,13 @@ To regenerate the supplementary depth and insertion histograms from cached
 features, run `python depth_coverage.py` followed by
 `python build_report_v7.py --figure depth_coverage`.
 
-Figure 5 pools Beryl VISa and VISam across the registered Allen CCF layers
-L2/3, L4, L5, and L6. Mesoscope ROIs from both regions are assigned to L2/3. Run
+Figure 5 compares pooled Beryl VISa and VISam with VISp neurons in the three
+majority-VISp Figure 2 hexagons with the highest mean stimulus-side ROC-AUC.
+It uses registered Allen CCF layers for BWM and assigns mesoscope ROIs to L2/3. Run
 `python decode_bwm_depth.py` to refit the BWM decoders from cached features
 and `python decode_bwm_depth.py --meso-reference` to fit the mesoscope
-decoders. Then run `python depth_profile.py` and
+decoders. Repeat both commands with `--visp` for the VISp area. Then run
+`python depth_profile.py` and
 `python build_report_v7.py --figure depth`.
 
 ## Figure 4 regional analysis
