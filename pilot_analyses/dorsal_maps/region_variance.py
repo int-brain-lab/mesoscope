@@ -228,6 +228,8 @@ def region_permutation(df, n_perm=N_REGION_PERM, seed=0):
         return ((values @ basis) ** 2).sum(axis=-1) / (values ** 2).sum(axis=-1)
 
     observed = partial_r2(residual)
+    if n_perm == 0:
+        return {**result, "region_partial_r2": observed}
     blocks = list(df.groupby("session", sort=False).indices.values())
     generator = np.random.default_rng(seed)
     null = np.empty(n_perm)
