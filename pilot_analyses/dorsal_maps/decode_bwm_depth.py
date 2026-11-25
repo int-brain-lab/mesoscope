@@ -1,4 +1,4 @@
-"""Refit fixed-size VISa, VISam, and VISp decoders by cortical layer for Figure 5.
+"""Refit fixed-size VISa and VISam decoders by cortical layer for Figure 5.
 
 Run python decode_bwm_depth.py to cache one draw-averaged row per eligible BWM
 session and layer. Add --meso-reference to fit the pooled mesoscope scores.
@@ -14,7 +14,7 @@ from decode_v2 import MIN_TRIALS, OUT_V2, TARGETS, apply_coverage, decode_sets, 
 from sessions import load_session, session_files
 
 
-N_UNITS = 5
+N_UNITS = 8
 N_DRAWS = 5
 REGIONS = ("VISa", "VISam")
 REGION_LABEL = " and ".join(REGIONS)
@@ -22,27 +22,23 @@ REGION_STEM = "_".join(REGIONS)
 LAYERS = ("L2/3", "L4", "L5", "L6")
 SCORES = OUT_V2 / f"report_v7_bwm_{REGION_STEM}_layer_n{N_UNITS}_scores.pqt"
 MESO_SCORES = OUT_V2 / f"report_v7_meso_{REGION_STEM}_layer_n{N_UNITS}_reference.pqt"
-VISP_LABEL = "VISp"
-VISP_SCORES = OUT_V2 / f"report_v7_bwm_VISp_layer_n{N_UNITS}_scores.pqt"
-MESO_VISP_SCORES = OUT_V2 / f"report_v7_meso_VISp_layer_n{N_UNITS}_scores.pqt"
 ALLEN_LAYERS = {
     f"{region}{suffix}": layer
-    for region in (*REGIONS, "VISp")
+    for region in REGIONS
     for suffix, layer in zip(("2/3", "4", "5", "6a", "6b"), (*LAYERS, "L6"))
 }
 
 
-def unit_layers(atlas_ids, regions, modality, *, visp=False):
+def unit_layers(atlas_ids, regions, modality):
     """Return measured BWM layers and the assumed mesoscope layer in the selected regions."""
-    region_names = ("VISp",) if visp else REGIONS
-    in_region = np.isin(regions.id2acronym(atlas_ids, mapping="Beryl"), region_names)
+    in_region = np.isin(regions.id2acronym(atlas_ids, mapping="Beryl"), REGIONS)
     if modality == "meso":
         return pd.Series(np.where(in_region, LAYERS[0], None))
     allen = pd.Series(regions.id2acronym(atlas_ids, mapping="Allen"))
     return allen.where(in_region).map(ALLEN_LAYERS)
 
 
-def layer_units(modality, *, visp=False):
+def layer_units(modality):
     """Find units and their layer labels in sessions with enough usable trials."""
     groups = session_files(modality)
     excluded = excluded_sessions() if modality == "meso" else set()
@@ -56,7 +52,7 @@ def layer_units(modality, *, visp=False):
             with np.load(path) as z:
                 choice = apply_coverage(sid, {"choice": z["choice"]}, modality)["choice"]
                 n_trials.add(len(choice))
-                layers = unit_layers(z["atlas_id"], regions, modality, visp=visp)
+                layers = unit_layers(z["atlas_id"], regions, modality)
                 keep = np.flatnonzero(layers.notna())
                 if keep.size:
                     session_units.append(pd.DataFrame({
@@ -68,7 +64,7 @@ def layer_units(modality, *, visp=False):
         if n_trials.pop() >= MIN_TRIALS:
             rows.extend(session_units)
     if not rows:
-        raise ValueError(f"No eligible {modality} features in {VISP_LABEL if visp else REGION_LABEL}.")
+        raise ValueError(f"No eligible {modality} features in {REGION_LABEL}.")
     return groups, pd.concat(rows, ignore_index=True)
 
 
@@ -89,8 +85,8 @@ def fit_session(sid, session, pools):
     })
 
 
-def regional_scores(modality, *, visp=False):
-    groups, units = layer_units(modality, visp=visp)
+def regional_scores(modality):
+    groups, units = layer_units(modality)
     pools = units.groupby(["session", "layer"], sort=False).unit.agg(list)
     eligible = pools[pools.str.len().ge(N_UNITS)].groupby(level="session")
     scores = []
@@ -108,12 +104,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--meso-reference", action="store_true",
                         help="Fit the mesoscope reference using whole-session ROI pools.")
-    parser.add_argument("--visp", action="store_true", help="Use the whole Beryl VISp region.")
     args = parser.parse_args()
     modality, path = ("meso", MESO_SCORES) if args.meso_reference else ("bwm", SCORES)
-    if args.visp:
-        path = MESO_VISP_SCORES if args.meso_reference else VISP_SCORES
-    scores = regional_scores(modality, visp=args.visp)
+    scores = regional_scores(modality)
     OUT_V2.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp.pqt")
     scores.to_parquet(tmp, index=False)
