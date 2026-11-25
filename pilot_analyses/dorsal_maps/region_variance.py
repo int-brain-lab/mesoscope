@@ -28,9 +28,8 @@ regressed out (all-neuron scores grow with the number of neurons):
   sessions count as new ones), each refitted with reml.py; 95% intervals of the region and
   session + animal shares, and the fraction of resamples with session + animal > region.
   Outputs are written to output/v2/region_variance_boot_auc.csv;
-- per mouse (panels c and e): score ~ log N + (1|region) + (1|session) within each mouse with
-  >= MIN_MOUSE_SESSIONS sessions (reml.py); session share minus region share.
-  Panel e shows descriptive partial R? from separate fits to each mouse.
+- per mouse (panel c): score ~ log N + (1|region) + (1|session) within each mouse with
+  >= MIN_MOUSE_SESSIONS sessions (reml.py); region share minus session share.
 - region x mouse: the pooled model with an extra (1|region:animal) term (reml.py), columns
   ra_* in the stats csv (reported in the text, not plotted);
 - panel b: session x region score matrices (log N regressed out) of three example mice with
@@ -69,7 +68,7 @@ PAPER_REFERENCE = Path(__file__).resolve().parent / "reference" / "bwm_published
 PAPER_VAR = {"stim": "stimside", "choice": "choice", "feedback": "feedback", "wheel": "wheel-speed",
              "wheel_trial": "wheel-velocity"}
 COMP = ("region", "animal", "session")
-COMP_COL = {"region": "#8c2981", "animal": "#de4968", "session": "#fe9f6d", "residual": "0.85"}
+COMP_COL = {"region": "#8c2981", "animal": "#de4968", "session": "#fe9f6d", "residual": "#c9ded6"}
 rng = np.random.default_rng(0)
 
 
@@ -204,7 +203,8 @@ def region_permutation(df, n_perm=N_REGION_PERM, seed=0):
     """Partial R? for Beryl region after session effects and log neuron count."""
     df = df.loc[df.groupby("session").session.transform("size") >= 2]
     df = df.sort_values(["session", "region"]).reset_index(drop=True)
-    result = dict(region_partial_r2=np.nan, p_region=np.nan, n_region=len(df),
+    result = dict(region_partial_r2=np.nan, region_null_lo=np.nan, region_null_hi=np.nan,
+                  p_region=np.nan, n_region=len(df),
                   region_sessions=df.session.nunique(), region_mice=df.animal.nunique(),
                   region_labels=df.region.nunique(), region_permutations=n_perm)
     if result["region_labels"] < 2:
@@ -228,18 +228,18 @@ def region_permutation(df, n_perm=N_REGION_PERM, seed=0):
         return ((values @ basis) ** 2).sum(axis=-1) / (values ** 2).sum(axis=-1)
 
     observed = partial_r2(residual)
-    if n_perm == 0:
-        return {**result, "region_partial_r2": observed}
     blocks = list(df.groupby("session", sort=False).indices.values())
     generator = np.random.default_rng(seed)
-    exceedances = 0
+    null = np.empty(n_perm)
     for start in range(0, n_perm, 256):
         permuted = permute_residuals(residual, blocks, generator, min(256, n_perm - start))
         # Adding back the reduced-model fit and residualizing the shuffled response
         # is equivalent to removing the log-N projection from the shuffled residuals.
         permuted -= np.outer(permuted @ log_n, log_n)
-        exceedances += np.count_nonzero(partial_r2(permuted) >= observed - 1e-12)
-    return {**result, "region_partial_r2": observed, "p_region": (1 + exceedances) / (1 + n_perm)}
+        null[start:start + len(permuted)] = partial_r2(permuted)
+    lo, hi = np.quantile(null, [0.025, 0.975])
+    return {**result, "region_partial_r2": observed, "region_null_lo": lo, "region_null_hi": hi,
+            "p_region": (1 + np.count_nonzero(null >= observed - 1e-12)) / (1 + n_perm)}
 
 
 def adjust_region_pvalues(scores):
@@ -299,17 +299,6 @@ def per_mouse(d):
             rows.append(dict(target=t, animal=a, n=len(g), sessions=g.session.nunique(),
                              frac_region=m.get("frac_region", 0), frac_session=m.get("frac_session", 0)))
     return pd.DataFrame(rows)
-
-
-def add_mouse_region_effects(d, pm):
-    """Add descriptive effect sizes for the mice included in panel c."""
-    mouse_effects = [
-        dict(animal=animal, target=target, **region_permutation(rows, n_perm=0))
-        for (animal, target), rows in d["meso"].groupby(["animal", "target"])
-    ]
-    effects = pd.DataFrame(mouse_effects)[["animal", "target", "region_partial_r2", "region_sessions"]]
-    effects.loc[effects.region_sessions < MIN_MOUSE_SESSIONS, "region_partial_r2"] = np.nan
-    return pm.merge(effects, on=["animal", "target"], how="left", validate="one_to_one")
 
 
 def analyse(d):
@@ -429,7 +418,13 @@ def figure(d, shared, st, pm):
                 ax.text(-0.45, 1.12, "a", transform=ax.transAxes, fontsize=8, fontweight="bold")
 
     mice, kinds = example_mice(d, pm)
-    examples = dict(zip(mice, (("o", "#8456a1"), ("s", "#3d719f"), ("^", "#b95b18"))))
+    symbols = dict(zip(mice, (("o", "#8456a1"), ("s", "#3d719f"), ("^", "#b95b18"))))
+    other_mice = sorted(set(pm.animal) - set(mice))
+    markers = ("D", "v", "P", "X", "*", "h", "<", ">", "p", "8", "d")
+    colors = ("#22734c", "#ad3159", "#00818f", "#8f6131", "#a3780a", "#394b9b")
+    for i, mouse in enumerate(other_mice):
+        marker = markers[i] if i < len(markers) else (i - len(markers) + 6, 0, 0)
+        symbols[mouse] = (marker, colors[i % len(colors)])
     target_labels = [short(t) for t in TARGETS]
     x0 = np.arange(len(TARGETS))
     target_x = dict(zip(TARGETS, x0))
@@ -438,23 +433,20 @@ def figure(d, shared, st, pm):
     stats_row = gs[nr + 3, :].subgridspec(1, 3, wspace=0.52)
     ax_c, ax_d, ax_e = [fig.add_subplot(stats_row[0, i]) for i in range(3)]
 
-    def mouse_points(ax, values):
-        other = ~values.animal.isin(examples)
-        x = values.target.map(target_x) + values.animal.map(offsets)
-        ax.scatter(x[other], values.effect[other], s=7, color="0.64", linewidths=0, zorder=2)
-        for mouse, (marker, color) in examples.items():
-            idx = values.animal == mouse
-            ax.scatter(x[idx], values.effect[idx], s=18, marker=marker, color=color,
-                       edgecolors="white", linewidths=0.3, zorder=4)
-
-    # c: separate estimates for each mouse, linked to the heatmaps in b.
+    # c: one labeled marker per mouse, linked to the examples in b.
     ax_c.axhline(0, color="0.4", lw=0.6, zorder=0)
-    mouse_points(ax_c, pm.assign(effect=pm.frac_session - pm.frac_region))
+    for mouse in sorted(symbols):
+        rows = pm.loc[pm.animal == mouse]
+        marker, color = symbols[mouse]
+        ax_c.scatter(rows.target.map(target_x) + offsets[mouse], rows.frac_region - rows.frac_session,
+                     s=18, marker=marker, color=color, edgecolors="white", linewidths=0.3,
+                     label=mouse, zorder=4 if mouse in mice else 2)
     ax_c.set_ylim(-1.21, 1.21)
-    ax_c.set_title("Within each mouse", fontsize=6)
-    ax_c.text(0.02, 0.95, "More session variance", transform=ax_c.transAxes, fontsize=4.5, va="top")
-    ax_c.text(0.02, 0.05, "More region variance", transform=ax_c.transAxes, fontsize=4.5, va="bottom")
-    ax_c.set_ylabel("session $-$ region share")
+    ax_c.text(0.02, 0.95, "More region variance", transform=ax_c.transAxes, fontsize=4.5, va="top")
+    ax_c.text(0.02, 0.05, "More session variance", transform=ax_c.transAxes, fontsize=4.5, va="bottom")
+    ax_c.set_ylabel("region $-$ session share")
+    ax_c.legend(frameon=False, ncol=4, fontsize=4.2, loc="lower center", bbox_to_anchor=(0.5, 1.01),
+                columnspacing=0.55, handletextpad=0.15, handlelength=0.9, borderaxespad=0.1)
 
     # d: fractions of total variance in the pooled mixed model.
     bottom = np.zeros(len(TARGETS))
@@ -469,12 +461,13 @@ def figure(d, shared, st, pm):
     ax_d.legend(frameon=False, ncol=2, fontsize=4.5, loc="lower center", bbox_to_anchor=(0.5, 1.01))
 
     # e: region effect after removing session and log neuron count.
-    mouse_points(ax_e, pm.assign(effect=pm.region_partial_r2))
+    ax_e.bar(x0, stats.region_null_hi - stats.region_null_lo, width=0.68,
+             bottom=stats.region_null_lo, color="0.75", linewidth=0, label="95% null")
     ax_e.scatter(x0, stats.region_partial_r2, marker="D", s=22, color="black",
-                 edgecolors="white", linewidths=0.4, zorder=5, label="Pooled")
+                 edgecolors="white", linewidths=0.4, zorder=5, label="Observed")
     ax_e.set_title(f"Region after accounting for\nsession and neuron count\nOmnibus $p$ = {stats.p_region_omnibus.iloc[0]:.3g}", fontsize=6)
-    ax_e.legend(frameon=False, fontsize=4.5, loc="upper left")
-    ax_e.set_ylim(0, 1)
+    ax_e.legend(frameon=False, fontsize=4.5, loc="upper left", ncol=2, columnspacing=0.8)
+    ax_e.set_ylim(0, min(1, 1.28 * max(stats.region_partial_r2.max(), stats.region_null_hi.max())))
     ax_e.set_ylabel("partial $R^2$")
     for label, axis in zip("cde", (ax_c, ax_d, ax_e)):
         axis.set_xlim(-0.5, len(TARGETS) - 0.5)
@@ -504,9 +497,9 @@ def figure(d, shared, st, pm):
             for sp in ax.spines.values():
                 sp.set_visible(False)
             dv = pm[(pm.animal == a) & (pm.target == t)]
-            dv = (dv.frac_session - dv.frac_region).iloc[0]
-            ax.set_title(f"{short(t)}\n{a} ({kind})\nsession $-$ region {dv:+.2f}", fontsize=4.5, pad=2)
-            marker, color = examples[a]
+            dv = (dv.frac_region - dv.frac_session).iloc[0]
+            ax.set_title(f"{short(t)}\n{a} ({kind})\nregion $-$ session {dv:+.2f}", fontsize=4.5, pad=2)
+            marker, color = symbols[a]
             ax.scatter(0.02, 1.166, transform=ax.transAxes, marker=marker, color=color, s=16,
                        linewidths=0, clip_on=False)
             if g == 0 and j == 0:
@@ -527,8 +520,8 @@ def example_mice(d, pm):
     big = m.groupby("animal").agg(ses=("session", "nunique"), reg=("region", "nunique"))
     big = big[(big.ses >= 10) & (big.reg >= 7)].index
     q = pm[pm.target.isin(HEAT_TARGETS) & pm.animal.isin(big)]
-    q = (q.frac_session - q.frac_region).groupby(q.animal).mean()
-    return [q.idxmin(), (q - q.median()).abs().idxmin(), q.idxmax()], ["region-dominated", "balanced",
+    q = (q.frac_region - q.frac_session).groupby(q.animal).mean()
+    return [q.idxmax(), (q - q.median()).abs().idxmin(), q.idxmin()], ["region-dominated", "balanced",
                                                                        "session-dominated"]
 
 
@@ -549,16 +542,16 @@ def caption(d, shared, st, pm):
         "with valid scores in every displayed session. Among equally small sets of omissions, "
         "the display keeps more regions. Horizontal stripes show session effects "
         "and vertical stripes show region effects.",
-        f"Session minus region share from separate mixed-model fits to each mouse "
+        f"Region minus session share from separate mixed-model fits to each mouse "
         f"({pm.animal.nunique()} mice with at least {MIN_MOUSE_SESSIONS} sessions). "
-        "Positive values indicate more session variance. Coloured symbols identify the example mice in "
-        r"\textbf{b} and \textbf{e}.",
+        "Positive values indicate more region variance. Each mouse has a distinct marker, with the same "
+        r"markers used for the examples in \textbf{b}.",
         "Shares of total variance from the pooled mesoscope mixed model. Labels give the percentage "
         "attributed to region.",
         "Fraction of the remaining variance explained by region (partial $R^2$) after accounting for session "
-        "and log neuron count. Circles, squares and triangles mark the example mice, and grey dots mark the "
-        "other eligible mice. Black diamonds give the pooled effects. Mouse-level points are descriptive "
-        "estimates. Inference uses the pooled within-session permutation test across five targets "
+        "and log neuron count. Black diamonds show the observed pooled effects. Grey bands span the "
+        "2.5th to 97.5th percentiles of 9,999 within-session permutations for each target. "
+        "The overall test combines evidence across the five targets "
         f"(omnibus $p={st.p_region_omnibus.iloc[0]:.3g}$).",
     ]
     return intro, caps
@@ -611,7 +604,7 @@ def main():
     d, shared = load()
     st = analyse(d).merge(bootstrap(d), on="target", validate="one_to_one")
     st.to_csv(OUT_V2 / "region_variance_stats.csv", index=False)
-    pm = add_mouse_region_effects(d, per_mouse(d))
+    pm = per_mouse(d)
     pm.to_csv(OUT_V2 / "region_variance_per_mouse.csv", index=False)
     render(d, shared, st, pm)
     print(st[["target", "region_partial_r2", "p_region", "p_region_holm", "p_region_omnibus",
