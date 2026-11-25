@@ -380,7 +380,7 @@ def plot_region_scores(ax, df, shared, t, rng):
     ax.axhline(CHANCE[t], color="0.5", lw=0.5, ls="--", zorder=1)
 
 
-def figure(d, shared, st, pm):
+def figure(d, shared, st, pm, example_tests):
     nr = len(ROWS)
     fig = plt.figure(figsize=(NATURE_DOUBLE_COL_IN, 9.4))
     gs = fig.add_gridspec(nr + 4, 5, height_ratios=[1] * nr + [0.42, 1.25, 0.45, 0.95], hspace=0.28,
@@ -421,17 +421,20 @@ def figure(d, shared, st, pm):
     symbols = dict(zip(mice, (("o", "#8456a1"), ("s", "#3d719f"), ("^", "#b95b18"))))
     other_mice = sorted(set(pm.animal) - set(mice))
     markers = ("D", "v", "P", "X", "*", "h", "<", ">", "p", "8", "d")
-    colors = ("#22734c", "#ad3159", "#00818f", "#8f6131", "#a3780a", "#394b9b")
     for i, mouse in enumerate(other_mice):
         marker = markers[i] if i < len(markers) else (i - len(markers) + 6, 0, 0)
-        symbols[mouse] = (marker, colors[i % len(colors)])
+        symbols[mouse] = (marker, "none")
     target_labels = [short(t) for t in TARGETS]
     x0 = np.arange(len(TARGETS))
     target_x = dict(zip(TARGETS, x0))
     offsets = dict(zip(sorted(pm.animal.unique()), np.linspace(-0.22, 0.22, pm.animal.nunique())))
     stats = st.set_index("target").loc[list(TARGETS)]
-    stats_row = gs[nr + 3, :].subgridspec(1, 3, wspace=0.52)
-    ax_c, ax_d, ax_e = [fig.add_subplot(stats_row[0, i]) for i in range(3)]
+    stats_row = gs[nr + 3, :].subgridspec(1, 3, width_ratios=[1.05, 0.83, 1.65], wspace=0.4)
+    ax_c = fig.add_subplot(stats_row[0, 0])
+    ax_d = fig.add_subplot(stats_row[0, 1])
+    tests = stats_row[0, 2].subgridspec(1, 2, width_ratios=[0.77, 1], wspace=0.1)
+    ax_e = fig.add_subplot(tests[0, 0])
+    ax_examples = fig.add_subplot(tests[0, 1], sharey=ax_e)
 
     # c: one labeled marker per mouse, linked to the examples in b.
     ax_c.axhline(0, color="0.4", lw=0.6, zorder=0)
@@ -439,8 +442,9 @@ def figure(d, shared, st, pm):
         rows = pm.loc[pm.animal == mouse]
         marker, color = symbols[mouse]
         ax_c.scatter(rows.target.map(target_x) + offsets[mouse], rows.frac_region - rows.frac_session,
-                     s=18, marker=marker, color=color, edgecolors="white", linewidths=0.3,
-                     label=mouse, zorder=4 if mouse in mice else 2)
+                     s=18, marker=marker, facecolors=color, edgecolors="white" if mouse in mice else "black",
+                     linewidths=0.3 if mouse in mice else 0.55, label=mouse,
+                     zorder=4 if mouse in mice else 2)
     ax_c.set_ylim(-1.21, 1.21)
     ax_c.text(0.02, 0.95, "More region variance", transform=ax_c.transAxes, fontsize=4.5, va="top")
     ax_c.text(0.02, 0.05, "More session variance", transform=ax_c.transAxes, fontsize=4.5, va="bottom")
@@ -461,18 +465,33 @@ def figure(d, shared, st, pm):
     ax_d.legend(frameon=False, ncol=2, fontsize=4.5, loc="lower center", bbox_to_anchor=(0.5, 1.01))
 
     # e: region effect after removing session and log neuron count.
-    ax_e.bar(x0, stats.region_null_hi - stats.region_null_lo, width=0.68,
-             bottom=stats.region_null_lo, color="0.75", linewidth=0, label="95% null")
-    ax_e.scatter(x0, stats.region_partial_r2, marker="D", s=22, color="black",
+    def null_band(axis, x, rows, width, label=None):
+        axis.bar(x, rows.region_null_hi - rows.region_null_lo, width=width,
+                 bottom=rows.region_null_lo, color="0.75", linewidth=0, label=label)
+
+    null_band(ax_e, x0, stats, 0.65, "95% null")
+    ax_e.scatter(x0, stats.region_partial_r2, marker="D", s=16, color="black",
                  edgecolors="white", linewidths=0.4, zorder=5, label="Observed")
-    ax_e.set_title(f"Region after accounting for\nsession and neuron count\nOmnibus $p$ = {stats.p_region_omnibus.iloc[0]:.3g}", fontsize=6)
-    ax_e.legend(frameon=False, fontsize=4.5, loc="upper left", ncol=2, columnspacing=0.8)
-    ax_e.set_ylim(0, min(1, 1.28 * max(stats.region_partial_r2.max(), stats.region_null_hi.max())))
-    ax_e.set_ylabel("partial $R^2$")
-    for label, axis in zip("cde", (ax_c, ax_d, ax_e)):
+    ax_e.set_title(f"Pooled\nOmnibus $p$ = {stats.p_region_omnibus.iloc[0]:.3g}", fontsize=6)
+    ax_e.legend(frameon=False, fontsize=4.2, loc="upper left", borderaxespad=0.25)
+    ax_e.set_ylim(0, 1)
+    ax_e.set_ylabel("region partial $R^2$")
+
+    for mouse, offset in zip(mice, (-0.26, 0, 0.26)):
+        rows = example_tests.loc[example_tests.animal == mouse].set_index("target").reindex(TARGETS)
+        marker, color = symbols[mouse]
+        x = x0 + offset
+        null_band(ax_examples, x, rows, 0.24)
+        ax_examples.scatter(x, rows.region_partial_r2, marker=marker, s=14, color=color,
+                            edgecolors="white", linewidths=0.3, zorder=5)
+    ax_examples.set_title("Example mice\nSeparate fits", fontsize=6)
+    ax_examples.tick_params(axis="y", left=False, labelleft=False)
+    ax_examples.spines["left"].set_visible(False)
+    for axis in (ax_c, ax_d, ax_e, ax_examples):
         axis.set_xlim(-0.5, len(TARGETS) - 0.5)
-        axis.set_xticks(x0, target_labels, rotation=35, ha="right", fontsize=4.5)
+        axis.set_xticks(x0, target_labels, rotation=45, ha="right", fontsize=4.2)
         style_axes(axis, categorical_x=True)
+    for label, axis in zip("cde", (ax_c, ax_d, ax_e)):
         axis.text(-0.28, 1.12, label, transform=axis.transAxes, fontsize=8, fontweight="bold")
 
     # b: session x region matrices of three example mice
@@ -525,6 +544,17 @@ def example_mice(d, pm):
                                                                        "session-dominated"]
 
 
+def example_region_tests(d, pm):
+    """Exploratory blocked region tests for the examples selected for panel b."""
+    mice, _ = example_mice(d, pm)
+    meso = d["meso"]
+    return pd.DataFrame([
+        dict(animal=mouse, target=target,
+             **region_permutation(meso.loc[(meso.animal == mouse) & (meso.target == target)]))
+        for mouse in mice for target in TARGETS
+    ])
+
+
 def caption(d, shared, st, pm):
     n = {k: (d[k].unit.nunique(), d[k].session.nunique(), d[k].animal.nunique()) for k in ROWS}
     intro = ("\\textbf{Variance of decoding across regions and sessions (all neurons).} "
@@ -544,15 +574,16 @@ def caption(d, shared, st, pm):
         "and vertical stripes show region effects.",
         f"Region minus session share from separate mixed-model fits to each mouse "
         f"({pm.animal.nunique()} mice with at least {MIN_MOUSE_SESSIONS} sessions). "
-        "Positive values indicate more region variance. Each mouse has a distinct marker, with the same "
-        r"markers used for the examples in \textbf{b}.",
+        "Positive values indicate more region variance. The three example mice use the same coloured "
+        r"markers as in \textbf{b}. The remaining mice use open black markers.",
         "Shares of total variance from the pooled mesoscope mixed model. Labels give the percentage "
         "attributed to region.",
         "Fraction of the remaining variance explained by region (partial $R^2$) after accounting for session "
-        "and log neuron count. Black diamonds show the observed pooled effects. Grey bands span the "
-        "2.5th to 97.5th percentiles of 9,999 within-session permutations for each target. "
-        "The overall test combines evidence across the five targets "
-        f"(omnibus $p={st.p_region_omnibus.iloc[0]:.3g}$).",
+        "and log neuron count. Black diamonds show the pooled effects (left). Coloured points show separate "
+        r"fits for the three mice in \textbf{b} (right). "
+        "Grey bands span the central 95\\% of the 9,999 within-session permutations for each fit. "
+        f"The pooled omnibus $p$-value across five targets is {st.p_region_omnibus.iloc[0]:.3g}. "
+        "The individual tests are exploratory because the mice were selected as examples.",
     ]
     return intro, caps
 
@@ -586,7 +617,8 @@ def render(d, shared, st, pm):
     import shutil
     import subprocess
 
-    fig = figure(d, shared, st, pm)
+    examples = example_region_tests(d, pm)
+    fig = figure(d, shared, st, pm, examples)
     intro, caps = caption(d, shared, st, pm)
     archive = d["bwm_paper"].empty
     if archive:
@@ -598,6 +630,7 @@ def render(d, shared, st, pm):
         if shutil.which("tectonic"):
             subprocess.run(["tectonic", tex.name], cwd=tex.parent, check=True)
     plt.close(fig)
+    examples.to_csv(OUT_V2 / "region_variance_example_tests.csv", index=False)
 
 
 def main():
