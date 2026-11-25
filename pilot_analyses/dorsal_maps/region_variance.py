@@ -419,11 +419,6 @@ def figure(d, shared, st, pm, example_tests):
 
     mice, kinds = example_mice(d, pm)
     symbols = dict(zip(mice, (("o", "#8456a1"), ("s", "#3d719f"), ("^", "#b95b18"))))
-    other_mice = sorted(set(pm.animal) - set(mice))
-    markers = ("D", "v", "P", "X", "*", "h", "<", ">", "p", "8", "d")
-    for i, mouse in enumerate(other_mice):
-        marker = markers[i] if i < len(markers) else (i - len(markers) + 6, 0, 0)
-        symbols[mouse] = (marker, "none")
     target_labels = [short(t) for t in TARGETS]
     x0 = np.arange(len(TARGETS))
     target_x = dict(zip(TARGETS, x0))
@@ -438,13 +433,15 @@ def figure(d, shared, st, pm, example_tests):
 
     # c: one labeled marker per mouse, linked to the examples in b.
     ax_c.axhline(0, color="0.4", lw=0.6, zorder=0)
-    for mouse in sorted(symbols):
+    for mouse, (marker, color) in symbols.items():
         rows = pm.loc[pm.animal == mouse]
-        marker, color = symbols[mouse]
         ax_c.scatter(rows.target.map(target_x) + offsets[mouse], rows.frac_region - rows.frac_session,
-                     s=18, marker=marker, facecolors=color, edgecolors="white" if mouse in mice else "black",
-                     linewidths=0.3 if mouse in mice else 0.55, label=mouse,
-                     zorder=4 if mouse in mice else 2)
+                     s=18, marker=marker, color=color, edgecolors="white", linewidths=0.3,
+                     label=mouse, zorder=4)
+    other = pm.loc[~pm.animal.isin(symbols)]
+    ax_c.scatter(other.target.map(target_x) + other.animal.map(offsets), other.frac_region - other.frac_session,
+                 s=10, marker="o", color="0.3", linewidths=0, label="Other mice", zorder=2)
+    ax_c.set_title("Within each mouse", fontsize=6, pad=14)
     ax_c.set_ylim(-1.21, 1.21)
     ax_c.text(0.02, 0.95, "More region variance", transform=ax_c.transAxes, fontsize=4.5, va="top")
     ax_c.text(0.02, 0.05, "More session variance", transform=ax_c.transAxes, fontsize=4.5, va="bottom")
@@ -575,7 +572,7 @@ def caption(d, shared, st, pm):
         f"Region minus session share from separate mixed-model fits to each mouse "
         f"({pm.animal.nunique()} mice with at least {MIN_MOUSE_SESSIONS} sessions). "
         "Positive values indicate more region variance. The three example mice use the same coloured "
-        r"markers as in \textbf{b}. The remaining mice use open black markers.",
+        r"markers as in \textbf{b}. The remaining mice are shown as filled dark grey circles.",
         "Shares of total variance from the pooled mesoscope mixed model. Labels give the percentage "
         "attributed to region.",
         "Fraction of the remaining variance explained by region (partial $R^2$) after accounting for session "
