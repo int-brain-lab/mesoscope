@@ -31,6 +31,7 @@ FIGURES = {  # key in main.tex: output stem (path without suffix)
     "region_variance": OUT / "v2" / "region_variance",
     "summary": OUT / "v2" / "v2_summary",
     "meso_size_scaling": OUT / "v2" / "meso_size_scaling",
+    "meso_fixed_200_regions": OUT / "v2" / "meso_fixed_200_regions",
     "depth": OUT / "v2" / "si_depth_profile",
     "depth_coverage": OUT / "v2" / "si_depth_coverage",
     "rasters": WD2 / "fig1_rasters",

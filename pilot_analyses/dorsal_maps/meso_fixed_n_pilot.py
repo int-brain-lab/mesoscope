@@ -22,7 +22,7 @@ def matched_pairs():
     return pairs.loc[pairs.n_neurons.ge(max(SIZES))].sort_values(["session", "region"])
 
 
-def decode_session(session_id, features, pairs, brain_regions):
+def sample_session(session_id, features, pairs, brain_regions):
     session = apply_coverage(session_id, load_session(features), "meso")
     region = brain_regions.id2acronym(session["atlas_id"], mapping="Beryl")
     pools = []
@@ -33,6 +33,11 @@ def decode_session(session_id, features, pairs, brain_regions):
         rng = np.random.default_rng(zlib.crc32(f"{session_id}/{row.region}".encode()))
         pools.append(rng.permutation(indices)[:max(SIZES)])
 
+    return session, pools
+
+
+def decode_session(session_id, features, pairs, brain_regions):
+    session, pools = sample_session(session_id, features, pairs, brain_regions)
     blocks = []
     columns = ["session", "animal", "region"]
     for size in SIZES:

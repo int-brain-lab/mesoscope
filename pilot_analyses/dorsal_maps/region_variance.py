@@ -131,15 +131,16 @@ def residualise(df):
     return df["all"].values - X @ beta
 
 
-def mixed(df, comps=COMP):
+def mixed(df, comps=COMP, *, adjust_log_n=True):
     import statsmodels.formula.api as smf
     warnings.filterwarnings("ignore")
     df = df.assign(g=1)
     comps = [c for c in comps if df[c].nunique() > 1]
+    formula = "all ~ logN" if adjust_log_n else "all ~ 1"
 
     def fit(cs):
         vc = {c: f"0 + C({c})" for c in cs}
-        return smf.mixedlm("all ~ logN", df, groups="g", re_formula="0", vc_formula=vc).fit(reml=True, method="lbfgs")
+        return smf.mixedlm(formula, df, groups="g", re_formula="0", vc_formula=vc).fit(reml=True, method="lbfgs")
 
     full = fit(comps)
     var = dict(zip(full.model.exog_vc.names, full.vcomp))
@@ -149,7 +150,8 @@ def mixed(df, comps=COMP):
     for c in comps:
         lr = max(2 * (full.llf - fit([x for x in comps if x != c]).llf), 0)
         out[f"p_lrt_{c}"] = 0.5 * stats.chi2.sf(lr, 1)
-    out["slope_logN"] = full.fe_params["logN"]
+    if adjust_log_n:
+        out["slope_logN"] = full.fe_params["logN"]
     return out
 
 
