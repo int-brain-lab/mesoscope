@@ -201,12 +201,14 @@ def plot_matched_sessions(axes, bwm):
     if matched.empty:
         raise ValueError("No BWM sessions with valid scores in all four layers.")
     matched.reset_index().to_csv(OUT_V2 / "si_depth_matched_sessions.csv", index=False, float_format="%.6f")
-    for i, (sid, frame) in enumerate(matched.groupby("session"), start=1):
+    groups = matched.groupby("session")
+    for i, (sid, frame) in enumerate(groups, start=1):
         frame = frame.droplevel("session").reindex(LAYERS)
+        label = f"Session {i} ({sid[:8]})" if len(groups) > 1 else f"Session {sid[:8]}"
         for ax, v in zip(axes, PANEL_TARGETS):
             ax.plot(CATEGORIES, frame[v], marker=("o", "s", "^")[(i - 1) % 3],
                     color=BWM_COLOR, ls=("-", "--", ":")[(i - 1) % 3], lw=0.9, ms=3,
-                    label=f"Session {i} ({sid[:8]})")
+                    label=label)
     return matched
 
 
@@ -262,6 +264,8 @@ def main():
 
     stimulus = summary.loc[summary.target.eq("stim")]
     support = ", ".join(map(str, stimulus.n_sessions))
+    n_matched = matched.index.get_level_values("session").nunique()
+    matched_subject = "the BWM session" if n_matched == 1 else f"each of the {n_matched} BWM sessions"
     caps = [
         f"Fraction of BWM units tuned to stimulus side ($p<{ALPHA}$). "
         "Bands show 95\\,\\% Wilson intervals.",
@@ -273,8 +277,8 @@ def main():
         "BWM bands and whiskers show the standard error where at least two sessions contribute. "
         f"BWM stimulus-side session counts from L2/3 to L6 were {support}. Dashed lines show chance.",
         "Choice ROC-AUC.", "Feedback ROC-AUC.", "Wheel-speed $R^2$.",
-        f"Stimulus-side ROC-AUC for each of the {matched.index.get_level_values('session').nunique()} BWM "
-        f"sessions with at least {N_UNITS} units in every layer and valid scores across the plotted targets. "
+        f"Stimulus-side ROC-AUC for {matched_subject} with at least {N_UNITS} units in every layer "
+        "and valid scores across the plotted targets. "
         "Each point averages the same draws used in the middle row. The y-axis ranges match the middle row.",
         "Choice ROC-AUC.", "Feedback ROC-AUC.", "Wheel-speed $R^2$.",
     ]

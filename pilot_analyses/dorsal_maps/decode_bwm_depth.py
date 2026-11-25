@@ -14,7 +14,7 @@ from decode_v2 import MIN_TRIALS, OUT_V2, TARGETS, apply_coverage, decode_sets, 
 from sessions import load_session, session_files
 
 
-N_UNITS = 8
+N_UNITS = 10
 N_DRAWS = 5
 REGIONS = ("VISa", "VISam")
 REGION_LABEL = " and ".join(REGIONS)
