@@ -101,9 +101,9 @@ python make_bwm_depth.py                  # FEATURE_ROOT/bwm_pial640/<pid>.npz
 python imaging_coverage.py                # trials covered by imaging, per meso session
 python decode_v2.py meso bwm_pial640 bwm     # output/v2/decoding_<modality>_auc.pqt
 python maps_v2.py                         # v2_counts, v2_decoding_n20/_all, v2_tuning, v2_summary
-python decode_bwm_depth.py                # refit 10-unit BWM decoders by registered VISa layer
-python decode_bwm_depth.py --meso-reference  # refit 10-ROI mesoscope VISa decoders
-python depth_profile.py                   # si_depth_profile: VISa tuning and decoding by layer
+python decode_bwm_depth.py                # refit 10-unit BWM decoders by registered layer
+python decode_bwm_depth.py --meso-reference  # refit 10-ROI mesoscope decoders
+python depth_profile.py                   # si_depth_profile: VISa and VISam tuning and decoding
 ```
 
 ## v7 decoding figures
@@ -147,8 +147,8 @@ To regenerate the supplementary depth and insertion histograms from cached
 features, run `python depth_coverage.py` followed by
 `python build_report_v7.py --figure depth_coverage`.
 
-Figure 5 compares Beryl VISa across the registered Allen CCF layers L2/3, L4,
-L5, and L6. Mesoscope VISa ROIs are assigned to L2/3. Run
+Figure 5 pools Beryl VISa and VISam across the registered Allen CCF layers
+L2/3, L4, L5, and L6. Mesoscope ROIs from both regions are assigned to L2/3. Run
 `python decode_bwm_depth.py` to refit the BWM decoders from cached features
 and `python decode_bwm_depth.py --meso-reference` to fit the mesoscope
 decoders. Then run `python depth_profile.py` and

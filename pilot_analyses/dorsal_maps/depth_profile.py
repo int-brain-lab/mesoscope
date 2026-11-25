@@ -1,4 +1,4 @@
-"""Plot VISa tuning and fixed-size decoding by registered cortical layer.
+"""Plot VISa and VISam tuning and fixed-size decoding by registered cortical layer.
 
 Run decode_bwm_depth.py with and without --meso-reference to generate the
 decoder caches, then run python depth_profile.py to regenerate Figure 5.
@@ -10,7 +10,9 @@ from iblatlas.regions import BrainRegions
 from matplotlib.ticker import MaxNLocator
 
 from common import ALPHA, OUT, VARIABLES
-from decode_bwm_depth import LAYERS, MESO_SCORES, N_DRAWS, N_UNITS, REGION, SCORES, layer_units, unit_layers
+from decode_bwm_depth import (
+    LAYERS, MESO_SCORES, N_DRAWS, N_UNITS, REGION_LABEL, REGION_STEM, SCORES, layer_units, unit_layers,
+)
 from decode_v2 import OUT_V2, TARGETS, apply_coverage
 from plotstyle import NATURE_DOUBLE_COL_IN, panel_label, save_with_caption, style_axes
 from sessions import load_session
@@ -20,7 +22,7 @@ CATEGORIES = np.arange(len(LAYERS))
 PANEL_TARGETS = VARIABLES + ("wheel",)
 TITLE = {"stim": "Stimulus side", "choice": "Choice", "feedback": "Feedback",
          "wheel": "Wheel speed"}
-WHEEL_CACHE = OUT_V2 / "report_v7_VISa_layer_wheel.pqt"
+WHEEL_CACHE = OUT_V2 / f"report_v7_{REGION_STEM}_layer_wheel.pqt"
 N_BOOTSTRAP = 10_000
 
 
@@ -68,7 +70,7 @@ def tuning_flags(modality, units, wheel):
     tun["unit"] = tun.groupby("session", sort=False).cumcount()
     tun = units.merge(tun, on=["session", "unit"], how="left", validate="one_to_one")
     if tun.atlas_id.isna().any() or not unit_layers(tun.atlas_id.to_numpy(), BrainRegions(), modality).eq(tun.layer).all():
-        raise ValueError(f"Tuning cache does not match the {modality} VISa unit layers.")
+        raise ValueError(f"Tuning cache does not match the {modality} {REGION_LABEL} unit layers.")
     for v in VARIABLES:
         p = tun[f"p_{v}"]
         tun[v] = np.where(p.notna(), p.lt(ALPHA), np.nan)
@@ -218,7 +220,7 @@ def main():
     meso_t_mice = meso_t.session.map(animals).nunique()
     meso_d_mice = meso.session.map(animals).nunique()
     caps = [
-        f"Fraction of BWM VISa units tuned to stimulus side ($p<{ALPHA}$). "
+        f"Fraction of BWM units tuned to stimulus side ($p<{ALPHA}$). "
         f"Purple bands show 95\\,\\% Wilson intervals. BWM unit counts from L2/3 to L6 were {tuning_n}. "
         f"The mesoscope tuning sample included {meso_t.session.nunique()} sessions from {meso_t_mice} mice.",
         "Choice.", "Feedback.",
@@ -232,7 +234,7 @@ def main():
         "Choice ROC-AUC.", "Feedback ROC-AUC.", "Wheel-speed $R^2$.",
     ]
     save_with_caption(fig, OUT_V2 / "si_depth_profile", caps, "v2_depth_profile",
-                      intro=f"Tuning and decoding in Beryl {REGION} by cortical layer. "
+                      intro=f"Tuning and decoding in pooled Beryl {REGION_LABEL} by cortical layer. "
                             "BWM layers use the registered Allen CCF labels and pool L6a with L6b. "
                             "Mesoscope ROIs are assigned to L2/3 for this comparison (green diamonds). "
                             "Vertical whiskers show 95\\,\\% confidence intervals from resampling mice.")

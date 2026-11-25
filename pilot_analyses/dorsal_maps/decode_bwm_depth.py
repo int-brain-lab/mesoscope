@@ -1,7 +1,7 @@
-"""Refit fixed-size VISa decoders by cortical layer for Figure 5.
+"""Refit fixed-size VISa and VISam decoders by cortical layer for Figure 5.
 
 Run python decode_bwm_depth.py to cache one draw-averaged row per eligible BWM
-session and layer. Add --meso-reference to fit pooled mesoscope VISa scores.
+session and layer. Add --meso-reference to fit the pooled mesoscope scores.
 """
 import argparse
 import zlib
@@ -16,17 +16,22 @@ from sessions import load_session, session_files
 
 N_UNITS = 10
 N_DRAWS = 5
-REGION = "VISa"
+REGIONS = ("VISa", "VISam")
+REGION_LABEL = " and ".join(REGIONS)
+REGION_STEM = "_".join(REGIONS)
 LAYERS = ("L2/3", "L4", "L5", "L6")
-SCORES = OUT_V2 / "report_v7_bwm_VISa_layer_scores.pqt"
-MESO_SCORES = OUT_V2 / "report_v7_meso_VISa_layer_reference.pqt"
-ALLEN_LAYERS = {f"{REGION}{suffix}": layer for suffix, layer in
-                zip(("2/3", "4", "5", "6a", "6b"), (*LAYERS, "L6"))}
+SCORES = OUT_V2 / f"report_v7_bwm_{REGION_STEM}_layer_scores.pqt"
+MESO_SCORES = OUT_V2 / f"report_v7_meso_{REGION_STEM}_layer_reference.pqt"
+ALLEN_LAYERS = {
+    f"{region}{suffix}": layer
+    for region in REGIONS
+    for suffix, layer in zip(("2/3", "4", "5", "6a", "6b"), (*LAYERS, "L6"))
+}
 
 
 def unit_layers(atlas_ids, regions, modality):
-    """Return measured BWM layers and the assumed mesoscope layer in VISa."""
-    in_region = regions.id2acronym(atlas_ids, mapping="Beryl") == REGION
+    """Return measured BWM layers and the assumed mesoscope layer in the selected regions."""
+    in_region = np.isin(regions.id2acronym(atlas_ids, mapping="Beryl"), REGIONS)
     if modality == "meso":
         return pd.Series(np.where(in_region, LAYERS[0], None))
     allen = pd.Series(regions.id2acronym(atlas_ids, mapping="Allen"))
@@ -34,7 +39,7 @@ def unit_layers(atlas_ids, regions, modality):
 
 
 def layer_units(modality):
-    """Find VISa units and their layer labels in sessions with enough usable trials."""
+    """Find units and their layer labels in sessions with enough usable trials."""
     groups = session_files(modality)
     excluded = excluded_sessions() if modality == "meso" else set()
     regions = BrainRegions()
@@ -59,7 +64,7 @@ def layer_units(modality):
         if n_trials.pop() >= MIN_TRIALS:
             rows.extend(session_units)
     if not rows:
-        raise ValueError(f"No eligible {modality} features in {REGION}.")
+        raise ValueError(f"No eligible {modality} features in {REGION_LABEL}.")
     return groups, pd.concat(rows, ignore_index=True)
 
 
@@ -91,7 +96,7 @@ def regional_scores(modality):
         if i % 10 == 0 or i == len(eligible):
             print(f"{i}/{len(eligible)} {modality} sessions", flush=True)
     if not scores:
-        raise ValueError(f"No eligible {modality} pools in {REGION} have {N_UNITS} units.")
+        raise ValueError(f"No eligible {modality} pools in {REGION_LABEL} have {N_UNITS} units.")
     return pd.concat(scores, ignore_index=True)
 
 
