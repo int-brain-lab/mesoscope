@@ -59,7 +59,7 @@ def figure_tex(key, stem):
 def build(decoding_only=False, figures=None):
     fig_dir = REPORT / "figures"
     fig_dir.mkdir(parents=True, exist_ok=True)
-    keys = ("decoding_n20", "decoding_all") if decoding_only else (figures or FIGURES)
+    keys = ("decoding_n20", "decoding_all", "decoding_top10") if decoding_only else (figures or FIGURES)
     for key in keys:
         stem = FIGURES[key]
         shutil.copy(stem.parent / f"{stem.name}_panels.pdf", fig_dir / f"{key}.pdf")
@@ -71,7 +71,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--decoding-only", action="store_true",
-                       help="Replace Figures 1 and 2 and reuse the other report panels.")
+                       help="Replace Figures 1 through 3 and reuse the other report panels.")
     group.add_argument("--figure", action="append", choices=FIGURES,
                        help="Replace a named figure. Repeat to select multiple figures.")
     args = parser.parse_args()

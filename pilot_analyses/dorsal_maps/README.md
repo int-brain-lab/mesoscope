@@ -115,7 +115,10 @@ for wheel $R^2$) to the 99th percentile of its plotted scores. Values below
 chance use the lowest colour. Binary scores are ROC-AUC calculated from
 pooled held-out logistic decision scores. The existing inner tuning criterion
 remains balanced accuracy. Use `--cmap NAME` to change the Matplotlib colormap
-(default `cool`). Both figures follow the same trial and neuron thresholds.
+(default `cool`). The random-20, all-neuron and best-ten maps use the same mesoscope
+session--hexagon pairs and BWM insertions for each target, based on valid
+scores in all three analyses. Rendering any map requires the score caches
+for all three analyses.
 The headline table and supplementary bin-wise comparisons use 1 mm bins
 with the same superficial BWM selection.
 
@@ -125,6 +128,7 @@ Once the feature files and mesoscope trial coverage masks are present, run:
 python decode_v2.py meso --hex 0.25  # centre-to-vertex radius in mm
 python make_bwm_depth.py  # writes bwm_pial640
 python decode_probe.py bwm bwm_pial640
+python decode_top10.py
 python maps_v2.py --report-decoding --cmap plasma
 python build_report_v7.py --decoding-only
 ```
@@ -133,15 +137,27 @@ The report uses `iblatlas.streamlines.utils.xyz_to_depth` for local pial
 depth throughout. Use `python make_bwm_depth.py --vertical` to reproduce the
 historical `bwm_d640` cache. Generate individual bin-wise supplement plots
 with `python maps_v2.py --supplement counts` (or `tuning` or `summary`).
-For the best-ten map, run `python decode_top10.py`, then
-`python maps_v2.py --top10 --cmap plasma` and
-`python build_report_v7.py --figure decoding_top10`. It ranks units
-inside each outer training fold and shares the candidate pools of the
-other two report maps.
+The best-ten decoder ranks units inside each outer training fold.
+If any score cache changes, regenerate all three decoding figures so
+they continue to use a matched cohort.
 
 To regenerate the supplementary depth and insertion histograms from cached
 features, run `python depth_coverage.py` followed by
 `python build_report_v7.py --figure depth_coverage`.
+
+## Figure 4 regional analysis
+
+Run `python region_variance.py` followed by
+`python build_report_v7.py --figure region_variance`. The regional and
+trial-shuffle tables from `decode_region.py` are checked against the matching
+cohort from Figures 1--3. The stats CSV includes the blocked region permutation
+test, Holm corrections and the five-target omnibus result. The build refits
+the variance-component bootstrap from the matched scores.
+
+The published BWM reference uses the stage-2 tables when available. The
+fallback is `reference/bwm_published_region_row.pdf`, a vector crop of the
+published row in commit `3475913`, with the original balanced accuracy and
+wheel velocity. The fallback uses `pikepdf` to place the reference in panel a.
 
 ## Choices and caveats
 

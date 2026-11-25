@@ -17,8 +17,9 @@ regressed out (all-neuron scores grow with the number of neurons):
 - mixed model: score ~ log N + (1|region) + (1|animal) + (1|session), crossed random
   effects, REML (statsmodels); variance fractions and likelihood-ratio p-values
   (chi-square 0/1 mixture) per component;
-- permutation (model-free): adjusted eta^2 of region within sessions (scores centred per
-  session, region labels permuted within session) and of session within regions (scores
+- region test: partial R^2 for adding region after session and log neuron count, with
+  reduced-model residuals permuted within sessions and Holm adjustment across targets;
+- session permutation: adjusted eta^2 of session within regions (scores
   centred per region, session labels permuted within region; includes animal differences), and
   of session within mouse (scores centred per region x mouse, session labels permuted within
   region x mouse; no animal differences);
@@ -26,7 +27,7 @@ regressed out (all-neuron scores grow with the number of neurons):
 - animal bootstrap: N_BOOT resamples of animals with replacement (a repeated animal and its
   sessions count as new ones), each refitted with reml.py; 95% intervals of the region and
   session + animal shares, and the fraction of resamples with session + animal > region.
-  Cached in output/v2/region_variance_boot.csv (delete it to recompute);
+  Outputs are written to output/v2/region_variance_boot_auc.csv;
 - per mouse (panel d): score ~ log N + (1|region) + (1|session) within each mouse with
   >= MIN_MOUSE_SESSIONS sessions (reml.py); session share minus region share;
 - region x mouse: the pooled model with an extra (1|region:animal) term (reml.py), columns
@@ -49,12 +50,13 @@ from scipy import stats
 
 from controls2 import SUBJ
 from decode_v2 import OUT_V2
-from maps_v2 import CHANCE, COL, TARGETS, TITLE
+from maps_v2 import CHANCE, COL, TARGETS, TITLE, load_matched_decoding
 from plotstyle import NATURE_DOUBLE_COL_IN, allen_color, save_with_caption, style_axes
 
 REGIONS = ("MOp", "MOs", "SSp-bfd", "SSp-ll", "SSp-m", "SSp-ul", "SSp-tr",
            "VISam", "VISl", "VISp", "VISpm", "RSPagl", "RSPd", "VISa", "VISrl")
 N_PERM = 5000
+N_REGION_PERM = 9999
 N_BOOT = 200
 MIN_MOUSE_SESSIONS = 4
 HEAT_TARGETS = ("stim", "feedback")                      # panel e
@@ -62,6 +64,7 @@ MODS = ("meso", "bwm")
 ROWS = ("meso", "bwm", "bwm_paper")
 ROW_NAME = {"meso": "Mesoscope", "bwm": "BWM per probe", "bwm_paper": "BWM per region\n(decoding paper)"}
 BWM_PAPER = Path.home() / "dmn" / "bwm_decoding"      # <variable>_stage2.pqt
+PAPER_REFERENCE = Path(__file__).resolve().parent / "reference" / "bwm_published_region_row.pdf"
 PAPER_VAR = {"stim": "stimside", "choice": "choice", "feedback": "feedback", "wheel": "wheel-speed",
              "wheel_trial": "wheel-velocity"}
 COMP = ("region", "animal", "session")
@@ -70,25 +73,44 @@ rng = np.random.default_rng(0)
 
 
 def load():
-    m = pd.read_parquet(OUT_V2 / "decoding_meso_region_auc.pqt")
-    b = pd.read_parquet(OUT_V2 / "decoding_bwm_probe_region_auc.pqt")
-    f = OUT_V2 / "decoding_meso_region_shuf_auc.pqt"      # decode_region.py --shuffle
-    if f.exists():
-        m = m.merge(pd.read_parquet(f), on=["session", "region", "target"], how="left")
-    f = OUT_V2 / "decoding_bwm_probe_shuf_auc.pqt"
-    if f.exists():
-        b = b.merge(pd.read_parquet(f), on=["pid", "target"], how="left")
-    d = {"meso": m.assign(unit=m.session), "bwm": b.assign(unit=b.pid)}
-    for k in MODS:
-        d[k] = d[k].dropna(subset=["all", "region"]).assign(animal=lambda x: x.session.map(SUBJ),
-                                                           logN=lambda x: np.log(x.n_neurons))
+    matched, _ = load_matched_decoding()
     shared = list(REGIONS)
-    d["bwm_paper"] = pd.concat(
-        [pd.read_parquet(BWM_PAPER / f"{v}_stage2.pqt").assign(target=t) for t, v in PAPER_VAR.items()]).rename(
-        columns={"eid": "session", "subject": "animal", "score": "all", "n_units": "n_neurons",
-                 "median-null": "null", "p-value": "p"}).dropna(subset=["all", "region"])
-    d["bwm_paper"]["unit"] = d["bwm_paper"].session
-    return {k: d[k][d[k].region.isin(shared)] for k in ROWS}, shared
+    d = {}
+    for modality, stem, shuffle_stem, unit, keys in (
+        ("meso", "meso_region", "meso_region", "session", ["target", "session", "region"]),
+        ("bwm", "bwm_probe_region", "bwm_probe", "pid", ["target", "pid"]),
+    ):
+        scores = pd.read_parquet(OUT_V2 / f"decoding_{stem}_auc.pqt")
+        scores = scores.loc[np.isfinite(scores["all"]) & scores.region.isin(shared)]
+        ids = ["target", "session"] if modality == "meso" else ["target", "session", "pid"]
+        cohort = matched[modality]
+        scores = scores.merge(cohort[ids].drop_duplicates(), on=ids, validate="many_to_one")
+        if modality == "bwm":
+            map_scores = cohort[ids + ["all"]].rename(columns={"all": "map_score"})
+            scores = scores.merge(map_scores, on=ids, validate="one_to_one")
+            np.testing.assert_allclose(scores["all"], scores.map_score, rtol=0, atol=1e-12)
+        shuffled = pd.read_parquet(OUT_V2 / f"decoding_{shuffle_stem}_shuf_auc.pqt")
+        scores = scores.merge(shuffled, on=keys, validate="one_to_one", how="left", indicator=True)
+        if scores.empty or not scores["_merge"].eq("both").all():
+            raise ValueError(f"Missing {modality} region scores or trial-shuffle rows for the matched cohort")
+        scores = scores.drop(columns="_merge").assign(unit=scores[unit], animal=scores.session.map(SUBJ),
+                                                       logN=np.log(scores.n_neurons))
+        if scores.animal.isna().any() or not np.isfinite(scores.logN).all():
+            raise ValueError(f"Missing animal or invalid neuron count in {modality} scores")
+        d[modality] = scores
+
+    files = {t: BWM_PAPER / f"{v}_stage2.pqt" for t, v in PAPER_VAR.items()}
+    if all(path.is_file() for path in files.values()):
+        paper = pd.concat([pd.read_parquet(path).assign(target=t) for t, path in files.items()])
+        paper = paper.rename(columns={"eid": "session", "subject": "animal", "score": "all",
+                                      "n_units": "n_neurons", "median-null": "null", "p-value": "p"})
+        paper = paper.dropna(subset=["all"]).loc[lambda x: x.region.isin(shared)]
+        d["bwm_paper"] = paper.assign(unit=paper.session)
+    else:
+        if not PAPER_REFERENCE.is_file():
+            raise FileNotFoundError(PAPER_REFERENCE)
+        d["bwm_paper"] = d["bwm"].iloc[:0]
+    return d, shared
 
 
 _ORDER = None
@@ -169,6 +191,64 @@ def perm_effect(y, labels, block):
     return (obs - null.mean()) / (1 - null.mean()), (1 + (null >= obs).sum()) / (1 + N_PERM), len(y)
 
 
+def permute_residuals(residual, sessions, rng, n_draws):
+    """Permute each session's residuals independently in every draw."""
+    draws = np.empty((n_draws, len(residual)))
+    for block in sessions:
+        draws[:, block] = rng.permuted(np.broadcast_to(residual[block], (n_draws, len(block))), axis=1)
+    return draws
+
+
+def region_permutation(df, n_perm=N_REGION_PERM, seed=0):
+    """Partial R? for Beryl region after session effects and log neuron count."""
+    df = df.loc[df.groupby("session").session.transform("size") >= 2]
+    df = df.sort_values(["session", "region"]).reset_index(drop=True)
+    result = dict(region_partial_r2=np.nan, p_region=np.nan, n_region=len(df),
+                  region_sessions=df.session.nunique(), region_mice=df.animal.nunique(),
+                  region_labels=df.region.nunique(), region_permutations=n_perm)
+    if result["region_labels"] < 2:
+        return result
+
+    # Within-session demeaning projects out the fixed session intercepts.
+    y = centred(df["all"].to_numpy(), df.session.to_numpy())
+    log_n = centred(df.logN.to_numpy(), df.session.to_numpy())
+    z = pd.get_dummies(df.region, dtype=float)
+    z = (z - z.groupby(df.session).transform("mean")).to_numpy()
+    if np.linalg.norm(log_n) > 1e-12:
+        log_n /= np.linalg.norm(log_n)
+    residual = y - log_n * (log_n @ y)
+    z -= np.outer(log_n, log_n @ z)
+    u, singular, _ = np.linalg.svd(z, full_matrices=False)
+    basis = u[:, singular > np.finfo(float).eps * max(z.shape) * singular.max()]
+    if not basis.shape[1] or np.linalg.norm(residual) <= 1e-12:
+        return result
+
+    def partial_r2(values):
+        return ((values @ basis) ** 2).sum(axis=-1) / (values ** 2).sum(axis=-1)
+
+    observed = partial_r2(residual)
+    blocks = list(df.groupby("session", sort=False).indices.values())
+    generator = np.random.default_rng(seed)
+    exceedances = 0
+    for start in range(0, n_perm, 256):
+        permuted = permute_residuals(residual, blocks, generator, min(256, n_perm - start))
+        # Adding back the reduced-model fit and residualizing the shuffled response
+        # is equivalent to removing the log-N projection from the shuffled residuals.
+        permuted -= np.outer(permuted @ log_n, log_n)
+        exceedances += np.count_nonzero(partial_r2(permuted) >= observed - 1e-12)
+    return {**result, "region_partial_r2": observed, "p_region": (1 + exceedances) / (1 + n_perm)}
+
+
+def adjust_region_pvalues(scores):
+    """Holm per target and Bonferroni min-p for the prespecified five-target family."""
+    from statsmodels.stats.multitest import multipletests
+
+    p = scores.p_region
+    adjusted = multipletests(p.fillna(1).to_numpy(), method="holm")[1]
+    return scores.assign(p_region_holm=np.where(p.notna(), adjusted, np.nan),
+                         p_region_omnibus=min(1, len(TARGETS) * p.min()) if p.notna().any() else np.nan)
+
+
 def boot_shares(df):
     """Animal-level bootstrap of the region and session + animal shares (reml.py)."""
     import reml
@@ -193,8 +273,6 @@ def boot_shares(df):
 
 def bootstrap(d):
     f = OUT_V2 / "region_variance_boot_auc.csv"
-    if f.exists():
-        return pd.read_csv(f)
     rows = []
     for t in TARGETS:
         df = d["meso"][d["meso"].target == t].reset_index(drop=True)
@@ -234,14 +312,14 @@ def analyse(d):
             r.update({f"ra_{a}": b for a, b in ra.items() if a.startswith(("frac", "p_lrt"))})
             y = residualise(df)
             reg, ses = df.region.values, df.session.values
-            r["eta_region"], r["p_region"], r["n_region"] = perm_effect(y, reg, ses)
+            r.update(region_permutation(df))
             multi = pd.Series(ses).map(pd.Series(ses).value_counts()).values > 1   # sessions with >= 2 regions
             r["eta_session"], r["p_session"], r["n_session"] = perm_effect(y[multi], ses[multi], reg[multi])
             reg_mouse = reg + "|" + df.animal.values                     # session within mouse: no animal term
             r["eta_session_mouse"], r["p_session_mouse"], r["n_session_mouse"] = perm_effect(y, ses, reg_mouse)
             rows.append(r)
             print(k, t, {a: round(b, 3) if isinstance(b, float) else b for a, b in r.items()}, flush=True)
-    return pd.DataFrame(rows)
+    return adjust_region_pvalues(pd.DataFrame(rows))
 
 
 def stars(p):
@@ -313,6 +391,9 @@ def figure(d, shared, st, pm):
             ax = fig.add_subplot(gs[r, c], sharey=share.get(grp))
             share.setdefault(grp, ax)
             df = d[k][d[k].target == t]
+            if k == "bwm_paper" and d[k].empty:
+                ax.set_visible(False)
+                continue
             plot_region_scores(ax, df, shared, t, rng)
             ax.set_xticks(xs, shared if r == nr - 1 else [], rotation=90, fontsize=4.5)
             ax.set_xlim(-0.6, len(shared) - 0.4)
@@ -357,20 +438,36 @@ def figure(d, shared, st, pm):
     ax.legend(frameon=False, fontsize=5, loc="upper left", bbox_to_anchor=(1.0, 1.0))
     ax.text(-0.3, 1.12, "c", transform=ax.transAxes, fontsize=8, fontweight="bold")
 
-    # d: permutation, region vs session, adjusted eta^2 (mesoscope)
-    ax = fig.add_subplot(stats_row[0, 2])
-    for eff, mk, dx in (("region", "o", -0.15), ("session", "s", 0), ("session_mouse", "^", 0.15)):
-        v, p = s[f"eta_{eff}"].values, s[f"p_{eff}"].values
-        ax.scatter(x0 + dx, v, marker=mk, s=14, facecolors=np.where(p < 0.05, COL["meso"], "white"),
-                   edgecolors=COL["meso"], lw=0.7, zorder=3,
-                   label={"session": "session\n(incl. animal)", "session_mouse": "session\nwithin mouse"}.get(eff, eff))
-    ax.axhline(0, color="0.5", lw=0.5)
-    ax.set_xticks(x0, [short(t) for t in TARGETS], rotation=30, ha="right", fontsize=5)
-    ax.set_ylim(top=1.1 * np.nanmax(s[["eta_region", "eta_session", "eta_session_mouse"]].values))
-    ax.set_ylabel("adjusted $\\eta^2$")
-    style_axes(ax, categorical_x=True)
-    ax.legend(frameon=False, fontsize=5, loc="upper left", bbox_to_anchor=(1.0, 1.0))
+    # d: region and session permutations use different statistics and axes.
+    tests = stats_row[0, 2:4].subgridspec(1, 2, wspace=0.7)
+    ax = fig.add_subplot(tests[0, 0])
+    region, p = s.region_partial_r2, s.p_region_holm
+    ax.scatter(x0, region, s=14, facecolors=np.where(p < 0.05, COL["meso"], "white"),
+               edgecolors=COL["meso"], lw=0.7)
+    for x, value, adjusted in zip(x0, region, p):
+        if np.isfinite(adjusted):
+            label = f"{adjusted:.1g}" if adjusted >= 0.001 else f"{adjusted:.0e}".replace("e-0", "e-")
+            ax.annotate(label, (x, value), xytext=(0, 4), textcoords="offset points",
+                        fontsize=4, ha="center")
+    ax.set_title("Region (Holm $p$)", fontsize=6)
+    ax.set_ylim(0, max(0.1, 1.24 * region.max()))
+    ax.set_ylabel("partial $R^2$")
     ax.text(-0.3, 1.12, "d", transform=ax.transAxes, fontsize=8, fontweight="bold")
+    session_ax = fig.add_subplot(tests[0, 1])
+    for eff, marker, dx, label in (("session", "s", -0.10, "All mice"),
+                                   ("session_mouse", "^", 0.10, "Within mouse")):
+        v, p = s[f"eta_{eff}"], s[f"p_{eff}"]
+        session_ax.scatter(x0 + dx, v, marker=marker, s=14,
+                           facecolors=np.where(p < 0.05, COL["meso"], "white"),
+                           edgecolors=COL["meso"], lw=0.7, label=label)
+    session_ax.axhline(0, color="0.5", lw=0.5)
+    session_ax.set_ylim(top=1.45 * np.nanmax(s[["eta_session", "eta_session_mouse"]].values))
+    session_ax.set_title("Session", fontsize=6)
+    session_ax.set_ylabel("adjusted $\\eta^2$")
+    session_ax.legend(frameon=False, fontsize=4, loc="upper center")
+    for axis in (ax, session_ax):
+        axis.set_xticks(x0, [short(t) for t in TARGETS], rotation=45, ha="right", fontsize=4.5)
+        style_axes(axis, categorical_x=True)
 
     # e: session minus region share within each mouse (mesoscope)
     ax = fig.add_subplot(stats_row[0, 4])
@@ -384,6 +481,7 @@ def figure(d, shared, st, pm):
     ax.axhline(0, color="0.5", lw=0.5)
     ax.set_xticks(x0, [short(t) for t in TARGETS], rotation=30, ha="right", fontsize=5)
     ax.set_ylabel("session $-$ region share")
+    ax.yaxis.set_label_position("right")
     style_axes(ax, categorical_x=True)
     ax.text(-0.3, 1.12, "e", transform=ax.transAxes, fontsize=8, fontweight="bold")
 
@@ -454,26 +552,68 @@ def caption(d, shared, st, pm):
         "and vertical stripes show region effects.",
         "Mesoscope variance shares from the mixed model; error bars: 95\\% intervals over resampled mice; numbers: "
         "fraction of resamples with session plus animal above region.",
-        "Permutation tests, adjusted $\\eta^2$ (0 = chance): region (circles), session including (squares) and "
-        "excluding (triangles) differences between mice. Filled: $p<0.05$.",
+        "Region test (left): partial $R^2$ after accounting for session and log neuron count, with Holm-adjusted "
+        f"$p$-values. The five-target omnibus permutation $p$-value is {st.p_region_omnibus.iloc[0]:.3g}. "
+        "Session tests (right): adjusted $\\eta^2$, with sessions across all mice (squares) and within each mouse "
+        "(triangles). Filled markers indicate $p<0.05$ using Holm-adjusted $p$ for the region test.",
         f"Session minus region share, fitted per mouse ({pm.animal.nunique()} mice with $\\geq${MIN_MOUSE_SESSIONS} "
         "sessions); bar: median; numbers: mice with a larger session share.",
     ]
     return intro, caps
 
 
+def add_paper_reference(panel):
+    """Place the archived published row into the reserved third row of panel a."""
+    import pikepdf
+
+    with pikepdf.open(PAPER_REFERENCE) as paper, pikepdf.open(panel, allow_overwriting_input=True) as current:
+        page = current.pages[0]
+        # The top two rows have identical subplot dimensions and anchor the reference.
+        rects = [tuple(map(float, i.operands)) for i in pikepdf.parse_content_stream(page)
+                 if str(i.operator) == "re"]
+        axes = [r for r in rects if np.allclose(r[2:], (62.81619, 69.23739), atol=0.001, rtol=0)]
+        left = min(r[0] for r in axes)
+        y_top, y_middle = sorted({r[1] for r in axes if r[0] == left}, reverse=True)
+        # The first axis in the archived crop starts at (52.159, 29.121) points.
+        dx = left - 52.158984375
+        dy = 2 * y_middle - y_top - 29.1213369388
+        box = list(map(float, page.MediaBox))
+        box[0] = min(box[0], dx)
+        box[2] = max(box[2], dx + float(paper.pages[0].MediaBox[2]))
+        page.MediaBox = pikepdf.Array(box)
+        name = pikepdf.Name("/PublishedBwm")
+        page.add_resource(current.copy_foreign(paper.pages[0].as_form_xobject()), pikepdf.Name.XObject, name=name)
+        page.contents_add(current.make_stream(f"q 1 0 0 1 {dx:.6f} {dy:.6f} cm {name} Do Q\\n".encode()))
+        current.save(panel)
+
+
+def render(d, shared, st, pm):
+    import shutil
+    import subprocess
+
+    fig = figure(d, shared, st, pm)
+    intro, caps = caption(d, shared, st, pm)
+    archive = d["bwm_paper"].empty
+    if archive:
+        intro += " The published BWM row is reproduced from the archived v7 vector panel."
+    panel, tex, _ = save_with_caption(fig, OUT_V2 / "region_variance", caps, "region_variance",
+                                      intro=intro, compile_pdf=not archive)
+    if archive:
+        add_paper_reference(panel)
+        if shutil.which("tectonic"):
+            subprocess.run(["tectonic", tex.name], cwd=tex.parent, check=True)
+    plt.close(fig)
+
+
 def main():
     d, shared = load()
-    print("shared regions:", shared)
-    st = analyse(d).merge(bootstrap(d), on="target")
+    st = analyse(d).merge(bootstrap(d), on="target", validate="one_to_one")
     st.to_csv(OUT_V2 / "region_variance_stats.csv", index=False)
     pm = per_mouse(d)
     pm.to_csv(OUT_V2 / "region_variance_per_mouse.csv", index=False)
-    fig = figure(d, shared, st, pm)
-    intro, caps = caption(d, shared, st, pm)
-    save_with_caption(fig, OUT_V2 / "region_variance", caps, "region_variance", intro=intro)
-    plt.close(fig)
-    print(st.round(3).to_string())
+    render(d, shared, st, pm)
+    print(st[["target", "region_partial_r2", "p_region", "p_region_holm", "p_region_omnibus",
+              "region_sessions", "region_mice", "region_labels"]].to_string(index=False), flush=True)
 
 
 if __name__ == "__main__":

@@ -141,19 +141,42 @@ def score_norm(arrays, chance):
     return Normalize(vmin=chance, vmax=hi if hi > chance else chance + 0.01, clip=True)
 
 
-def report_decoding(cmap=REPORT_CMAP, *, top10=False):
-    """Render the requested v7 maps from fine-bin and per-probe scores."""
+def match_decoding_observations(scores, top_scores, location):
+    """Keep the same contributing recording and location for each target."""
+    keys = ["target", "session", location]
+    # A probe needs a location in both score tables to contribute to the maps.
+    coordinates = ["entry_x", "entry_y"] if location == "pid" else []
+    valid_scores = scores.loc[np.isfinite(scores[["n20", "all", *coordinates]]).all(axis=1)]
+    valid_top = top_scores.loc[np.isfinite(top_scores[["top10", *coordinates]]).all(axis=1)]
+    shared = pd.MultiIndex.from_frame(valid_scores[keys]).intersection(pd.MultiIndex.from_frame(valid_top[keys]))
+    return tuple(frame.loc[pd.MultiIndex.from_frame(frame[keys]).isin(shared)]
+                 for frame in (valid_scores, valid_top))
+
+
+def load_matched_decoding():
+    """Return matched all/random and best-ten score tables by modality."""
     from decode_v2 import excluded_sessions
 
+    excluded = excluded_sessions()
+    meso = pd.read_parquet(out_name("meso", REPORT_HEX_SIZE))
+    meso_top = pd.read_parquet(top10_output("meso"))
+    meso, meso_top = match_decoding_observations(
+        meso.loc[~meso.session.isin(excluded)], meso_top.loc[~meso_top.session.isin(excluded)], "hex")
+    probes, probes_top = {}, {}
+    for modality in ROWS[1:]:
+        probes[modality], probes_top[modality] = match_decoding_observations(
+            pd.read_parquet(probe_output(modality)), pd.read_parquet(top10_output(modality)), "pid")
+    return {"meso": meso, **probes}, {"meso": meso_top, **probes_top}
+
+
+def report_decoding(cmap=REPORT_CMAP, *, top10=False):
+    """Render v7 maps from scores matched across all three decoding figures."""
     cmap = plt.get_cmap(cmap)
-    meso_path = top10_output("meso") if top10 else out_name("meso", REPORT_HEX_SIZE)
-    probe_path = top10_output if top10 else probe_output
-    meso = pd.read_parquet(meso_path)
-    meso = meso[~meso.session.isin(excluded_sessions())]
-    probes = {STREAMLINE_MODALITY: pd.read_parquet(probe_path(STREAMLINE_MODALITY)),
-              "bwm": pd.read_parquet(probe_path("bwm"))}
-    for ver in (("top10",) if top10 else ("n20", "all")):
-        decoding(meso, probes, ver, cmap=cmap)
+    scores, top_scores = load_matched_decoding()
+    if not top10:
+        for ver in ("n20", "all"):
+            decoding(scores["meso"], scores, ver, cmap=cmap)
+    decoding(top_scores["meso"], top_scores, "top10", cmap=cmap)
 
 
 def decoding(meso, probes, ver, cmap=REPORT_CMAP):
@@ -163,7 +186,8 @@ def decoding(meso, probes, ver, cmap=REPORT_CMAP):
     n_sessions = d.session.nunique()
     g = d.groupby(["target", "hex"]).agg(v=(ver, "mean"), na=("subject", "nunique"))
     per = {"meso": [(a.index, a.v.values, opacity(a.na.values))
-                    for a in (g.xs(t) for t in TARGETS)]}
+                    for a in (g.loc[g.index.get_level_values("target") == t].droplevel("target")
+                              for t in TARGETS)]}
     n_probes = {}
     for m in ROWS[1:]:
         d = probes[m].dropna(subset=[ver, "entry_x", "entry_y"]).sort_values(ver)
@@ -194,9 +218,10 @@ def decoding(meso, probes, ver, cmap=REPORT_CMAP):
             "respectively. Each "
             "semi-transparent dot is at the probe's Alyx trajectory entry point. Hemispheres are folded onto the "
             f"right. Sessions require at least {MIN_TRIALS} trials and bins or probes need at least {N_PICK} "
-            f"neurons. Decoding scores are available for {n_sessions} mesoscope sessions, "
-            f"{n_probes[STREAMLINE_MODALITY]} superficial BWM insertions and {n_probes['bwm']} "
-            "all-depth BWM insertions. Each variable has a colour scale shared across rows, "
+            f"neurons. For each target, all three decoding figures use the same mesoscope session--hexagon "
+            "pairs and BWM insertions with valid scores in all three analyses. Across targets, the maps show "
+            f"{n_sessions} mesoscope sessions, {n_probes[STREAMLINE_MODALITY]} superficial BWM insertions and "
+            f"{n_probes['bwm']} all-depth BWM insertions. Each variable has a colour scale shared across rows, "
             "from chance to the 99th percentile of plotted scores. Below-chance scores "
             "use the lowest colour.")
     if ver == "top10":
@@ -320,7 +345,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument("--report-decoding", action="store_true",
-                           help="Render the random-20 and all-neuron v7 maps.")
+                           help="Render the random-20, all-neuron and best-ten v7 maps.")
     selection.add_argument("--top10", action="store_true",
                            help="Render the best-10 v7 map.")
     selection.add_argument("--supplement", choices=("counts", "tuning", "summary"),

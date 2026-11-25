@@ -141,7 +141,7 @@ def panel_label(ax, letter, x=-0.12, y=1.05, fontsize=8):
 
 
 def save_with_caption(fig, out_stem: Path, panel_captions: list[str],
-                       label: str, intro: str = ''):
+                       label: str, intro: str = '', *, compile_pdf=True):
     """
     Produce the final deliverable for one figure:
       - `<out_stem>_panels.pdf`: the raw matplotlib panels (no caption)
@@ -192,6 +192,8 @@ def save_with_caption(fig, out_stem: Path, panel_captions: list[str],
     )
     tex_path.write_text(tex)
 
+    if not compile_pdf:
+        return panels_pdf, tex_path, None
     if shutil.which('tectonic') is None:
         print('[plotstyle] tectonic not on PATH; wrote .tex but did not '
               'compile the captioned PDF.')
