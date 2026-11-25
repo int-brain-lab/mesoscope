@@ -101,7 +101,8 @@ python make_bwm_depth.py                  # FEATURE_ROOT/bwm_pial640/<pid>.npz
 python imaging_coverage.py                # trials covered by imaging, per meso session
 python decode_v2.py meso bwm_pial640 bwm     # output/v2/decoding_<modality>_auc.pqt
 python maps_v2.py                         # v2_counts, v2_decoding_n20/_all, v2_tuning, v2_summary
-python depth_profile.py                   # si_depth_profile: tuning and wheel correlates vs depth
+python decode_bwm_depth.py                # refit BWM decoders with 10 units per relative-depth bin
+python depth_profile.py                   # si_depth_profile: tuning and decoding vs relative depth
 ```
 
 ## v7 decoding figures
@@ -144,6 +145,11 @@ they continue to use a matched cohort.
 To regenerate the supplementary depth and insertion histograms from cached
 features, run `python depth_coverage.py` followed by
 `python build_report_v7.py --figure depth_coverage`.
+
+For Figure 5, relative pial depth uses `xyz_to_depth(per=True)` in five equal
+bins. Run `python decode_bwm_depth.py` to refit BWM decoders from cached
+features, then `python depth_profile.py` and
+`python build_report_v7.py --figure depth`.
 
 ## Figure 4 regional analysis
 

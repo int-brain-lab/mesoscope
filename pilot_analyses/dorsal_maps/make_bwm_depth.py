@@ -30,6 +30,13 @@ def streamline_depth_um(xyz_mm):
     return xyz_to_depth(np.asarray(xyz_mm, dtype=float) / 1e3, per=False, res_um=25)
 
 
+def streamline_depth_percent(xyz_mm):
+    """Depth from the pia as 0–100% of local Allen CCF streamline length."""
+    from iblatlas.streamlines.utils import xyz_to_depth
+
+    return 100 * xyz_to_depth(np.asarray(xyz_mm, dtype=float) / 1e3, per=True, res_um=25)
+
+
 def main(src="bwm", dst=None, *, streamlines=True):
     if dst is None:
         dst = STREAMLINE_MODALITY if streamlines else f"bwm_d{MAX_DEPTH_UM}"

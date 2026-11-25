@@ -20,8 +20,9 @@ COUNT_BIN = 5
 COUNT_OVERFLOW = 100
 
 
-def load_depths():
-    meso_xyz, bwm_xyz, trials = [], [], []
+def load_registered_meso_xyz():
+    """Return the per-session ROI positions with measured histological depths."""
+    meso_xyz = []
     excluded = excluded_sessions()
     for path in sorted((FEATURE_ROOT / "meso").glob("*.npz")):
         if path.stem in excluded:
@@ -30,6 +31,12 @@ def load_depths():
             # Projected ROI positions carry no measured depth.
             if str(z["xyz_source"]) == "mlapdv":
                 meso_xyz.append(z["xyz"])
+    return meso_xyz
+
+
+def load_depths():
+    meso_xyz = load_registered_meso_xyz()
+    bwm_xyz, trials = [], []
     for path in sorted((FEATURE_ROOT / "bwm").glob("*.npz")):
         with np.load(path) as z:
             bwm_xyz.append(z["xyz"])
