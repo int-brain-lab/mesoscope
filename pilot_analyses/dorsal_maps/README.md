@@ -102,6 +102,7 @@ python imaging_coverage.py                # trials covered by imaging, per meso 
 python decode_v2.py meso bwm_pial640 bwm     # output/v2/decoding_<modality>_auc.pqt
 python maps_v2.py                         # v2_counts, v2_decoding_n20/_all, v2_tuning, v2_summary
 python decode_bwm_depth.py                # refit BWM decoders with 10 units per relative-depth bin
+python decode_bwm_depth.py --meso-reference  # refit 10-ROI mesoscope decoders across each session
 python depth_profile.py                   # si_depth_profile: tuning and decoding vs relative depth
 ```
 
@@ -148,7 +149,8 @@ features, run `python depth_coverage.py` followed by
 
 For Figure 5, relative pial depth uses `xyz_to_depth(per=True)` in five equal
 bins. Run `python decode_bwm_depth.py` to refit BWM decoders from cached
-features, then `python depth_profile.py` and
+features and `python decode_bwm_depth.py --meso-reference` for the mesoscope
+reference lines. Then run `python depth_profile.py` and
 `python build_report_v7.py --figure depth`.
 
 ## Figure 4 regional analysis

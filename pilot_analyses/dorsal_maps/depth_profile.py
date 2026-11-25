@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Plot single-unit tuning and fixed-size BWM decoding by relative pial depth.
+"""Plot tuning and fixed-size decoding with mesoscope reference lines.
 
-First run decode_bwm_depth.py, then run python depth_profile.py to regenerate
-output/v2/si_depth_profile.pdf from the refitted decoder scores and tuning cache.
+Run decode_bwm_depth.py with and without --meso-reference to generate the
+decoder caches, then run python depth_profile.py to regenerate Figure 5.
 """
 import matplotlib.pyplot as plt
 import numpy as np
@@ -10,7 +10,7 @@ import pandas as pd
 from matplotlib.ticker import MaxNLocator
 
 from common import ALPHA, OUT, VARIABLES
-from decode_bwm_depth import DEPTH_EDGES, N_DRAWS, N_UNITS, SCORES, depth_bins
+from decode_bwm_depth import DEPTH_EDGES, MESO_SCORES, N_DRAWS, N_UNITS, SCORES, depth_bins
 from depth_coverage import load_registered_meso_xyz
 from decode_v2 import MIN_TRIALS, OUT_V2, TARGETS
 from make_bwm_depth import streamline_depth_percent
@@ -18,8 +18,9 @@ from plotstyle import NATURE_DOUBLE_COL_IN, panel_label, save_with_caption, styl
 from sessions import session_files
 
 CENTRES = (DEPTH_EDGES[:-1] + DEPTH_EDGES[1:]) / 2
+PANEL_TARGETS = VARIABLES + ("wheel",)
 TITLE = {"stim": "Stimulus side", "choice": "Choice", "feedback": "Feedback",
-         "wheel": "Wheel speed", "wheel_trial": "Trial-specific speed"}
+         "wheel": "Wheel speed"}
 WHEEL_CACHE = OUT_V2 / "report_v7_relative_depth_wheel.pqt"
 
 
@@ -79,7 +80,7 @@ def plot_tuning(axes, wh):
     ref = {v: np.mean(meso_t[f"p_{v}"].dropna() < ALPHA) for v in VARIABLES}
     ref["wheel"] = wh[wh.modality == "meso"].wheel.mean()
     stats = []
-    for ax, v in zip(axes, VARIABLES + ("wheel",)):
+    for ax, v in zip(axes, PANEL_TARGETS):
         if v == "wheel":
             b = wh[wh.modality == "bwm"]
             sig, bins = b.wheel.values, depth_bins(b.depth.values)
@@ -108,7 +109,9 @@ def plot_tuning(axes, wh):
     return meso_lo, meso_hi
 
 
-def plot_decoding(axes, scores):
+def plot_decoding(axes, scores, meso):
+    ref = meso[list(TARGETS)].mean()
+    ref_counts = meso[list(TARGETS)].count()
     grouped = scores.groupby("bin")[list(TARGETS)]
     bins = np.arange(len(CENTRES))
     means = grouped.mean().reindex(bins)
@@ -119,29 +122,29 @@ def plot_decoding(axes, scores):
             "target": v, "depth_lo_pct": DEPTH_EDGES[:-1], "depth_hi_pct": DEPTH_EDGES[1:],
             "n_sessions": counts[v], "n_units": N_UNITS, "n_draws": N_DRAWS,
             "mean_score": means[v], "sem": sem[v],
+            "meso_mean_score": ref[v], "meso_n_sessions": ref_counts[v],
         })
         for v in TARGETS
     ], ignore_index=True)
     summary.to_csv(OUT_V2 / "si_depth_decoding.csv", index=False, float_format="%.6f")
-    for ax, v in zip(axes, TARGETS):
-        chance = 0 if v.startswith("wheel") else 0.5
+    for ax, v in zip(axes, PANEL_TARGETS):
+        chance = 0 if v == "wheel" else 0.5
         ax.axhline(chance, color="0.5", lw=0.6, ls="--")
         ax.fill_between(CENTRES, means[v] - sem[v], means[v] + sem[v],
                         color="tab:purple", alpha=0.25, lw=0)
         ax.plot(CENTRES, means[v], "o-", color="tab:purple", ms=3, lw=0.8)
-    for ax_group, variables, chance in ((axes[:3], TARGETS[:3], 0.5),
-                                       (axes[3:4], ("wheel",), 0),
-                                       (axes[4:], ("wheel_trial",), 0)):
+        ax.axhline(ref[v], color="tab:green", lw=1.0)
+    for ax_group, variables, chance in ((axes[:3], VARIABLES, 0.5), (axes[3:], ("wheel",), 0)):
         values = means[list(variables)]
         error = sem[list(variables)].fillna(0)
-        low = min(chance, (values - error).min().min())
-        high = (values + error).max().max()
+        low = min(chance, (values - error).min().min(), ref[list(variables)].min())
+        high = max((values + error).max().max(), ref[list(variables)].max())
         for ax in ax_group:
             ax.set_ylim(low, high + 0.1 * (high - low))
             ax.yaxis.set_major_locator(MaxNLocator(nbins=3, steps=[1, 2, 2.5, 5, 10]))
             if low == chance:
                 ax.spines["bottom"].set_visible(False)
-    return counts
+    return counts[list(PANEL_TARGETS)], ref_counts[list(PANEL_TARGETS)]
 
 
 def format_row(axes, variables, letters):
@@ -155,8 +158,10 @@ def format_row(axes, variables, letters):
 
 def main():
     scores = pd.read_parquet(SCORES)
-    if set(scores.n_units) != {N_UNITS} or set(scores.n_draws) != {N_DRAWS}:
-        raise ValueError("Decoder settings changed. Run python decode_bwm_depth.py.")
+    meso = pd.read_parquet(MESO_SCORES)
+    for frame, args in ((scores, ""), (meso, " --meso-reference")):
+        if set(frame.n_units) != {N_UNITS} or set(frame.n_draws) != {N_DRAWS}:
+            raise ValueError(f"Decoder settings changed. Run python decode_bwm_depth.py{args}.")
     if WHEEL_CACHE.exists():
         wh = pd.read_parquet(WHEEL_CACHE)
     else:
@@ -164,25 +169,30 @@ def main():
         wh.to_parquet(WHEEL_CACHE, index=False)
 
     fig = plt.figure(figsize=(NATURE_DOUBLE_COL_IN, 3.9), layout="constrained")
-    top, bottom = fig.subfigures(2, 1, hspace=0.10)
-    a = top.subplots(1, 4)
-    b = bottom.subplots(1, 5)
-    format_row(a, VARIABLES + ("wheel",), "abcd")
-    format_row(b, TARGETS, "efghi")
+    grid = fig.add_gridspec(4, 4, height_ratios=(0.13, 1, 0.13, 1))
+    for row, title in ((0, "Single-unit tuning"), (2, f"Decoding with {N_UNITS} units")):
+        heading = fig.add_subplot(grid[row, :])
+        heading.set_axis_off()
+        heading.text(0.5, 0.5, title, ha="center", va="center", fontsize=8)
+    a = [fig.add_subplot(grid[1, col]) for col in range(4)]
+    b = [fig.add_subplot(grid[3, col], sharex=a[col]) for col in range(4)]
+    format_row(a, PANEL_TARGETS, "abcd")
+    format_row(b, PANEL_TARGETS, "efgh")
     meso_lo, meso_hi = plot_tuning(a, wh)
-    counts = plot_decoding(b, scores)
-    top.suptitle("Single-unit tuning", fontsize=8)
-    bottom.suptitle(f"BWM decoding with {N_UNITS} units", fontsize=8)
+    counts, meso_counts = plot_decoding(b, scores, meso)
     a[0].set_ylabel("Fraction of units")
     b[0].set_ylabel("ROC-AUC")
     b[3].set_ylabel("$R^2$")
-    bottom.supxlabel("Depth below pia (% of local cortical thickness)", fontsize=7)
+    fig.supxlabel("Depth below pia (% of local cortical thickness)", fontsize=7)
 
     if not counts.eq(counts.iloc[:, 0], axis=0).all().all():
         support = " ".join(f"{TITLE[v]} included " + ", ".join(map(str, counts[v]))
-                           + " sessions from shallowest to deepest." for v in TARGETS)
+                           + " sessions from shallowest to deepest." for v in PANEL_TARGETS)
     else:
-        support = "Session counts from shallowest to deepest were " + ", ".join(map(str, counts.iloc[:, 0])) + "."
+        support = "BWM session counts from shallowest to deepest were " + ", ".join(map(str, counts.iloc[:, 0])) + "."
+    meso_support = (f" ({meso_counts.iloc[0]} sessions)" if meso_counts.nunique() == 1 else
+                    " (" + ", ".join(map(str, meso_counts.iloc[:-1])) + f", and {meso_counts.iloc[-1]}"
+                    " sessions for panels e--h, respectively)")
     caps = [
         f"Fraction of BWM isocortex units tuned to stimulus side ($p<{ALPHA}$). "
         "Purple bands show 95\\,\\% Wilson intervals for bins with at least 30 units. "
@@ -194,9 +204,12 @@ def main():
         f"we refit the decoders on {N_DRAWS} random draws of {N_UNITS} units without replacement within "
         "each draw, using the same cross-validation folds across depths within a session for each "
         "target. We averaged draws within session, then averaged sessions with equal weight. "
-        f"Shading shows the standard error across sessions. {support} The session cohort varies by bin.",
+        f"Purple shading shows the standard error across BWM sessions. {support} "
+        "The BWM session cohort varies by bin. Green lines show the mean for mesoscope decoders, "
+        f"fit with the same number of units and draws using all isocortex ROIs in each session as "
+        f"the sampling pool{meso_support}. Dashed lines show chance.",
         "Choice ROC-AUC.", "Feedback ROC-AUC.",
-        "Wheel-speed $R^2$.", "Trial-specific wheel-speed $R^2$. Dashed lines show chance.",
+        "Wheel-speed $R^2$.",
     ]
     save_with_caption(fig, OUT_V2 / "si_depth_profile", caps, "v2_depth_profile",
                       intro="BWM tuning and decoding across five equal bins of relative pial depth. "

@@ -1,14 +1,15 @@
-"""Refit BWM decoders for fixed-size populations in five relative depth bins.
+"""Refit fixed-size decoders for Figure 5.
 
 Run python decode_bwm_depth.py to cache one draw-averaged row per eligible bin
-and session. depth_profile.py uses those scores to plot Figure 5.
+and BWM session. Add --meso-reference to fit the depth-pooled mesoscope scores.
 """
+import argparse
 import zlib
 
 import numpy as np
 import pandas as pd
 
-from decode_v2 import MIN_TRIALS, OUT_V2, TARGETS, decode_sets
+from decode_v2 import MIN_TRIALS, OUT_V2, TARGETS, apply_coverage, decode_sets, excluded_sessions
 from make_bwm_depth import streamline_depth_percent
 from sessions import load_session, session_files
 
@@ -17,6 +18,7 @@ DEPTH_EDGES = np.linspace(0, 100, 6)
 N_UNITS = 10
 N_DRAWS = 5
 SCORES = OUT_V2 / "report_v7_bwm_depth_scores.pqt"
+MESO_SCORES = OUT_V2 / "report_v7_meso_depth_reference.pqt"
 
 
 def depth_bins(depth_percent):
@@ -67,7 +69,7 @@ def fit_session(sid, session, bins):
     })
 
 
-def main():
+def bwm_scores():
     groups = session_files("bwm")
     eligible = list(eligible_bins(groups))
     if not eligible:
@@ -77,11 +79,33 @@ def main():
         scores.append(fit_session(sid, load_session(groups[sid]), bins))
         if i % 10 == 0 or i == len(eligible):
             print(f"{i}/{len(eligible)} BWM sessions", flush=True)
-    OUT_V2.mkdir(parents=True, exist_ok=True)
-    tmp = SCORES.with_suffix(".tmp.pqt")
-    pd.concat(scores, ignore_index=True).to_parquet(tmp, index=False)
-    tmp.replace(SCORES)
+    return pd.concat(scores, ignore_index=True)
+
+
+def meso_scores():
+    excluded = excluded_sessions()
+    groups = {sid: files for sid, files in session_files("meso").items() if sid not in excluded}
+    scores = []
+    for i, (sid, files) in enumerate(groups.items(), start=1):
+        session = apply_coverage(sid, load_session(files), "meso")
+        # The feature cache already contains only isocortex ROIs.
+        units = np.arange(len(session["xyz"]))
+        if len(session["choice"]) >= MIN_TRIALS and len(units) >= N_UNITS:
+            scores.append(fit_session(sid, session, {0: units}).drop(columns="bin"))
+        if i % 10 == 0 or i == len(groups):
+            print(f"{i}/{len(groups)} mesoscope sessions", flush=True)
+    if not scores:
+        raise ValueError(f"No eligible mesoscope sessions with {N_UNITS} units.")
+    return pd.concat(scores, ignore_index=True)
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--meso-reference", action="store_true",
+                        help="Fit the mesoscope reference using whole-session ROI pools.")
+    args = parser.parse_args()
+    scores, path = (meso_scores(), MESO_SCORES) if args.meso_reference else (bwm_scores(), SCORES)
+    OUT_V2.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp.pqt")
+    scores.to_parquet(tmp, index=False)
+    tmp.replace(path)
